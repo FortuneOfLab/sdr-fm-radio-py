@@ -598,6 +598,7 @@ class AudioOutput:
         )
         self.recording = False
         self.record_wave = None
+        self.record_lock = threading.Lock()
 
     def play(self, left, right):
         """
@@ -623,32 +624,34 @@ class AudioOutput:
             filename (str): Filename to save the WAV file.
             channels (int): Number of channels.
         """
-        if self.recording:
-            print("Already recording.")
-            return
-        try:
-            wf = wave.open(filename, 'wb')
-            wf.setnchannels(channels)
-            wf.setsampwidth(2)  # 16-bit PCM
-            wf.setframerate(int(self.output_rate))
-            self.record_wave = wf
-            self.recording = True
-            print(f"Recording started: {filename}")
-        except Exception as e:
-            print("Recording start failed:", e)
+        with self.record_lock:
+            if self.recording:
+                print("Already recording.")
+                return
+            try:
+                wf = wave.open(filename, 'wb')
+                wf.setnchannels(channels)
+                wf.setsampwidth(2)  # 16-bit PCM
+                wf.setframerate(int(self.output_rate))
+                self.record_wave = wf
+                self.recording = True
+                print(f"Recording started: {filename}")
+            except Exception as e:
+                print("Recording start failed:", e)
 
     def stop_recording(self):
         """Stop recording and close the file."""
-        if self.recording and self.record_wave is not None:
-            try:
-                self.record_wave.close()
-            except Exception:
-                pass
-            self.record_wave = None
-            self.recording = False
-            print("Recording stopped.")
-        else:
-            print("Not currently recording.")
+        with self.record_lock:
+            if self.recording and self.record_wave is not None:
+                try:
+                    self.record_wave.close()
+                except Exception:
+                    pass
+                self.record_wave = None
+                self.recording = False
+                print("Recording stopped.")
+            else:
+                print("Not currently recording.")
 
     def record(self, stereo_audio):
         """
@@ -657,9 +660,10 @@ class AudioOutput:
         Args:
             stereo_audio (ndarray): Stereo audio data.
         """
-        if self.recording and self.record_wave is not None:
-            int16_audio = np.int16(stereo_audio * 32767)
-            self.record_wave.writeframes(int16_audio.tobytes())
+        with self.record_lock:
+            if self.recording and self.record_wave is not None:
+                int16_audio = np.int16(stereo_audio * 32767)
+                self.record_wave.writeframes(int16_audio.tobytes())
 
     def cleanup(self):
         """Stop audio stream and terminate PyAudio instance."""
