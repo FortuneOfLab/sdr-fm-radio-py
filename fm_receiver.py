@@ -721,7 +721,7 @@ class CommandLineInterface(threading.Thread):
             print("  'stereo on/off' or 'mono' -> toggle stereo demodulation")
             print("  'record start' -> start recording with auto-generated filename")
             print("  'record stop' -> stop recording")
-            print("  'agc on' -> enable automatic gain control")
+            print("  'agc on' -> enable AGC")
             print("  'agc off' -> disable AGC (manual mode)")
             print("  'gain <value>' -> set manual gain")
             print("  <station_num> or <freq_MHz> -> tune")
