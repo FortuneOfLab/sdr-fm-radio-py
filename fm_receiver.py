@@ -470,7 +470,7 @@ class FMDemodulatorLight:
     Uses phase differentiation for FM demodulation, resampling,
     de-emphasis, and stereo/mono separation.
     """
-    def __init__(self, iq_sample_rate=1.024e6, composite_rate=192000,
+    def __init__(self, iq_sample_rate=0.25e6, composite_rate=192000,
                  final_audio_rate=48000, stereo=True):
         self.iq_sample_rate = iq_sample_rate
         self.composite_rate = composite_rate
@@ -515,7 +515,7 @@ class FMDemodulatorLight:
             phase = np.unwrap(np.concatenate(([self.last_phase], current_phase)))[1:]
         fm_demod = np.diff(phase, prepend=phase[0])
         self.last_phase = phase[-1]
-        composite = signal.resample_poly(fm_demod, up=self.up, down=self.down)
+        composite = signal.resample_poly(fm_demod, up=self.up, down=self.down) * 0.35
         return composite
 
     def demodulate(self, composite):
@@ -847,16 +847,18 @@ class FMReceiverController:
             "JOLF":         93.0e6,
         }
         self.stations_list = sorted(self.stations.items(), key=lambda x: x[1])
-        # Initialize SDR receiver
-        self.sdr_receiver = SDRReceiver(sample_rate=1.024e6, center_freq=80e6)
         # Select demodulator version based on 'light' parameter
         if self.light:
+            # Initialize SDR receiver
+            self.sdr_receiver = SDRReceiver(sample_rate=0.25e6, center_freq=80e6)
             self.fm_demodulator = FMDemodulatorLight(
                 iq_sample_rate=self.sdr_receiver.sample_rate,
                 final_audio_rate=48000,
                 stereo=False
             )
         else:
+            # Initialize SDR receiver
+            self.sdr_receiver = SDRReceiver(sample_rate=1.024e6, center_freq=80e6)
             self.fm_demodulator = FMDemodulator(
                 iq_sample_rate=self.sdr_receiver.sample_rate,
                 final_audio_rate=48000,
