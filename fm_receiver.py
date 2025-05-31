@@ -587,34 +587,61 @@ class AudioOutput:
 
     Uses PyAudio for audio output and recording.
     """
-    def __init__(self, output_rate=48000):
+    def __init__(self, output_rate=48000, frames_per_buffer=1024):
         self.output_rate = output_rate
+        self.frames_per_buffer = frames_per_buffer
+        # Queue to store audio data (stereo data as a tuple: (left, right))
+        self.audio_buffer_queue = queue.Queue(maxsize=50)
+        self.recording = False
+        self.record_wave = None
+        self.record_lock = threading.Lock()
+        # Internal buffer (1D float32 array) to supply additional data if needed
+        self._buffer = np.empty((0,), dtype=np.float32)
+
         self.pyaudio_instance = pyaudio.PyAudio()
         self.stream = self.pyaudio_instance.open(
             format=pyaudio.paFloat32,
             channels=2,
             rate=int(self.output_rate),
-            output=True
+            output=True,
+            frames_per_buffer=self.frames_per_buffer,
+            stream_callback=self.callback
         )
-        self.recording = False
-        self.record_wave = None
-        self.record_lock = threading.Lock()
+        self.stream.start_stream()
 
-    def play(self, left, right):
+    def callback(self, in_data, frame_count, time_info, status):
+        requested_samples = frame_count * 2  # Multiply by 2 for stereo channels
+        # Add as much data as possible from the queue to the internal buffer
+        while self._buffer.shape[0] < requested_samples:
+            try:
+                left, right = self.audio_buffer_queue.get_nowait()
+                stereo = np.empty((len(left) * 2,), dtype=np.float32)
+                stereo[0::2] = left
+                stereo[1::2] = right
+                self._buffer = np.concatenate((self._buffer, stereo))
+            except queue.Empty:
+                break
+        if self._buffer.shape[0] >= requested_samples:
+            out_data = self._buffer[:requested_samples]
+            self._buffer = self._buffer[requested_samples:]
+        else:
+            # If there is not enough data, pad with zeros
+            out_data = np.pad(self._buffer, (0, requested_samples - self._buffer.shape[0]), mode='constant')
+            self._buffer = np.empty((0,), dtype=np.float32)
+        return (out_data.tobytes(), pyaudio.paContinue)
+
+    def enqueue_audio(self, left, right):
         """
-        Combine left and right channels and play the audio.
+        Add audio data to the queue.
 
         Args:
-            left (ndarray): Left channel audio.
-            right (ndarray): Right channel audio.
+            left (ndarray): Left channel audio data.
+            right (ndarray): Right channel audio data.
         """
-        stereo = np.empty((len(left) * 2,), dtype=np.float32)
-        stereo[0::2] = left
-        stereo[1::2] = right
         try:
-            self.stream.write(stereo.tobytes())
-        except Exception as e:
-            print("Audio output error:", e)
+            self.audio_buffer_queue.put((left, right), timeout=0.01)
+        except queue.Full:
+            pass
 
     def start_recording(self, filename, channels=2):
         """
@@ -670,35 +697,6 @@ class AudioOutput:
         self.stream.stop_stream()
         self.stream.close()
         self.pyaudio_instance.terminate()
-
-
-# --------------------------------------------------
-# AudioOutputThread Class
-# --------------------------------------------------
-class AudioOutputThread(threading.Thread):
-    """
-    Background thread for audio playback
-
-    Retrieves data from the audio buffer and plays it using AudioOutput.
-    """
-    def __init__(self, audio_output, audio_buffer_queue, update_interval=0.01):
-        super().__init__(daemon=True)
-        self.audio_output = audio_output
-        self.audio_buffer_queue = audio_buffer_queue
-        self.update_interval = update_interval
-        self.quit_flag = False
-
-    def run(self):
-        while not self.quit_flag:
-            try:
-                left, right = self.audio_buffer_queue.get(timeout=self.update_interval)
-                self.audio_output.play(left, right)
-            except queue.Empty:
-                continue
-
-    def stop(self):
-        """Set flag to stop the thread."""
-        self.quit_flag = True
 
 
 # --------------------------------------------------
@@ -821,7 +819,7 @@ class CommandLineInterface(threading.Thread):
 
 
 # --------------------------------------------------
-# FMReceiverController Class (Unified Version)
+# FMReceiverController Class
 # --------------------------------------------------
 class FMReceiverController:
     """
@@ -864,13 +862,10 @@ class FMReceiverController:
                 final_audio_rate=48000,
                 stereo=True
             )
-        # Initialize audio output
-        self.audio_output = AudioOutput(output_rate=48000)
-        self.audio_buffer_queue = queue.Queue(maxsize=50)
+        # AudioOutput instance manages its own internal queue
+        self.audio_output = AudioOutput(output_rate=48000, frames_per_buffer=1024)
         # Start command line interface
         self.cmd_interface = CommandLineInterface(self)
-        # Initialize audio output thread
-        self.audio_output_thread = AudioOutputThread(self.audio_output, self.audio_buffer_queue, update_interval=0.01)
         self.threads = []
 
     def flush_data_queue(self):
@@ -884,7 +879,7 @@ class FMReceiverController:
     def processing_thread(self):
         """
         Retrieve IQ samples from SDR, perform FM demodulation and audio conversion,
-        then send the audio data to the output buffer.
+        then add the resulting audio data to the output queue via AudioOutput.
         """
         while not self.quit_event.is_set():
             try:
@@ -893,10 +888,8 @@ class FMReceiverController:
                 continue
             composite = self.fm_demodulator.process_iq_samples(iq_samples)
             left, right = self.fm_demodulator.demodulate(composite)
-            try:
-                self.audio_buffer_queue.put((left, right), timeout=0.01)
-            except queue.Full:
-                continue
+            # Use AudioOutput method to enqueue audio data
+            self.audio_output.enqueue_audio(left, right)
             if self.audio_output.recording:
                 stereo = np.empty((len(left) * 2,), dtype=np.float32)
                 stereo[0::2] = left
@@ -914,8 +907,6 @@ class FMReceiverController:
         proc_thread = threading.Thread(target=self.processing_thread, daemon=True)
         proc_thread.start()
         self.threads.append(proc_thread)
-
-        self.audio_output_thread.start()
 
         if self.light:
             print("FM Receiver (Light) started.")
@@ -936,7 +927,6 @@ class FMReceiverController:
 
     def cleanup(self):
         """Cleanup all resources."""
-        self.audio_output_thread.stop()
         self.sdr_receiver.stop()
         self.audio_output.cleanup()
         print("Exiting FM Receiver.")
