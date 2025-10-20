@@ -123,49 +123,38 @@ class DeemphasisIIRFilter:
 # --------------------------------------------------
 class LowpassFilter:
     """
-    Butterworth lowpass filter
-
-    Passes frequency components below the specified cutoff frequency.
+    Butterworth lowpass filter (streaming using lfilter with state)
     """
     def __init__(self, order, cutoff, sample_rate):
         nyquist = sample_rate / 2.0
         self.b, self.a = signal.butter(order, cutoff / nyquist, btype="low", analog=False)
+        # filter state for streaming: length = max(len(a), len(b)) - 1
+        self.zi = np.zeros(max(len(self.a), len(self.b)) - 1, dtype=np.float64)
 
     def apply(self, data):
         """
-        Apply the filter to the signal data.
-
-        Args:
-            data (ndarray): Signal data before filtering.
-
-        Returns:
-            ndarray: Filtered signal data.
+        Apply the filter to streaming chunk, preserving state.
         """
-        return signal.filtfilt(self.b, self.a, data)
+        y, self.zi = signal.lfilter(self.b, self.a, data, zi=self.zi)
+        return y
 
 
 class BandpassFilter:
     """
-    Butterworth bandpass filter
-
-    Passes only the frequency components within the specified range.
+    Butterworth bandpass filter (streaming using lfilter with state)
     """
     def __init__(self, order, lowcut, highcut, sample_rate):
         nyquist = sample_rate / 2.0
         self.b, self.a = signal.butter(order, [lowcut / nyquist, highcut / nyquist],
                                         btype="band", analog=False)
+        self.zi = np.zeros(max(len(self.a), len(self.b)) - 1, dtype=np.float64)
 
     def apply(self, data):
         """
-        Apply the filter to the signal data.
-
-        Args:
-            data (ndarray): Input signal.
-
-        Returns:
-            ndarray: Signal after bandpass filtering.
+        Apply the bandpass filter to streaming chunk, preserving state.
         """
-        return signal.filtfilt(self.b, self.a, data)
+        y, self.zi = signal.lfilter(self.b, self.a, data, zi=self.zi)
+        return y
 
 
 # --------------------------------------------------
