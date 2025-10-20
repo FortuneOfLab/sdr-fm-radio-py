@@ -395,7 +395,8 @@ class FMDemodulator:
         iq_filtered = signal.lfilter(self.iq_b, self.iq_a, iq_processed)
         main_output = self.main_pll.process(iq_filtered)
         composite = signal.resample_poly(main_output, up=self.up, down=self.down)
-        return composite
+        # ensure float32 to avoid later casts
+        return composite.astype(np.float32, copy=False)
 
     def demodulate(self, composite):
         """
@@ -438,8 +439,14 @@ class FMDemodulator:
         left_channel = mono + lr_baseband
         right_channel = mono - lr_baseband
 
-        left_48 = samplerate.resample(left_channel, 0.25, converter_type="sinc_best")
-        right_48 = samplerate.resample(right_channel, 0.25, converter_type="sinc_best")
+        # precompute resample ratio from composite_rate -> final_audio_rate
+        self._resample_up = 1
+        self._resample_down = int(self.composite_rate / self.final_audio_rate)
+        if self._resample_down < 1:
+            self._resample_down = 1
+        # replace samplerate.resample with resample_poly using integer downsample
+        left_48 = signal.resample_poly(left_channel.astype(np.float32), self._resample_up, self._resample_down)
+        right_48 = signal.resample_poly(right_channel.astype(np.float32), self._resample_up, self._resample_down)
         left_48 = self.deemph_left.process(left_48)
         right_48 = self.deemph_right.process(right_48)
         return left_48, right_48
@@ -640,13 +647,12 @@ class AudioOutput:
     def enqueue_audio(self, left, right):
         """
         Add audio data to the queue.
-
-        Args:
-            left (ndarray): Left channel audio data.
-            right (ndarray): Right channel audio data.
         """
         try:
-            self.audio_buffer_queue.put((left, right), timeout=0.01)
+            # ensure float32 and avoid copies where possible
+            left32 = np.asarray(left, dtype=np.float32)
+            right32 = np.asarray(right, dtype=np.float32)
+            self.audio_buffer_queue.put((left32, right32), timeout=0.01)
         except queue.Full:
             pass
 
