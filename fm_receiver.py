@@ -56,6 +56,7 @@ import time
 import sys
 import wave
 from fractions import Fraction
+from collections import deque
 
 import numpy as np
 import scipy.signal as signal
@@ -604,13 +605,13 @@ class AudioOutput:
     def __init__(self, output_rate=48000, frames_per_buffer=1024):
         self.output_rate = output_rate
         self.frames_per_buffer = frames_per_buffer
-        # Queue to store audio data (stereo data as a tuple: (left, right))
         self.audio_buffer_queue = queue.Queue(maxsize=50)
         self.recording = False
         self.record_wave = None
         self.record_lock = threading.Lock()
-        # Internal buffer (1D float32 array) to supply additional data if needed
-        self._buffer = np.empty((0,), dtype=np.float32)
+        # replace large concatenating buffer with deque of numpy arrays
+        self._buffer_deque = deque()
+        self._buffer_len = 0  # total number of float32 samples in deque
 
         self.pyaudio_instance = pyaudio.PyAudio()
         self.stream = self.pyaudio_instance.open(
@@ -624,34 +625,45 @@ class AudioOutput:
         self.stream.start_stream()
 
     def callback(self, in_data, frame_count, time_info, status):
-        requested_samples = frame_count * 2  # Multiply by 2 for stereo channels
-        # Add as much data as possible from the queue to the internal buffer
-        while self._buffer.shape[0] < requested_samples:
+        requested_samples = frame_count * 2  # stereo interleaved samples
+        # fill deque from queue (avoid concatenation)
+        while self._buffer_len < requested_samples:
             try:
                 left, right = self.audio_buffer_queue.get_nowait()
-                stereo = np.empty((len(left) * 2,), dtype=np.float32)
+                stereo = np.empty((left.size + right.size,), dtype=np.float32)
                 stereo[0::2] = left
                 stereo[1::2] = right
-                self._buffer = np.concatenate((self._buffer, stereo))
+                self._buffer_deque.append(stereo)
+                self._buffer_len += stereo.size
             except queue.Empty:
                 break
-        if self._buffer.shape[0] >= requested_samples:
-            out_data = self._buffer[:requested_samples]
-            self._buffer = self._buffer[requested_samples:]
-        else:
-            # If there is not enough data, pad with zeros
-            out_data = np.pad(self._buffer, (0, requested_samples - self._buffer.shape[0]), mode='constant')
-            self._buffer = np.empty((0,), dtype=np.float32)
-        return (out_data.tobytes(), pyaudio.paContinue)
+
+        out = np.empty((requested_samples,), dtype=np.float32)
+        filled = 0
+        while filled < requested_samples and self._buffer_deque:
+            chunk = self._buffer_deque[0]
+            need = requested_samples - filled
+            if chunk.size <= need:
+                out[filled:filled + chunk.size] = chunk
+                filled += chunk.size
+                self._buffer_deque.popleft()
+                self._buffer_len -= chunk.size
+            else:
+                out[filled:filled + need] = chunk[:need]
+                # keep remainder in deque (slice shares no memory — acceptable)
+                self._buffer_deque[0] = chunk[need:]
+                self._buffer_len -= need
+                filled += need
+
+        if filled < requested_samples:
+            out[filled:requested_samples] = 0.0
+
+        return (out.tobytes(), pyaudio.paContinue)
 
     def enqueue_audio(self, left, right):
-        """
-        Add audio data to the queue.
-        """
         try:
-            # ensure float32 and avoid copies where possible
-            left32 = np.asarray(left, dtype=np.float32)
-            right32 = np.asarray(right, dtype=np.float32)
+            left32 = np.asarray(left, dtype=np.float32, copy=False)
+            right32 = np.asarray(right, dtype=np.float32, copy=False)
             self.audio_buffer_queue.put((left32, right32), timeout=0.01)
         except queue.Full:
             pass
