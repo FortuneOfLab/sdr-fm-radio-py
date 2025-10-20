@@ -66,11 +66,32 @@ from numba import njit
 
 
 # --------------------------------------------------
-# Deemphasis IIR Filter Class
+# Deemphasis IIR Filter Class (Numba optimized)
 # --------------------------------------------------
+@njit
+def deemphasis_iir_process_numba(x, alpha, prev_output):
+    """
+    Numba-optimized de-emphasis IIR filter processing.
+
+    Args:
+        x (ndarray): Input audio signal array.
+        alpha (float): Filter coefficient.
+        prev_output (float): Previous output sample for filter state.
+
+    Returns:
+        tuple: (y, prev) where y is filtered output array and prev is last output value.
+    """
+    y = np.empty_like(x)
+    prev = prev_output
+    for i in range(x.shape[0]):
+        y[i] = (1.0 - alpha) * x[i] + alpha * prev
+        prev = y[i]
+    return y, prev
+
+
 class DeemphasisIIRFilter:
     """
-    IIR filter for de-emphasis processing in FM broadcasting
+    IIR filter for de-emphasis processing in FM broadcasting.
 
     Args:
         sample_rate (float): Audio signal sample rate.
@@ -85,7 +106,7 @@ class DeemphasisIIRFilter:
 
     def process(self, x):
         """
-        Apply de-emphasis processing to the input signal.
+        Apply de-emphasis processing to the input signal using a Numba-optimized loop.
 
         Args:
             x (ndarray): Input audio signal array.
@@ -93,10 +114,7 @@ class DeemphasisIIRFilter:
         Returns:
             ndarray: Audio signal after filtering.
         """
-        y = np.empty_like(x)
-        for i in range(len(x)):
-            y[i] = (1 - self.alpha) * x[i] + self.alpha * self.prev_output
-            self.prev_output = y[i]
+        y, self.prev_output = deemphasis_iir_process_numba(x, self.alpha, self.prev_output)
         return y
 
 
