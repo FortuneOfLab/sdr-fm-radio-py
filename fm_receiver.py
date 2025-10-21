@@ -318,9 +318,14 @@ class SDRReceiver:
             sdr_obj: SDR object (unused).
         """
         try:
-            self.data_queue.put(iq_samples, block=False)
+            # Convert to numpy array allowing a copy if necessary (NumPy 2.x compatibility).
+            iq = np.asarray(iq_samples, dtype=np.complex64)
+            self.data_queue.put(iq, block=False)
         except queue.Full:
             # Discard sample if queue is full.
+            pass
+        except Exception:
+            # Drop this buffer if conversion fails to avoid crashing the SDR ctypes callback.
             pass
 
     def start(self):
@@ -379,6 +384,9 @@ class FMDemodulator:
         ratio = Fraction(int(self.composite_rate), int(self.iq_sample_rate)).limit_denominator()
         self.up = ratio.numerator
         self.down = ratio.denominator
+        # Precompute composite -> final audio integer resample factors
+        self._resample_up = 1
+        self._resample_down = max(1, int(self.composite_rate / self.final_audio_rate))
 
     def process_iq_samples(self, iq_samples):
         """
@@ -393,6 +401,8 @@ class FMDemodulator:
         """
         self.dc_offset = self.dc_alpha * np.mean(iq_samples) + (1 - self.dc_alpha) * self.dc_offset
         iq_processed = iq_samples - self.dc_offset
+        # ensure complex64 for processing pipeline
+        iq_processed = np.asarray(iq_processed, dtype=np.complex64, copy=False)
         iq_filtered = signal.lfilter(self.iq_b, self.iq_a, iq_processed)
         main_output = self.main_pll.process(iq_filtered)
         composite = signal.resample_poly(main_output, up=self.up, down=self.down)
@@ -463,7 +473,8 @@ class FMDemodulator:
             tuple: (mono_channel, mono_channel) where both channels are identical.
         """
         mono = self.lp_mono.apply(composite)
-        mono_48 = samplerate.resample(mono, 0.25, converter_type="sinc_best")
+        # replace samplerate.resample with resample_poly (composite -> final audio)
+        mono_48 = signal.resample_poly(mono.astype(np.float32), self._resample_up, self._resample_down)
         mono_48 = self.deemph_left.process(mono_48)
         return mono_48, mono_48
 
@@ -509,6 +520,9 @@ class FMDemodulatorLight:
         ratio = Fraction(int(self.composite_rate), int(self.iq_sample_rate)).limit_denominator()
         self.up = ratio.numerator
         self.down = ratio.denominator
+        # Precompute composite -> final audio integer resample factors
+        self._resample_up = 1
+        self._resample_down = max(1, int(self.composite_rate / self.final_audio_rate))
 
     def process_iq_samples(self, iq_samples):
         """
@@ -531,7 +545,8 @@ class FMDemodulatorLight:
         fm_demod = np.diff(phase, prepend=phase[0])
         self.last_phase = phase[-1]
         composite = signal.resample_poly(fm_demod, up=self.up, down=self.down) * 0.35
-        return composite
+        # ensure float32 for downstream pipeline
+        return np.asarray(composite, dtype=np.float32, copy=False)
 
     def demodulate(self, composite):
         """
@@ -569,8 +584,8 @@ class FMDemodulatorLight:
         lr_baseband = self.lp_base.apply(lr_demodulated)
         left_channel = mono + lr_baseband
         right_channel = mono - lr_baseband
-        left_48 = samplerate.resample(left_channel, 0.25, converter_type="sinc_fastest")
-        right_48 = samplerate.resample(right_channel, 0.25, converter_type="sinc_fastest")
+        left_48 = signal.resample_poly(left_channel.astype(np.float32), self._resample_up, self._resample_down)
+        right_48 = signal.resample_poly(right_channel.astype(np.float32), self._resample_up, self._resample_down)
         left_48 = self.deemph_left.process(left_48)
         right_48 = self.deemph_right.process(right_48)
         return left_48, right_48
@@ -583,7 +598,7 @@ class FMDemodulatorLight:
             tuple: (mono_channel, mono_channel)
         """
         mono = self.lp_mono.apply(composite)
-        mono_48 = samplerate.resample(mono, 0.25, converter_type="sinc_fastest")
+        mono_48 = signal.resample_poly(mono.astype(np.float32), self._resample_up, self._resample_down)
         mono_48 = self.deemph_left.process(mono_48)
         return mono_48, mono_48
 
@@ -714,7 +729,9 @@ class AudioOutput:
         """
         with self.record_lock:
             if self.recording and self.record_wave is not None:
-                int16_audio = np.int16(stereo_audio * 32767)
+                # Clip to [-1,1] before converting to int16 to avoid overflow/distortion
+                clipped = np.clip(stereo_audio, -1.0, 1.0)
+                int16_audio = np.int16(clipped * 32767)
                 self.record_wave.writeframes(int16_audio.tobytes())
 
     def cleanup(self):
