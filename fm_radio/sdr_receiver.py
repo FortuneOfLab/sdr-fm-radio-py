@@ -31,6 +31,8 @@ import logging
 import numpy as np
 from rtlsdr import RtlSdr
 
+from fm_radio.constants import SDR_SAMPLE_RATE, SDR_CENTER_FREQ_DEFAULT, SDR_BLOCK_SIZE, SDR_QUEUE_MAXSIZE
+
 
 class SDRReceiver:
     """
@@ -38,12 +40,12 @@ class SDRReceiver:
 
     Retrieves samples from the RTL-SDR device and asynchronously stores them in a queue.
     """
-    def __init__(self, sample_rate=1.024e6, center_freq=80e6, block_size=16384):
+    def __init__(self, sample_rate=SDR_SAMPLE_RATE, center_freq=SDR_CENTER_FREQ_DEFAULT, block_size=SDR_BLOCK_SIZE):
         self.logger = logging.getLogger('fm_receiver.SDRReceiver')
         self.sample_rate = sample_rate
         self.center_freq = center_freq
         self.block_size = block_size
-        self.data_queue = queue.Queue(maxsize=20)
+        self.data_queue = queue.Queue(maxsize=SDR_QUEUE_MAXSIZE)
 
         try:
             self.sdr = RtlSdr()

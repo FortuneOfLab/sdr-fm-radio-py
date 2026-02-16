@@ -33,6 +33,18 @@ import scipy.signal as signal
 
 from fm_radio.filters import LowpassFilter, BandpassFilter, DeemphasisIIRFilter
 from fm_radio.pll import PLL
+from fm_radio.constants import (
+    SDR_SAMPLE_RATE, SDR_SAMPLE_RATE_LIGHT,
+    MAIN_PLL_KP, MAIN_PLL_KI, PILOT_PLL_KP, PILOT_PLL_KI,
+    IQ_LOWPASS_ORDER, IQ_LOWPASS_CUTOFF,
+    MONO_LOWPASS_ORDER, MONO_LOWPASS_ORDER_LIGHT, MONO_LOWPASS_CUTOFF,
+    PILOT_BANDPASS_ORDER, PILOT_BANDPASS_ORDER_LIGHT,
+    PILOT_BANDPASS_LOW, PILOT_BANDPASS_HIGH,
+    LR_BANDPASS_ORDER, LR_BANDPASS_ORDER_LIGHT,
+    LR_BANDPASS_LOW, LR_BANDPASS_HIGH,
+    DEEMPHASIS_TAU, DC_OFFSET_ALPHA,
+    AUDIO_OUTPUT_RATE, COMPOSITE_RATE, LIGHT_COMPOSITE_SCALE,
+)
 
 
 class FMDemodulator:
@@ -42,8 +54,8 @@ class FMDemodulator:
     Processes IQ samples through PLL, filters, resampling, stereo separation,
     and de-emphasis to generate the demodulated signal.
     """
-    def __init__(self, iq_sample_rate=1.024e6, composite_rate=192000,
-                 final_audio_rate=48000, stereo=True):
+    def __init__(self, iq_sample_rate=SDR_SAMPLE_RATE, composite_rate=COMPOSITE_RATE,
+                 final_audio_rate=AUDIO_OUTPUT_RATE, stereo=True):
         self.logger = logging.getLogger('fm_receiver.FMDemodulator')
         self.iq_sample_rate = iq_sample_rate
         self.composite_rate = composite_rate
@@ -55,26 +67,26 @@ class FMDemodulator:
                         f"Stereo={'enabled' if stereo else 'disabled'}")
 
         # PLL for main signal demodulation (frequency output)
-        self.main_pll = PLL(Kp=0.12926, Ki=0.0208844, return_phase=False)
+        self.main_pll = PLL(Kp=MAIN_PLL_KP, Ki=MAIN_PLL_KI, return_phase=False)
         # PLL for pilot signal demodulation (phase output)
-        self.pilot_pll = PLL(Kp=0.0432, Ki=0.000116, return_phase=True)
+        self.pilot_pll = PLL(Kp=PILOT_PLL_KP, Ki=PILOT_PLL_KI, return_phase=True)
 
         nyquist = self.iq_sample_rate / 2.0
-        # Lowpass filter for IQ samples (pass frequencies below 200 kHz)
-        self.iq_b, self.iq_a = signal.butter(5, 200e3 / nyquist, btype="low")
-        # Lowpass filter for mono signal (15 kHz cutoff)
-        self.lp_mono = LowpassFilter(order=15, cutoff=15000.0, sample_rate=self.composite_rate)
+        # Lowpass filter for IQ samples
+        self.iq_b, self.iq_a = signal.butter(IQ_LOWPASS_ORDER, IQ_LOWPASS_CUTOFF / nyquist, btype="low")
+        # Lowpass filter for mono signal
+        self.lp_mono = LowpassFilter(order=MONO_LOWPASS_ORDER, cutoff=MONO_LOWPASS_CUTOFF, sample_rate=self.composite_rate)
         # Baseband filter for stereo separation
-        self.lp_base = LowpassFilter(order=15, cutoff=15000.0, sample_rate=self.composite_rate)
-        # Bandpass filter for extracting pilot signal (17-21 kHz)
-        self.bp_pilot = BandpassFilter(order=5, lowcut=17000.0, highcut=21000.0, sample_rate=self.composite_rate)
-        # Bandpass filter for extracting LR signal (23-53 kHz)
-        self.bp_lr = BandpassFilter(order=15, lowcut=23000.0, highcut=53000.0, sample_rate=self.composite_rate)
+        self.lp_base = LowpassFilter(order=MONO_LOWPASS_ORDER, cutoff=MONO_LOWPASS_CUTOFF, sample_rate=self.composite_rate)
+        # Bandpass filter for extracting pilot signal
+        self.bp_pilot = BandpassFilter(order=PILOT_BANDPASS_ORDER, lowcut=PILOT_BANDPASS_LOW, highcut=PILOT_BANDPASS_HIGH, sample_rate=self.composite_rate)
+        # Bandpass filter for extracting LR signal
+        self.bp_lr = BandpassFilter(order=LR_BANDPASS_ORDER, lowcut=LR_BANDPASS_LOW, highcut=LR_BANDPASS_HIGH, sample_rate=self.composite_rate)
         # De-emphasis filters for left and right channels
-        self.deemph_left = DeemphasisIIRFilter(sample_rate=self.final_audio_rate, tau=50e-6)
-        self.deemph_right = DeemphasisIIRFilter(sample_rate=self.final_audio_rate, tau=50e-6)
+        self.deemph_left = DeemphasisIIRFilter(sample_rate=self.final_audio_rate, tau=DEEMPHASIS_TAU)
+        self.deemph_right = DeemphasisIIRFilter(sample_rate=self.final_audio_rate, tau=DEEMPHASIS_TAU)
         self.dc_offset = 0.0  # For DC offset correction
-        self.dc_alpha = 0.01  # Smoothing coefficient for DC offset
+        self.dc_alpha = DC_OFFSET_ALPHA  # Smoothing coefficient for DC offset
 
         # Calculate resampling ratio (as a close integer ratio)
         ratio = Fraction(int(self.composite_rate), int(self.iq_sample_rate)).limit_denominator()
@@ -193,8 +205,8 @@ class FMDemodulatorLight:
     Uses phase differentiation for FM demodulation, resampling,
     de-emphasis, and stereo/mono separation.
     """
-    def __init__(self, iq_sample_rate=0.25e6, composite_rate=192000,
-                 final_audio_rate=48000, stereo=True):
+    def __init__(self, iq_sample_rate=SDR_SAMPLE_RATE_LIGHT, composite_rate=COMPOSITE_RATE,
+                 final_audio_rate=AUDIO_OUTPUT_RATE, stereo=True):
         self.logger = logging.getLogger('fm_receiver.FMDemodulatorLight')
         self.iq_sample_rate = iq_sample_rate
         self.composite_rate = composite_rate
@@ -206,17 +218,17 @@ class FMDemodulatorLight:
                         f"Stereo={'enabled' if stereo else 'disabled'}")
 
         # PLL for pilot signal demodulation (phase output)
-        self.pilot_pll = PLL(Kp=0.0432, Ki=0.000116, return_phase=True)
+        self.pilot_pll = PLL(Kp=PILOT_PLL_KP, Ki=PILOT_PLL_KI, return_phase=True)
 
         # Use lower order filters for reduced computation
-        self.lp_mono = LowpassFilter(order=1, cutoff=15000.0, sample_rate=self.composite_rate)
-        self.lp_base = LowpassFilter(order=1, cutoff=15000.0, sample_rate=self.composite_rate)
-        self.bp_pilot = BandpassFilter(order=1, lowcut=17000.0, highcut=21000.0, sample_rate=self.composite_rate)
-        self.bp_lr = BandpassFilter(order=1, lowcut=23000.0, highcut=53000.0, sample_rate=self.composite_rate)
-        self.deemph_left = DeemphasisIIRFilter(sample_rate=self.final_audio_rate, tau=50e-6)
-        self.deemph_right = DeemphasisIIRFilter(sample_rate=self.final_audio_rate, tau=50e-6)
+        self.lp_mono = LowpassFilter(order=MONO_LOWPASS_ORDER_LIGHT, cutoff=MONO_LOWPASS_CUTOFF, sample_rate=self.composite_rate)
+        self.lp_base = LowpassFilter(order=MONO_LOWPASS_ORDER_LIGHT, cutoff=MONO_LOWPASS_CUTOFF, sample_rate=self.composite_rate)
+        self.bp_pilot = BandpassFilter(order=PILOT_BANDPASS_ORDER_LIGHT, lowcut=PILOT_BANDPASS_LOW, highcut=PILOT_BANDPASS_HIGH, sample_rate=self.composite_rate)
+        self.bp_lr = BandpassFilter(order=LR_BANDPASS_ORDER_LIGHT, lowcut=LR_BANDPASS_LOW, highcut=LR_BANDPASS_HIGH, sample_rate=self.composite_rate)
+        self.deemph_left = DeemphasisIIRFilter(sample_rate=self.final_audio_rate, tau=DEEMPHASIS_TAU)
+        self.deemph_right = DeemphasisIIRFilter(sample_rate=self.final_audio_rate, tau=DEEMPHASIS_TAU)
         self.dc_offset = 0.0
-        self.dc_alpha = 0.01
+        self.dc_alpha = DC_OFFSET_ALPHA
         self.last_phase = None  # Save previous phase for differentiation
 
         ratio = Fraction(int(self.composite_rate), int(self.iq_sample_rate)).limit_denominator()
@@ -247,7 +259,7 @@ class FMDemodulatorLight:
                 phase = np.unwrap(np.concatenate(([self.last_phase], current_phase)))[1:]
             fm_demod = np.diff(phase, prepend=phase[0])
             self.last_phase = phase[-1]
-            composite = signal.resample_poly(fm_demod, up=self.up, down=self.down) * 0.35
+            composite = signal.resample_poly(fm_demod, up=self.up, down=self.down) * LIGHT_COMPOSITE_SCALE
             # ensure float32 for downstream pipeline
             return np.asarray(composite, dtype=np.float32, copy=False)
         except Exception as e:

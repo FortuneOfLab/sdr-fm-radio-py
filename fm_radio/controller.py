@@ -36,6 +36,10 @@ from fm_radio.sdr_receiver import SDRReceiver
 from fm_radio.demodulator import FMDemodulator, FMDemodulatorLight
 from fm_radio.audio_output import AudioOutput
 from fm_radio.cli import CommandLineInterface
+from fm_radio.constants import (
+    SDR_SAMPLE_RATE, SDR_SAMPLE_RATE_LIGHT, SDR_CENTER_FREQ_DEFAULT,
+    AUDIO_OUTPUT_RATE, AUDIO_FRAMES_PER_BUFFER,
+)
 
 
 class FMReceiverController:
@@ -69,23 +73,23 @@ class FMReceiverController:
             if self.light:
                 self.logger.info("Initializing FM Receiver in Light mode")
                 # Initialize SDR receiver
-                self.sdr_receiver = SDRReceiver(sample_rate=0.25e6, center_freq=80e6)
+                self.sdr_receiver = SDRReceiver(sample_rate=SDR_SAMPLE_RATE_LIGHT, center_freq=SDR_CENTER_FREQ_DEFAULT)
                 self.fm_demodulator = FMDemodulatorLight(
                     iq_sample_rate=self.sdr_receiver.sample_rate,
-                    final_audio_rate=48000,
+                    final_audio_rate=AUDIO_OUTPUT_RATE,
                     stereo=False
                 )
             else:
                 self.logger.info("Initializing FM Receiver in Standard mode")
                 # Initialize SDR receiver
-                self.sdr_receiver = SDRReceiver(sample_rate=1.024e6, center_freq=80e6)
+                self.sdr_receiver = SDRReceiver(sample_rate=SDR_SAMPLE_RATE, center_freq=SDR_CENTER_FREQ_DEFAULT)
                 self.fm_demodulator = FMDemodulator(
                     iq_sample_rate=self.sdr_receiver.sample_rate,
-                    final_audio_rate=48000,
+                    final_audio_rate=AUDIO_OUTPUT_RATE,
                     stereo=True
                 )
             # AudioOutput instance manages its own internal queue
-            self.audio_output = AudioOutput(output_rate=48000, frames_per_buffer=1024)
+            self.audio_output = AudioOutput(output_rate=AUDIO_OUTPUT_RATE, frames_per_buffer=AUDIO_FRAMES_PER_BUFFER)
             # Start command line interface
             self.cmd_interface = CommandLineInterface(self)
             self.threads = []

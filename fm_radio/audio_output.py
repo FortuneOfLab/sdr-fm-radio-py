@@ -34,6 +34,12 @@ from collections import deque
 import numpy as np
 import pyaudio
 
+from fm_radio.constants import (
+    AUDIO_OUTPUT_RATE, AUDIO_FRAMES_PER_BUFFER, AUDIO_QUEUE_MAXSIZE,
+    AUDIO_CHANNELS, AUDIO_ENQUEUE_TIMEOUT,
+    RECORD_SAMPLE_WIDTH, RECORD_MAX_INT16,
+)
+
 
 class AudioOutput:
     """
@@ -41,11 +47,11 @@ class AudioOutput:
 
     Uses PyAudio for audio output and recording.
     """
-    def __init__(self, output_rate=48000, frames_per_buffer=1024):
+    def __init__(self, output_rate=AUDIO_OUTPUT_RATE, frames_per_buffer=AUDIO_FRAMES_PER_BUFFER):
         self.logger = logging.getLogger('fm_receiver.AudioOutput')
         self.output_rate = output_rate
         self.frames_per_buffer = frames_per_buffer
-        self.audio_buffer_queue = queue.Queue(maxsize=50)
+        self.audio_buffer_queue = queue.Queue(maxsize=AUDIO_QUEUE_MAXSIZE)
         self.recording = False
         self.record_wave = None
         self.record_lock = threading.Lock()
@@ -57,7 +63,7 @@ class AudioOutput:
             self.pyaudio_instance = pyaudio.PyAudio()
             self.stream = self.pyaudio_instance.open(
                 format=pyaudio.paFloat32,
-                channels=2,
+                channels=AUDIO_CHANNELS,
                 rate=int(self.output_rate),
                 output=True,
                 frames_per_buffer=self.frames_per_buffer,
@@ -74,7 +80,7 @@ class AudioOutput:
             if status:
                 self.logger.warning(f"Audio callback status: {status}")
 
-            requested_samples = frame_count * 2  # stereo interleaved samples
+            requested_samples = frame_count * AUDIO_CHANNELS  # stereo interleaved samples
             # fill deque from queue (avoid concatenation)
             while self._buffer_len < requested_samples:
                 try:
@@ -113,14 +119,14 @@ class AudioOutput:
         except Exception as e:
             self.logger.error(f"Error in audio callback: {e}", exc_info=True)
             # Return silence to avoid crashing the audio stream
-            silence = np.zeros(frame_count * 2, dtype=np.float32)
+            silence = np.zeros(frame_count * AUDIO_CHANNELS, dtype=np.float32)
             return (silence.tobytes(), pyaudio.paContinue)
 
     def enqueue_audio(self, left, right):
         try:
             left32 = np.asarray(left, dtype=np.float32, copy=False)
             right32 = np.asarray(right, dtype=np.float32, copy=False)
-            self.audio_buffer_queue.put((left32, right32), timeout=0.01)
+            self.audio_buffer_queue.put((left32, right32), timeout=AUDIO_ENQUEUE_TIMEOUT)
         except queue.Full:
             self.logger.debug("Audio buffer queue full, dropping audio data")
         except Exception as e:
@@ -142,7 +148,7 @@ class AudioOutput:
             try:
                 wf = wave.open(filename, 'wb')
                 wf.setnchannels(channels)
-                wf.setsampwidth(2)  # 16-bit PCM
+                wf.setsampwidth(RECORD_SAMPLE_WIDTH)
                 wf.setframerate(int(self.output_rate))
                 self.record_wave = wf
                 self.recording = True
@@ -181,7 +187,7 @@ class AudioOutput:
                 try:
                     # Clip to [-1,1] before converting to int16 to avoid overflow/distortion
                     clipped = np.clip(stereo_audio, -1.0, 1.0)
-                    int16_audio = np.int16(clipped * 32767)
+                    int16_audio = np.int16(clipped * RECORD_MAX_INT16)
                     self.record_wave.writeframes(int16_audio.tobytes())
                 except Exception as e:
                     self.logger.error(f"Error writing audio to file: {e}", exc_info=True)
