@@ -31,10 +31,19 @@ performs FM demodulation via PLL and various filter processes,
 and outputs/records audio using PyAudio.
 
 Usage Examples:
-  - Standard mode:
+  - Standard mode (no logging):
       $ python fm_receiver.py
   - Light mode:
       $ python fm_receiver.py --light
+  - With logging enabled:
+      $ python fm_receiver.py --log
+      $ python fm_receiver.py --verbose  (or -v)
+  - With debug logging:
+      $ python fm_receiver.py --debug
+  - Save logs to file:
+      $ python fm_receiver.py --log-file fm_receiver.log
+  - Combine options:
+      $ python fm_receiver.py --light --debug --log-file debug.log
 
 Command Examples (during execution):
   'list'              : Show available stations
@@ -55,6 +64,7 @@ import math
 import time
 import sys
 import wave
+import logging
 from fractions import Fraction
 from collections import deque
 
@@ -64,6 +74,32 @@ import pyaudio
 import samplerate
 from rtlsdr import RtlSdr
 from numba import njit
+
+# --------------------------------------------------
+# Logging Configuration
+# --------------------------------------------------
+def setup_logging(log_level=logging.INFO, log_file=None):
+    """
+    Setup logging configuration for the FM receiver system.
+
+    Args:
+        log_level: Logging level (default: INFO)
+        log_file: Optional log file path. If None, logs to console only.
+    """
+    log_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    handlers = [logging.StreamHandler()]
+
+    if log_file:
+        handlers.append(logging.FileHandler(log_file))
+
+    logging.basicConfig(
+        level=log_level,
+        format=log_format,
+        handlers=handlers
+    )
+
+# Initialize logger
+logger = logging.getLogger('fm_receiver')
 
 
 # --------------------------------------------------
@@ -265,27 +301,40 @@ class SDRReceiver:
     Retrieves samples from the RTL-SDR device and asynchronously stores them in a queue.
     """
     def __init__(self, sample_rate=1.024e6, center_freq=80e6, block_size=16384):
+        self.logger = logging.getLogger('fm_receiver.SDRReceiver')
         self.sample_rate = sample_rate
         self.center_freq = center_freq
         self.block_size = block_size
         self.data_queue = queue.Queue(maxsize=20)
 
-        self.sdr = RtlSdr()
-        self.sdr.sample_rate = self.sample_rate
-        self.sdr.center_freq = self.center_freq
-        self.sdr.set_manual_gain_enabled(False)
-        self.manual_gain = True
-        self.sdr.set_gain(0)
+        try:
+            self.sdr = RtlSdr()
+            self.sdr.sample_rate = self.sample_rate
+            self.sdr.center_freq = self.center_freq
+            self.sdr.set_manual_gain_enabled(False)
+            self.manual_gain = False
+            self.sdr.set_gain(0)
+            self.logger.info(f"SDR initialized: sample_rate={sample_rate/1e6:.3f}MHz, center_freq={center_freq/1e6:.1f}MHz")
+        except Exception as e:
+            self.logger.error(f"Failed to initialize RTL-SDR device: {e}")
+            raise
+
         try:
             # Disable direct_sampling if available
             self.sdr.direct_sampling = 0
+            self.logger.debug("Direct sampling disabled")
         except Exception as e:
-            print("Failed to disable direct_sampling:", e)
+            self.logger.warning(f"Failed to disable direct_sampling (may not be supported): {e}")
 
     def set_center_frequency(self, freq):
         """Change the center frequency."""
-        self.center_freq = freq
-        self.sdr.center_freq = freq
+        try:
+            self.center_freq = freq
+            self.sdr.center_freq = freq
+            self.logger.info(f"Center frequency set to {freq/1e6:.1f} MHz")
+        except Exception as e:
+            self.logger.error(f"Failed to set center frequency to {freq/1e6:.1f} MHz: {e}")
+            raise
 
     def get_center_frequency(self):
         """Retrieve the current center frequency."""
@@ -293,7 +342,12 @@ class SDRReceiver:
 
     def set_gain(self, gain):
         """Set gain value (for manual mode)."""
-        self.sdr.set_gain(gain)
+        try:
+            self.sdr.set_gain(gain)
+            self.logger.info(f"Gain set to {gain:.1f} dB")
+        except Exception as e:
+            self.logger.error(f"Failed to set gain to {gain:.1f} dB: {e}")
+            raise
 
     def get_gain(self):
         """Retrieve the current gain value."""
@@ -306,8 +360,14 @@ class SDRReceiver:
         Args:
             manual (bool): True for manual mode, False for AGC.
         """
-        self.manual_gain = manual
-        self.sdr.set_manual_gain_enabled(manual)
+        try:
+            self.manual_gain = manual
+            self.sdr.set_manual_gain_enabled(manual)
+            mode = "manual" if manual else "AGC"
+            self.logger.info(f"Gain mode set to {mode}")
+        except Exception as e:
+            self.logger.error(f"Failed to set gain mode: {e}")
+            raise
 
     def callback(self, iq_samples, sdr_obj):
         """
@@ -323,22 +383,33 @@ class SDRReceiver:
             self.data_queue.put(iq, block=False)
         except queue.Full:
             # Discard sample if queue is full.
-            pass
-        except Exception:
+            self.logger.debug("SDR data queue full, dropping samples")
+        except Exception as e:
             # Drop this buffer if conversion fails to avoid crashing the SDR ctypes callback.
-            pass
+            self.logger.error(f"Error in SDR callback: {e}", exc_info=True)
 
     def start(self):
         """Start asynchronous sample retrieval."""
-        self.sdr.read_samples_async(self.callback, num_samples=self.block_size)
+        try:
+            self.logger.info("Starting SDR async read")
+            self.sdr.read_samples_async(self.callback, num_samples=self.block_size)
+        except Exception as e:
+            self.logger.error(f"Failed to start SDR async read: {e}")
+            raise
 
     def stop(self):
         """Stop asynchronous sample retrieval and close SDR."""
         try:
+            self.logger.info("Stopping SDR async read")
             self.sdr.cancel_read_async()
-        except Exception:
-            pass
-        self.sdr.close()
+        except Exception as e:
+            self.logger.warning(f"Error canceling async read: {e}")
+
+        try:
+            self.sdr.close()
+            self.logger.info("SDR closed successfully")
+        except Exception as e:
+            self.logger.error(f"Error closing SDR: {e}")
 
 
 # --------------------------------------------------
@@ -353,10 +424,15 @@ class FMDemodulator:
     """
     def __init__(self, iq_sample_rate=1.024e6, composite_rate=192000,
                  final_audio_rate=48000, stereo=True):
+        self.logger = logging.getLogger('fm_receiver.FMDemodulator')
         self.iq_sample_rate = iq_sample_rate
         self.composite_rate = composite_rate
         self.final_audio_rate = final_audio_rate
         self.stereo = stereo
+
+        self.logger.info(f"Initializing FMDemodulator: IQ={iq_sample_rate/1e6:.3f}MHz, "
+                        f"Composite={composite_rate/1e3:.0f}kHz, Audio={final_audio_rate/1e3:.0f}kHz, "
+                        f"Stereo={'enabled' if stereo else 'disabled'}")
 
         # PLL for main signal demodulation (frequency output)
         self.main_pll = PLL(Kp=0.12926, Ki=0.0208844, return_phase=False)
@@ -399,15 +475,19 @@ class FMDemodulator:
         Returns:
             ndarray: Composite signal after resampling.
         """
-        self.dc_offset = self.dc_alpha * np.mean(iq_samples) + (1 - self.dc_alpha) * self.dc_offset
-        iq_processed = iq_samples - self.dc_offset
-        # ensure complex64 for processing pipeline
-        iq_processed = np.asarray(iq_processed, dtype=np.complex64, copy=False)
-        iq_filtered = signal.lfilter(self.iq_b, self.iq_a, iq_processed)
-        main_output = self.main_pll.process(iq_filtered)
-        composite = signal.resample_poly(main_output, up=self.up, down=self.down)
-        # ensure float32 to avoid later casts
-        return composite.astype(np.float32, copy=False)
+        try:
+            self.dc_offset = self.dc_alpha * np.mean(iq_samples) + (1 - self.dc_alpha) * self.dc_offset
+            iq_processed = iq_samples - self.dc_offset
+            # ensure complex64 for processing pipeline
+            iq_processed = np.asarray(iq_processed, dtype=np.complex64, copy=False)
+            iq_filtered = signal.lfilter(self.iq_b, self.iq_a, iq_processed)
+            main_output = self.main_pll.process(iq_filtered)
+            composite = signal.resample_poly(main_output, up=self.up, down=self.down)
+            # ensure float32 to avoid later casts
+            return composite.astype(np.float32, copy=False)
+        except Exception as e:
+            self.logger.error(f"Error processing IQ samples: {e}", exc_info=True)
+            raise
 
     def demodulate(self, composite):
         """
@@ -498,10 +578,15 @@ class FMDemodulatorLight:
     """
     def __init__(self, iq_sample_rate=0.25e6, composite_rate=192000,
                  final_audio_rate=48000, stereo=True):
+        self.logger = logging.getLogger('fm_receiver.FMDemodulatorLight')
         self.iq_sample_rate = iq_sample_rate
         self.composite_rate = composite_rate
         self.final_audio_rate = final_audio_rate
         self.stereo = stereo
+
+        self.logger.info(f"Initializing FMDemodulatorLight: IQ={iq_sample_rate/1e6:.3f}MHz, "
+                        f"Composite={composite_rate/1e3:.0f}kHz, Audio={final_audio_rate/1e3:.0f}kHz, "
+                        f"Stereo={'enabled' if stereo else 'disabled'}")
 
         # PLL for pilot signal demodulation (phase output)
         self.pilot_pll = PLL(Kp=0.0432, Ki=0.000116, return_phase=True)
@@ -535,18 +620,22 @@ class FMDemodulatorLight:
         Returns:
             ndarray: Composite signal after resampling.
         """
-        self.dc_offset = self.dc_alpha * np.mean(iq_samples) + (1 - self.dc_alpha) * self.dc_offset
-        iq_processed = iq_samples - self.dc_offset
-        current_phase = np.angle(iq_processed)
-        if self.last_phase is None:
-            phase = np.unwrap(current_phase)
-        else:
-            phase = np.unwrap(np.concatenate(([self.last_phase], current_phase)))[1:]
-        fm_demod = np.diff(phase, prepend=phase[0])
-        self.last_phase = phase[-1]
-        composite = signal.resample_poly(fm_demod, up=self.up, down=self.down) * 0.35
-        # ensure float32 for downstream pipeline
-        return np.asarray(composite, dtype=np.float32, copy=False)
+        try:
+            self.dc_offset = self.dc_alpha * np.mean(iq_samples) + (1 - self.dc_alpha) * self.dc_offset
+            iq_processed = iq_samples - self.dc_offset
+            current_phase = np.angle(iq_processed)
+            if self.last_phase is None:
+                phase = np.unwrap(current_phase)
+            else:
+                phase = np.unwrap(np.concatenate(([self.last_phase], current_phase)))[1:]
+            fm_demod = np.diff(phase, prepend=phase[0])
+            self.last_phase = phase[-1]
+            composite = signal.resample_poly(fm_demod, up=self.up, down=self.down) * 0.35
+            # ensure float32 for downstream pipeline
+            return np.asarray(composite, dtype=np.float32, copy=False)
+        except Exception as e:
+            self.logger.error(f"Error processing IQ samples (Light): {e}", exc_info=True)
+            raise
 
     def demodulate(self, composite):
         """
@@ -618,6 +707,7 @@ class AudioOutput:
     Uses PyAudio for audio output and recording.
     """
     def __init__(self, output_rate=48000, frames_per_buffer=1024):
+        self.logger = logging.getLogger('fm_receiver.AudioOutput')
         self.output_rate = output_rate
         self.frames_per_buffer = frames_per_buffer
         self.audio_buffer_queue = queue.Queue(maxsize=50)
@@ -628,52 +718,68 @@ class AudioOutput:
         self._buffer_deque = deque()
         self._buffer_len = 0  # total number of float32 samples in deque
 
-        self.pyaudio_instance = pyaudio.PyAudio()
-        self.stream = self.pyaudio_instance.open(
-            format=pyaudio.paFloat32,
-            channels=2,
-            rate=int(self.output_rate),
-            output=True,
-            frames_per_buffer=self.frames_per_buffer,
-            stream_callback=self.callback
-        )
-        self.stream.start_stream()
+        try:
+            self.pyaudio_instance = pyaudio.PyAudio()
+            self.stream = self.pyaudio_instance.open(
+                format=pyaudio.paFloat32,
+                channels=2,
+                rate=int(self.output_rate),
+                output=True,
+                frames_per_buffer=self.frames_per_buffer,
+                stream_callback=self.callback
+            )
+            self.stream.start_stream()
+            self.logger.info(f"Audio output initialized: rate={output_rate}Hz, buffer={frames_per_buffer}")
+        except Exception as e:
+            self.logger.error(f"Failed to initialize audio output: {e}")
+            raise
 
     def callback(self, in_data, frame_count, time_info, status):
-        requested_samples = frame_count * 2  # stereo interleaved samples
-        # fill deque from queue (avoid concatenation)
-        while self._buffer_len < requested_samples:
-            try:
-                left, right = self.audio_buffer_queue.get_nowait()
-                stereo = np.empty((left.size + right.size,), dtype=np.float32)
-                stereo[0::2] = left
-                stereo[1::2] = right
-                self._buffer_deque.append(stereo)
-                self._buffer_len += stereo.size
-            except queue.Empty:
-                break
+        try:
+            if status:
+                self.logger.warning(f"Audio callback status: {status}")
 
-        out = np.empty((requested_samples,), dtype=np.float32)
-        filled = 0
-        while filled < requested_samples and self._buffer_deque:
-            chunk = self._buffer_deque[0]
-            need = requested_samples - filled
-            if chunk.size <= need:
-                out[filled:filled + chunk.size] = chunk
-                filled += chunk.size
-                self._buffer_deque.popleft()
-                self._buffer_len -= chunk.size
-            else:
-                out[filled:filled + need] = chunk[:need]
-                # keep remainder in deque (slice shares no memory — acceptable)
-                self._buffer_deque[0] = chunk[need:]
-                self._buffer_len -= need
-                filled += need
+            requested_samples = frame_count * 2  # stereo interleaved samples
+            # fill deque from queue (avoid concatenation)
+            while self._buffer_len < requested_samples:
+                try:
+                    left, right = self.audio_buffer_queue.get_nowait()
+                    stereo = np.empty((left.size + right.size,), dtype=np.float32)
+                    stereo[0::2] = left
+                    stereo[1::2] = right
+                    self._buffer_deque.append(stereo)
+                    self._buffer_len += stereo.size
+                except queue.Empty:
+                    break
 
-        if filled < requested_samples:
-            out[filled:requested_samples] = 0.0
+            out = np.empty((requested_samples,), dtype=np.float32)
+            filled = 0
+            while filled < requested_samples and self._buffer_deque:
+                chunk = self._buffer_deque[0]
+                need = requested_samples - filled
+                if chunk.size <= need:
+                    out[filled:filled + chunk.size] = chunk
+                    filled += chunk.size
+                    self._buffer_deque.popleft()
+                    self._buffer_len -= chunk.size
+                else:
+                    out[filled:filled + need] = chunk[:need]
+                    # keep remainder in deque (slice shares no memory — acceptable)
+                    self._buffer_deque[0] = chunk[need:]
+                    self._buffer_len -= need
+                    filled += need
 
-        return (out.tobytes(), pyaudio.paContinue)
+            if filled < requested_samples:
+                out[filled:requested_samples] = 0.0
+                if filled == 0:
+                    self.logger.debug("Audio buffer underrun")
+
+            return (out.tobytes(), pyaudio.paContinue)
+        except Exception as e:
+            self.logger.error(f"Error in audio callback: {e}", exc_info=True)
+            # Return silence to avoid crashing the audio stream
+            silence = np.zeros(frame_count * 2, dtype=np.float32)
+            return (silence.tobytes(), pyaudio.paContinue)
 
     def enqueue_audio(self, left, right):
         try:
@@ -681,7 +787,9 @@ class AudioOutput:
             right32 = np.asarray(right, dtype=np.float32, copy=False)
             self.audio_buffer_queue.put((left32, right32), timeout=0.01)
         except queue.Full:
-            pass
+            self.logger.debug("Audio buffer queue full, dropping audio data")
+        except Exception as e:
+            self.logger.error(f"Error enqueueing audio: {e}", exc_info=True)
 
     def start_recording(self, filename, channels=2):
         """
@@ -693,6 +801,7 @@ class AudioOutput:
         """
         with self.record_lock:
             if self.recording:
+                self.logger.warning("Already recording")
                 print("Already recording.")
                 return
             try:
@@ -702,8 +811,10 @@ class AudioOutput:
                 wf.setframerate(int(self.output_rate))
                 self.record_wave = wf
                 self.recording = True
+                self.logger.info(f"Recording started: {filename}")
                 print(f"Recording started: {filename}")
             except Exception as e:
+                self.logger.error(f"Recording start failed: {e}", exc_info=True)
                 print("Recording start failed:", e)
 
     def stop_recording(self):
@@ -712,12 +823,15 @@ class AudioOutput:
             if self.recording and self.record_wave is not None:
                 try:
                     self.record_wave.close()
-                except Exception:
-                    pass
-                self.record_wave = None
-                self.recording = False
-                print("Recording stopped.")
+                    self.logger.info("Recording stopped")
+                    print("Recording stopped.")
+                except Exception as e:
+                    self.logger.error(f"Error closing recording file: {e}", exc_info=True)
+                finally:
+                    self.record_wave = None
+                    self.recording = False
             else:
+                self.logger.debug("stop_recording called but not currently recording")
                 print("Not currently recording.")
 
     def record(self, stereo_audio):
@@ -729,16 +843,28 @@ class AudioOutput:
         """
         with self.record_lock:
             if self.recording and self.record_wave is not None:
-                # Clip to [-1,1] before converting to int16 to avoid overflow/distortion
-                clipped = np.clip(stereo_audio, -1.0, 1.0)
-                int16_audio = np.int16(clipped * 32767)
-                self.record_wave.writeframes(int16_audio.tobytes())
+                try:
+                    # Clip to [-1,1] before converting to int16 to avoid overflow/distortion
+                    clipped = np.clip(stereo_audio, -1.0, 1.0)
+                    int16_audio = np.int16(clipped * 32767)
+                    self.record_wave.writeframes(int16_audio.tobytes())
+                except Exception as e:
+                    self.logger.error(f"Error writing audio to file: {e}", exc_info=True)
 
     def cleanup(self):
         """Stop audio stream and terminate PyAudio instance."""
-        self.stream.stop_stream()
-        self.stream.close()
-        self.pyaudio_instance.terminate()
+        try:
+            # Stop recording if active
+            if self.recording:
+                self.logger.info("Stopping active recording during cleanup")
+                self.stop_recording()
+
+            self.stream.stop_stream()
+            self.stream.close()
+            self.pyaudio_instance.terminate()
+            self.logger.info("Audio output cleaned up successfully")
+        except Exception as e:
+            self.logger.error(f"Error during audio cleanup: {e}", exc_info=True)
 
 
 # --------------------------------------------------
@@ -871,6 +997,7 @@ class FMReceiverController:
     The 'light' parameter selects between the standard and light demodulation versions.
     """
     def __init__(self, light=False):
+        self.logger = logging.getLogger('fm_receiver.FMReceiverController')
         self.light = light
         self.quit_event = threading.Event()
         # Predefined station list (station name and frequency)
@@ -887,28 +1014,36 @@ class FMReceiverController:
             "JOLF":         93.0e6,
         }
         self.stations_list = sorted(self.stations.items(), key=lambda x: x[1])
-        # Select demodulator version based on 'light' parameter
-        if self.light:
-            # Initialize SDR receiver
-            self.sdr_receiver = SDRReceiver(sample_rate=0.25e6, center_freq=80e6)
-            self.fm_demodulator = FMDemodulatorLight(
-                iq_sample_rate=self.sdr_receiver.sample_rate,
-                final_audio_rate=48000,
-                stereo=False
-            )
-        else:
-            # Initialize SDR receiver
-            self.sdr_receiver = SDRReceiver(sample_rate=1.024e6, center_freq=80e6)
-            self.fm_demodulator = FMDemodulator(
-                iq_sample_rate=self.sdr_receiver.sample_rate,
-                final_audio_rate=48000,
-                stereo=True
-            )
-        # AudioOutput instance manages its own internal queue
-        self.audio_output = AudioOutput(output_rate=48000, frames_per_buffer=1024)
-        # Start command line interface
-        self.cmd_interface = CommandLineInterface(self)
-        self.threads = []
+
+        try:
+            # Select demodulator version based on 'light' parameter
+            if self.light:
+                self.logger.info("Initializing FM Receiver in Light mode")
+                # Initialize SDR receiver
+                self.sdr_receiver = SDRReceiver(sample_rate=0.25e6, center_freq=80e6)
+                self.fm_demodulator = FMDemodulatorLight(
+                    iq_sample_rate=self.sdr_receiver.sample_rate,
+                    final_audio_rate=48000,
+                    stereo=False
+                )
+            else:
+                self.logger.info("Initializing FM Receiver in Standard mode")
+                # Initialize SDR receiver
+                self.sdr_receiver = SDRReceiver(sample_rate=1.024e6, center_freq=80e6)
+                self.fm_demodulator = FMDemodulator(
+                    iq_sample_rate=self.sdr_receiver.sample_rate,
+                    final_audio_rate=48000,
+                    stereo=True
+                )
+            # AudioOutput instance manages its own internal queue
+            self.audio_output = AudioOutput(output_rate=48000, frames_per_buffer=1024)
+            # Start command line interface
+            self.cmd_interface = CommandLineInterface(self)
+            self.threads = []
+            self.logger.info("FM Receiver Controller initialized successfully")
+        except Exception as e:
+            self.logger.error(f"Failed to initialize FM Receiver Controller: {e}", exc_info=True)
+            raise
 
     def flush_data_queue(self):
         """Clear any unprocessed samples from the SDR data queue."""
@@ -923,63 +1058,130 @@ class FMReceiverController:
         Retrieve IQ samples from SDR, perform FM demodulation and audio conversion,
         then add the resulting audio data to the output queue via AudioOutput.
         """
-        while not self.quit_event.is_set():
-            try:
-                iq_samples = self.sdr_receiver.data_queue.get(timeout=1)
-            except queue.Empty:
-                continue
-            composite = self.fm_demodulator.process_iq_samples(iq_samples)
-            left, right = self.fm_demodulator.demodulate(composite)
-            # Use AudioOutput method to enqueue audio data
-            self.audio_output.enqueue_audio(left, right)
-            if self.audio_output.recording:
-                stereo = np.empty((len(left) * 2,), dtype=np.float32)
-                stereo[0::2] = left
-                stereo[1::2] = right
-                self.audio_output.record(stereo)
+        self.logger.info("Processing thread started")
+        try:
+            while not self.quit_event.is_set():
+                try:
+                    iq_samples = self.sdr_receiver.data_queue.get(timeout=1)
+                except queue.Empty:
+                    continue
+                except Exception as e:
+                    self.logger.error(f"Error getting IQ samples from queue: {e}")
+                    continue
+
+                try:
+                    composite = self.fm_demodulator.process_iq_samples(iq_samples)
+                    left, right = self.fm_demodulator.demodulate(composite)
+                    # Use AudioOutput method to enqueue audio data
+                    self.audio_output.enqueue_audio(left, right)
+
+                    # Check recording status with lock
+                    with self.audio_output.record_lock:
+                        is_recording = self.audio_output.recording
+
+                    if is_recording:
+                        stereo = np.empty((len(left) * 2,), dtype=np.float32)
+                        stereo[0::2] = left
+                        stereo[1::2] = right
+                        self.audio_output.record(stereo)
+                except Exception as e:
+                    self.logger.error(f"Error in processing thread: {e}", exc_info=True)
+                    # Continue processing even if one block fails
+                    continue
+        except Exception as e:
+            self.logger.critical(f"Fatal error in processing thread: {e}", exc_info=True)
+        finally:
+            self.logger.info("Processing thread stopped")
 
     def start(self):
         """Start all threads and begin the main loop."""
-        self.cmd_interface.start()
-
-        sdr_thread = threading.Thread(target=self.sdr_receiver.start, daemon=True)
-        sdr_thread.start()
-        self.threads.append(sdr_thread)
-
-        proc_thread = threading.Thread(target=self.processing_thread, daemon=True)
-        proc_thread.start()
-        self.threads.append(proc_thread)
-
-        if self.light:
-            print("FM Receiver (Light) started.")
-            print(f"SDR sample_rate: {self.sdr_receiver.sample_rate:.0f} Hz, Audio: {self.audio_output.output_rate} Hz")
-        else:
-            print(f"SDR sample_rate: {self.sdr_receiver.sample_rate:.0f} Hz, Composite: {self.fm_demodulator.composite_rate:.0f} Hz, Audio: {self.audio_output.output_rate} Hz")
-            print(f"Default station: {self.sdr_receiver.get_center_frequency()/1e6:.1f} MHz")
-            print("Stereo demodulation enabled.")
-            print("Commands: q, list, <freq>, stereo on/off, record start/stop, agc on/off, gain <value>, etc.")
-
         try:
-            while not self.quit_event.is_set():
-                time.sleep(0.1)
-        except KeyboardInterrupt:
-            self.quit_event.set()
+            self.logger.info("Starting FM Receiver Controller")
+            self.cmd_interface.start()
+
+            sdr_thread = threading.Thread(target=self.sdr_receiver.start, daemon=True)
+            sdr_thread.start()
+            self.threads.append(sdr_thread)
+
+            proc_thread = threading.Thread(target=self.processing_thread, daemon=True)
+            proc_thread.start()
+            self.threads.append(proc_thread)
+
+            if self.light:
+                print("FM Receiver (Light) started.")
+                print(f"SDR sample_rate: {self.sdr_receiver.sample_rate:.0f} Hz, Audio: {self.audio_output.output_rate} Hz")
+            else:
+                print(f"SDR sample_rate: {self.sdr_receiver.sample_rate:.0f} Hz, Composite: {self.fm_demodulator.composite_rate:.0f} Hz, Audio: {self.audio_output.output_rate} Hz")
+                print(f"Default station: {self.sdr_receiver.get_center_frequency()/1e6:.1f} MHz")
+                print("Stereo demodulation enabled.")
+                print("Commands: q, list, <freq>, stereo on/off, record start/stop, agc on/off, gain <value>, etc.")
+
+            self.logger.info("FM Receiver started successfully, entering main loop")
+
+            try:
+                while not self.quit_event.is_set():
+                    time.sleep(0.1)
+            except KeyboardInterrupt:
+                self.logger.info("Keyboard interrupt received")
+                self.quit_event.set()
+            except Exception as e:
+                self.logger.error(f"Unexpected error in main loop: {e}", exc_info=True)
+                self.quit_event.set()
         finally:
             self.cleanup()
 
     def cleanup(self):
         """Cleanup all resources."""
-        self.sdr_receiver.stop()
-        self.audio_output.cleanup()
-        print("Exiting FM Receiver.")
+        try:
+            self.logger.info("Cleaning up FM Receiver Controller")
+            self.sdr_receiver.stop()
+            self.audio_output.cleanup()
+            self.logger.info("FM Receiver cleanup completed")
+            print("Exiting FM Receiver.")
+        except Exception as e:
+            self.logger.error(f"Error during cleanup: {e}", exc_info=True)
+            print("Error during cleanup - see log for details.")
 
 
 # --------------------------------------------------
 # Main execution
 # --------------------------------------------------
 if __name__ == '__main__':
-    if len(sys.argv) > 1 and sys.argv[1] == '--light':
-        controller = FMReceiverController(light=True)
+    # Parse command line arguments
+    light_mode = False
+    enable_logging = False
+    log_level = logging.INFO
+    log_file = None
+
+    for i, arg in enumerate(sys.argv[1:], 1):
+        if arg == '--light':
+            light_mode = True
+        elif arg in ('--log', '--verbose', '-v'):
+            enable_logging = True
+        elif arg == '--debug':
+            enable_logging = True
+            log_level = logging.DEBUG
+        elif arg == '--log-file' and i + 1 < len(sys.argv):
+            log_file = sys.argv[i + 1]
+            enable_logging = True
+
+    # Setup logging only if requested
+    if enable_logging:
+        setup_logging(log_level=log_level, log_file=log_file)
+        logger.info("=" * 60)
+        logger.info("FM Receiver System Starting")
+        logger.info("=" * 60)
     else:
-        controller = FMReceiverController()
-    controller.start()
+        # Disable all logging by setting to CRITICAL+1
+        logging.disable(logging.CRITICAL)
+
+    try:
+        controller = FMReceiverController(light=light_mode)
+        controller.start()
+    except Exception as e:
+        if enable_logging:
+            logger.critical(f"Failed to start FM Receiver: {e}", exc_info=True)
+        print(f"\nFatal error: {e}")
+        if enable_logging:
+            print("Check the log for details.")
+        sys.exit(1)
