@@ -34,6 +34,7 @@ from collections import deque
 import numpy as np
 import pyaudio
 
+from fm_radio.interfaces import AudioOutputInterface
 from fm_radio.constants import (
     AUDIO_OUTPUT_RATE, AUDIO_FRAMES_PER_BUFFER, AUDIO_QUEUE_MAXSIZE,
     AUDIO_CHANNELS, AUDIO_ENQUEUE_TIMEOUT,
@@ -41,7 +42,7 @@ from fm_radio.constants import (
 )
 
 
-class AudioOutput:
+class AudioOutput(AudioOutputInterface):
     """
     Audio output and recording management class
 

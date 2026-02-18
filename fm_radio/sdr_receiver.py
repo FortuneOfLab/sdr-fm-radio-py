@@ -31,10 +31,11 @@ import logging
 import numpy as np
 from rtlsdr import RtlSdr
 
+from fm_radio.interfaces import SDRReceiverInterface
 from fm_radio.constants import SDR_SAMPLE_RATE, SDR_CENTER_FREQ_DEFAULT, SDR_BLOCK_SIZE, SDR_QUEUE_MAXSIZE
 
 
-class SDRReceiver:
+class SDRReceiver(SDRReceiverInterface):
     """
     Receiver class using RTL-SDR
 
