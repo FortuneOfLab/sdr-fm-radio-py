@@ -25,6 +25,8 @@
 #
 """FM Receiver Controller - integrates all subsystems."""
 
+from __future__ import annotations
+
 import queue
 import time
 import threading
@@ -49,12 +51,12 @@ class FMReceiverController:
     Integrates SDR reception, FM demodulation, audio output, and command input.
     The 'light' parameter selects between the standard and light demodulation versions.
     """
-    def __init__(self, light=False):
-        self.logger = logging.getLogger('fm_receiver.FMReceiverController')
-        self.light = light
-        self.quit_event = threading.Event()
+    def __init__(self, light: bool = False) -> None:
+        self.logger: logging.Logger = logging.getLogger('fm_receiver.FMReceiverController')
+        self.light: bool = light
+        self.quit_event: threading.Event = threading.Event()
         # Predefined station list (station name and frequency)
-        self.stations = {
+        self.stations: dict[str, float] = {
             "bayfm":        78.0e6,
             "NACK5":        79.5e6,
             "TOKYO FM":     80.0e6,
@@ -66,7 +68,9 @@ class FMReceiverController:
             "JOQR":         91.6e6,
             "JOLF":         93.0e6,
         }
-        self.stations_list = sorted(self.stations.items(), key=lambda x: x[1])
+        self.stations_list: list[tuple[str, float]] = sorted(
+            self.stations.items(), key=lambda x: x[1],
+        )
 
         try:
             # Select demodulator version based on 'light' parameter
@@ -74,7 +78,7 @@ class FMReceiverController:
                 self.logger.info("Initializing FM Receiver in Light mode")
                 # Initialize SDR receiver
                 self.sdr_receiver = SDRReceiver(sample_rate=SDR_SAMPLE_RATE_LIGHT, center_freq=SDR_CENTER_FREQ_DEFAULT)
-                self.fm_demodulator = FMDemodulatorLight(
+                self.fm_demodulator: FMDemodulator | FMDemodulatorLight = FMDemodulatorLight(
                     iq_sample_rate=self.sdr_receiver.sample_rate,
                     final_audio_rate=AUDIO_OUTPUT_RATE,
                     stereo=False
@@ -89,10 +93,12 @@ class FMReceiverController:
                     stereo=True
                 )
             # AudioOutput instance manages its own internal queue
-            self.audio_output = AudioOutput(output_rate=AUDIO_OUTPUT_RATE, frames_per_buffer=AUDIO_FRAMES_PER_BUFFER)
+            self.audio_output: AudioOutput = AudioOutput(
+                output_rate=AUDIO_OUTPUT_RATE, frames_per_buffer=AUDIO_FRAMES_PER_BUFFER,
+            )
             # Start command line interface
-            self.cmd_interface = CommandLineInterface(self)
-            self.threads = []
+            self.cmd_interface: CommandLineInterface = CommandLineInterface(self)
+            self.threads: list[threading.Thread] = []
             self.logger.info("FM Receiver Controller initialized successfully")
         except Exception as e:
             self.logger.error(f"Failed to initialize FM Receiver Controller: {e}", exc_info=True)
@@ -102,18 +108,18 @@ class FMReceiverController:
     # Facade API — public interface for CLI and external consumers
     # ------------------------------------------------------------------
 
-    def get_stations_list(self):
+    def get_stations_list(self) -> list[tuple[str, float]]:
         """Return the sorted list of (station_name, frequency_hz) tuples."""
         return self.stations_list
 
-    def tune(self, freq_hz):
+    def tune(self, freq_hz: float) -> None:
         """Tune to a new frequency.
 
         Sets the SDR center frequency, flushes stale IQ data, resets
         demodulator state, and stops any active recording.
 
         Args:
-            freq_hz (float): Target frequency in Hz.
+            freq_hz: Target frequency in Hz.
         """
         self.sdr_receiver.set_center_frequency(freq_hz)
         self._flush_data_queue()
@@ -121,61 +127,61 @@ class FMReceiverController:
         if self.audio_output.recording:
             self.audio_output.stop_recording()
 
-    def get_frequency(self):
+    def get_frequency(self) -> float:
         """Return the current center frequency in Hz."""
         return self.sdr_receiver.get_center_frequency()
 
-    def set_stereo(self, enabled):
+    def set_stereo(self, enabled: bool) -> bool:
         """Set stereo/mono demodulation mode.
 
         Args:
-            enabled (bool): True for stereo, False for mono.
+            enabled: True for stereo, False for mono.
 
         Returns:
-            bool: True if stereo mode is supported, False otherwise.
+            True if stereo mode is supported, False otherwise.
         """
         if hasattr(self.fm_demodulator, 'stereo'):
             self.fm_demodulator.stereo = enabled
             return True
         return False
 
-    def start_recording(self, filename):
+    def start_recording(self, filename: str) -> None:
         """Start recording audio to a WAV file.
 
         Args:
-            filename (str): Output WAV file path.
+            filename: Output WAV file path.
         """
         self.audio_output.start_recording(filename)
 
-    def stop_recording(self):
+    def stop_recording(self) -> None:
         """Stop the current recording session."""
         self.audio_output.stop_recording()
 
-    def is_recording(self):
+    def is_recording(self) -> bool:
         """Return True if currently recording."""
         return self.audio_output.recording
 
-    def set_agc_mode(self, enabled):
+    def set_agc_mode(self, enabled: bool) -> None:
         """Enable or disable automatic gain control.
 
         Args:
-            enabled (bool): True to enable AGC, False for manual gain mode.
+            enabled: True to enable AGC, False for manual gain mode.
         """
         self.sdr_receiver.set_manual_gain_mode(not enabled)
 
-    def get_gain(self):
+    def get_gain(self) -> float:
         """Return the current gain value in dB."""
         return self.sdr_receiver.get_gain()
 
-    def set_gain(self, gain):
+    def set_gain(self, gain: float) -> None:
         """Set the manual gain value in dB.
 
         Args:
-            gain (float): Gain value in dB.
+            gain: Gain value in dB.
         """
         self.sdr_receiver.set_gain(gain)
 
-    def is_manual_gain(self):
+    def is_manual_gain(self) -> bool:
         """Return True if manual gain mode is active."""
         return self.sdr_receiver.manual_gain
 
@@ -183,7 +189,7 @@ class FMReceiverController:
     # Internal methods
     # ------------------------------------------------------------------
 
-    def _flush_data_queue(self):
+    def _flush_data_queue(self) -> None:
         """Clear any unprocessed samples from the SDR data queue."""
         while not self.sdr_receiver.data_queue.empty():
             try:
@@ -191,9 +197,8 @@ class FMReceiverController:
             except queue.Empty:
                 break
 
-    def processing_thread(self):
-        """
-        Retrieve IQ samples from SDR, perform FM demodulation and audio conversion,
+    def processing_thread(self) -> None:
+        """Retrieve IQ samples from SDR, perform FM demodulation and audio conversion,
         then add the resulting audio data to the output queue via AudioOutput.
         """
         self.logger.info("Processing thread started")
@@ -231,7 +236,7 @@ class FMReceiverController:
         finally:
             self.logger.info("Processing thread stopped")
 
-    def start(self):
+    def start(self) -> None:
         """Start all threads and begin the main loop."""
         try:
             self.logger.info("Starting FM Receiver Controller")
@@ -268,7 +273,7 @@ class FMReceiverController:
         finally:
             self.cleanup()
 
-    def cleanup(self):
+    def cleanup(self) -> None:
         """Cleanup all resources."""
         try:
             self.logger.info("Cleaning up FM Receiver Controller")

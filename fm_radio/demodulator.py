@@ -32,6 +32,8 @@ Class hierarchy:
            -> FMDemodulatorLight (phase-differentiation IQ processing)
 """
 
+from __future__ import annotations
+
 import logging
 from abc import abstractmethod
 from fractions import Fraction
@@ -129,7 +131,7 @@ class BaseFMDemodulator(FMDemodulatorInterface):
     # Shared demodulation pipeline
     # ------------------------------------------------------------------
 
-    def demodulate(self, composite):
+    def demodulate(self, composite: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Generate stereo or mono audio signals from the composite signal.
 
         Args:
@@ -143,7 +145,7 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         else:
             return self._demodulate_mono(composite)
 
-    def _demodulate_stereo(self, composite):
+    def _demodulate_stereo(self, composite: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Stereo demodulation process.
 
         Process flow:
@@ -181,7 +183,7 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         right_48 = self.deemph_right.process(right_48)
         return left_48, right_48
 
-    def _demodulate_mono(self, composite):
+    def _demodulate_mono(self, composite: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Mono demodulation process.
 
         Args:
@@ -202,7 +204,7 @@ class BaseFMDemodulator(FMDemodulatorInterface):
     # Reset
     # ------------------------------------------------------------------
 
-    def reset(self):
+    def reset(self) -> None:
         """Reset shared state and delegate to subclass."""
         self.pilot_pll.reset()
         self.dc_offset = 0.0
@@ -224,8 +226,13 @@ class FMDemodulator(BaseFMDemodulator):
     stereo separation, and de-emphasis to generate the demodulated signal.
     """
 
-    def __init__(self, iq_sample_rate=SDR_SAMPLE_RATE, composite_rate=COMPOSITE_RATE,
-                 final_audio_rate=AUDIO_OUTPUT_RATE, stereo=True):
+    def __init__(
+        self,
+        iq_sample_rate: float = SDR_SAMPLE_RATE,
+        composite_rate: float = COMPOSITE_RATE,
+        final_audio_rate: float = AUDIO_OUTPUT_RATE,
+        stereo: bool = True,
+    ) -> None:
         super().__init__(
             iq_sample_rate=iq_sample_rate,
             composite_rate=composite_rate,
@@ -244,21 +251,21 @@ class FMDemodulator(BaseFMDemodulator):
         )
 
         # --- Standard-only: main PLL + IQ lowpass filter ---
-        self.main_pll = PLL(Kp=MAIN_PLL_KP, Ki=MAIN_PLL_KI, return_phase=False)
+        self.main_pll: PLL = PLL(Kp=MAIN_PLL_KP, Ki=MAIN_PLL_KI, return_phase=False)
         nyquist = self.iq_sample_rate / 2.0
         self.iq_b, self.iq_a = signal.butter(
             IQ_LOWPASS_ORDER, IQ_LOWPASS_CUTOFF / nyquist, btype="low",
         )
 
-    def process_iq_samples(self, iq_samples):
+    def process_iq_samples(self, iq_samples: np.ndarray) -> np.ndarray:
         """Apply DC offset correction, lowpass filtering, PLL demodulation,
         and resampling to generate the composite signal.
 
         Args:
-            iq_samples (ndarray): Input IQ samples.
+            iq_samples: Input IQ samples.
 
         Returns:
-            ndarray: Composite signal after resampling.
+            Composite signal after resampling.
         """
         try:
             self.dc_offset = (
@@ -275,7 +282,7 @@ class FMDemodulator(BaseFMDemodulator):
             self.logger.error(f"Error processing IQ samples: {e}", exc_info=True)
             raise
 
-    def _reset_subclass(self):
+    def _reset_subclass(self) -> None:
         """Reset main PLL state."""
         self.main_pll.reset()
 
@@ -287,8 +294,13 @@ class FMDemodulatorLight(BaseFMDemodulator):
     Uses phase differentiation for FM demodulation instead of a full PLL.
     """
 
-    def __init__(self, iq_sample_rate=SDR_SAMPLE_RATE_LIGHT, composite_rate=COMPOSITE_RATE,
-                 final_audio_rate=AUDIO_OUTPUT_RATE, stereo=True):
+    def __init__(
+        self,
+        iq_sample_rate: float = SDR_SAMPLE_RATE_LIGHT,
+        composite_rate: float = COMPOSITE_RATE,
+        final_audio_rate: float = AUDIO_OUTPUT_RATE,
+        stereo: bool = True,
+    ) -> None:
         super().__init__(
             iq_sample_rate=iq_sample_rate,
             composite_rate=composite_rate,
@@ -307,17 +319,17 @@ class FMDemodulatorLight(BaseFMDemodulator):
         )
 
         # --- Light-only: phase tracking for differentiation ---
-        self.last_phase = None
+        self.last_phase: float | None = None
 
-    def process_iq_samples(self, iq_samples):
+    def process_iq_samples(self, iq_samples: np.ndarray) -> np.ndarray:
         """Apply DC offset correction, phase extraction/differentiation,
         and resampling to generate the composite signal.
 
         Args:
-            iq_samples (ndarray): Input IQ samples.
+            iq_samples: Input IQ samples.
 
         Returns:
-            ndarray: Composite signal after resampling.
+            Composite signal after resampling.
         """
         try:
             self.dc_offset = (
@@ -341,6 +353,6 @@ class FMDemodulatorLight(BaseFMDemodulator):
             self.logger.error(f"Error processing IQ samples (Light): {e}", exc_info=True)
             raise
 
-    def _reset_subclass(self):
+    def _reset_subclass(self) -> None:
         """Reset phase tracking state."""
         self.last_phase = None

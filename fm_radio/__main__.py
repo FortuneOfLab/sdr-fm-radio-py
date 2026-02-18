@@ -58,6 +58,8 @@ Command Examples (during execution):
   'q'                 : Quit the program
 """
 
+from __future__ import annotations
+
 import sys
 import logging
 
@@ -65,12 +67,13 @@ from fm_radio.logging_config import setup_logging, logger
 from fm_radio.controller import FMReceiverController
 
 
-def main():
+def main() -> None:
+    """Entry point for the FM receiver application."""
     # Parse command line arguments
-    light_mode = False
-    enable_logging = False
-    log_level = logging.INFO
-    log_file = None
+    light_mode: bool = False
+    enable_logging: bool = False
+    log_level: int = logging.INFO
+    log_file: str | None = None
 
     for i, arg in enumerate(sys.argv[1:], 1):
         if arg == '--light':

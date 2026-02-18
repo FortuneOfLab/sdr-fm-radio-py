@@ -25,6 +25,8 @@
 #
 """Phase-Locked Loop (PLL) for FM demodulation."""
 
+from __future__ import annotations
+
 import math
 
 import numpy as np
@@ -32,7 +34,9 @@ from numba import njit
 
 
 @njit
-def pll_demodulate(iq_samples, Kp, Ki, state):
+def pll_demodulate(
+    iq_samples: np.ndarray, Kp: float, Ki: float, state: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
     """
     Numba optimized FM demodulation using PLL
 
@@ -73,53 +77,52 @@ def pll_demodulate(iq_samples, Kp, Ki, state):
 
 
 class PLL:
-    """
-    FM demodulation using a Phase Locked Loop (PLL).
+    """FM demodulation using a Phase Locked Loop (PLL).
 
     Extracts phase or frequency information from IQ samples.
     """
-    def __init__(self, Kp, Ki, return_phase=False):
-        self._Kp = Kp
-        self._Ki = Ki
-        self.return_phase = return_phase
-        self.state = np.zeros(2, dtype=np.float32)  # [phase, integrator]
-        self.last_freq = 0.0
 
-    def process(self, iq_samples):
-        """
-        Process IQ samples with the PLL to generate demodulated signal.
+    def __init__(self, Kp: float, Ki: float, return_phase: bool = False) -> None:
+        self._Kp: float = Kp
+        self._Ki: float = Ki
+        self.return_phase: bool = return_phase
+        self.state: np.ndarray = np.zeros(2, dtype=np.float32)  # [phase, integrator]
+        self.last_freq: float = 0.0
+
+    def process(self, iq_samples: np.ndarray) -> np.ndarray:
+        """Process IQ samples with the PLL to generate demodulated signal.
 
         Args:
-            iq_samples (ndarray): Array of IQ samples.
+            iq_samples: Array of IQ samples.
 
         Returns:
-            ndarray: Demodulated signal (phase or frequency).
+            Demodulated signal (phase or frequency).
         """
         phase_out, freq_out = pll_demodulate(iq_samples, self._Kp, self._Ki, self.state)
         if freq_out.size > 0:
             self.last_freq = freq_out[-1]
         return phase_out if self.return_phase else freq_out
 
-    def get_last_freq(self):
+    def get_last_freq(self) -> float:
         """Retrieve the last frequency estimate."""
         return self.last_freq
 
-    def reset(self):
+    def reset(self) -> None:
         """Reset PLL state (phase and integrator)."""
         self.state[:] = 0.0
 
-    def set_Kp(self, Kp):
+    def set_Kp(self, Kp: float) -> None:
         """Set the proportional gain."""
         self._Kp = Kp
 
-    def get_Kp(self):
+    def get_Kp(self) -> float:
         """Get the proportional gain."""
         return self._Kp
 
-    def set_Ki(self, Ki):
+    def set_Ki(self, Ki: float) -> None:
         """Set the integral gain."""
         self._Ki = Ki
 
-    def get_Ki(self):
+    def get_Ki(self) -> float:
         """Get the integral gain."""
         return self._Ki

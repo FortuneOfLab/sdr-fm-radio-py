@@ -30,8 +30,14 @@ dictionary, while prefix-match commands (``agc``, ``gain``) and numeric
 input (station number / frequency) are handled via fallback logic.
 """
 
+from __future__ import annotations
+
 import time
 import threading
+from typing import TYPE_CHECKING, Callable
+
+if TYPE_CHECKING:
+    from fm_radio.controller import FMReceiverController
 
 
 class CommandLineInterface(threading.Thread):
@@ -42,14 +48,14 @@ class CommandLineInterface(threading.Thread):
     ``_cmd_*`` method, keeping the main loop minimal.
     """
 
-    def __init__(self, controller):
+    def __init__(self, controller: FMReceiverController) -> None:
         super().__init__(daemon=True)
-        self.controller = controller
+        self.controller: FMReceiverController = controller
 
         # Dispatch table: exact command string -> handler method.
         # Each handler receives the raw command string and returns
         # True to continue or False to quit.
-        self._commands = {
+        self._commands: dict[str, Callable[[str], bool]] = {
             'q':            self._cmd_quit,
             'list':         self._cmd_list,
             'stereo on':    self._cmd_stereo_on,
@@ -64,7 +70,7 @@ class CommandLineInterface(threading.Thread):
     # Main loop
     # ------------------------------------------------------------------
 
-    def run(self):
+    def run(self) -> None:
         while not self.controller.quit_event.is_set():
             self._print_help()
             cmd = input().strip().lower()
@@ -75,7 +81,7 @@ class CommandLineInterface(threading.Thread):
     # Dispatch
     # ------------------------------------------------------------------
 
-    def _dispatch(self, cmd):
+    def _dispatch(self, cmd: str) -> bool:
         """Route *cmd* to the appropriate handler.
 
         Resolution order:
@@ -105,7 +111,7 @@ class CommandLineInterface(threading.Thread):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _print_help():
+    def _print_help() -> None:
         """Display available commands."""
         print("\nEnter command:")
         print("  'list' -> show station list")
@@ -118,20 +124,20 @@ class CommandLineInterface(threading.Thread):
         print("  <station_num> or <freq_MHz> -> tune")
         print("  'q' -> quit")
 
-    def _cmd_quit(self, cmd):
+    def _cmd_quit(self, cmd: str) -> bool:
         """Handle 'q' — request shutdown."""
         print("Exiting command input...")
         self.controller.quit_event.set()
         return False
 
-    def _cmd_list(self, cmd):
+    def _cmd_list(self, cmd: str) -> bool:
         """Handle 'list' — display station list."""
         print("Available stations:")
         for i, (name, freq) in enumerate(self.controller.get_stations_list(), start=1):
             print(f"{i}: {name} ({freq/1e6:.1f} MHz)")
         return True
 
-    def _cmd_stereo_on(self, cmd):
+    def _cmd_stereo_on(self, cmd: str) -> bool:
         """Handle 'stereo on' / 'stereo' — enable stereo demodulation."""
         if self.controller.set_stereo(True):
             print("Stereo demodulation enabled.")
@@ -139,7 +145,7 @@ class CommandLineInterface(threading.Thread):
             print("Stereo demodulation not supported.")
         return True
 
-    def _cmd_stereo_off(self, cmd):
+    def _cmd_stereo_off(self, cmd: str) -> bool:
         """Handle 'stereo off' / 'mono' — enable mono demodulation."""
         if self.controller.set_stereo(False):
             print("Mono demodulation enabled.")
@@ -147,7 +153,7 @@ class CommandLineInterface(threading.Thread):
             print("Stereo demodulation not supported.")
         return True
 
-    def _cmd_record_start(self, cmd):
+    def _cmd_record_start(self, cmd: str) -> bool:
         """Handle 'record start' — begin recording with auto-generated filename."""
         current_time = time.strftime("%Y%m%d_%H%M%S")
         freq = self.controller.get_frequency() / 1e6
@@ -155,12 +161,12 @@ class CommandLineInterface(threading.Thread):
         self.controller.start_recording(filename)
         return True
 
-    def _cmd_record_stop(self, cmd):
+    def _cmd_record_stop(self, cmd: str) -> bool:
         """Handle 'record stop' — stop recording."""
         self.controller.stop_recording()
         return True
 
-    def _cmd_agc(self, cmd):
+    def _cmd_agc(self, cmd: str) -> bool:
         """Handle 'agc on', 'agc off', 'agc off <gain>' — AGC control."""
         tokens = cmd.split()
         if len(tokens) == 2:
@@ -184,7 +190,7 @@ class CommandLineInterface(threading.Thread):
             print("Invalid agc command format.")
         return True
 
-    def _cmd_gain(self, cmd):
+    def _cmd_gain(self, cmd: str) -> bool:
         """Handle 'gain <value>' — set manual gain."""
         tokens = cmd.split()
         if len(tokens) == 2:
@@ -201,7 +207,7 @@ class CommandLineInterface(threading.Thread):
             print("Invalid gain command format.")
         return True
 
-    def _cmd_tune(self, cmd):
+    def _cmd_tune(self, cmd: str) -> bool:
         """Handle station number or frequency input — tune to station."""
         try:
             if cmd.isdigit():

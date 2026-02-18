@@ -25,6 +25,8 @@
 #
 """Filter classes for FM signal processing."""
 
+from __future__ import annotations
+
 import math
 
 import numpy as np
@@ -36,17 +38,18 @@ from numba import njit
 # Deemphasis IIR Filter Class (Numba optimized)
 # --------------------------------------------------
 @njit
-def deemphasis_iir_process_numba(x, alpha, prev_output):
-    """
-    Numba-optimized de-emphasis IIR filter processing.
+def deemphasis_iir_process_numba(
+    x: np.ndarray, alpha: float, prev_output: float,
+) -> tuple[np.ndarray, float]:
+    """Numba-optimized de-emphasis IIR filter processing.
 
     Args:
-        x (ndarray): Input audio signal array.
-        alpha (float): Filter coefficient.
-        prev_output (float): Previous output sample for filter state.
+        x: Input audio signal array.
+        alpha: Filter coefficient.
+        prev_output: Previous output sample for filter state.
 
     Returns:
-        tuple: (y, prev) where y is filtered output array and prev is last output value.
+        Tuple of (filtered output array, last output value).
     """
     y = np.empty_like(x)
     prev = prev_output
@@ -57,29 +60,27 @@ def deemphasis_iir_process_numba(x, alpha, prev_output):
 
 
 class DeemphasisIIRFilter:
-    """
-    IIR filter for de-emphasis processing in FM broadcasting.
+    """IIR filter for de-emphasis processing in FM broadcasting.
 
     Args:
-        sample_rate (float): Audio signal sample rate.
-        tau (float): Time constant (e.g., 50e-6 seconds).
+        sample_rate: Audio signal sample rate.
+        tau: Time constant (e.g., 50e-6 seconds).
     """
-    def __init__(self, sample_rate, tau):
-        self.sample_rate = sample_rate
-        self.tau = tau
-        # Calculate filter coefficient alpha using an exponential function
-        self.alpha = math.exp(-1.0 / (sample_rate * tau))
-        self.prev_output = 0.0
 
-    def process(self, x):
-        """
-        Apply de-emphasis processing to the input signal using a Numba-optimized loop.
+    def __init__(self, sample_rate: float, tau: float) -> None:
+        self.sample_rate: float = sample_rate
+        self.tau: float = tau
+        self.alpha: float = math.exp(-1.0 / (sample_rate * tau))
+        self.prev_output: float = 0.0
+
+    def process(self, x: np.ndarray) -> np.ndarray:
+        """Apply de-emphasis processing to the input signal.
 
         Args:
-            x (ndarray): Input audio signal array.
+            x: Input audio signal array.
 
         Returns:
-            ndarray: Audio signal after filtering.
+            Audio signal after filtering.
         """
         y, self.prev_output = deemphasis_iir_process_numba(x, self.alpha, self.prev_output)
         return y
@@ -89,36 +90,33 @@ class DeemphasisIIRFilter:
 # Filter Classes (LowpassFilter & BandpassFilter)
 # --------------------------------------------------
 class LowpassFilter:
-    """
-    Butterworth lowpass filter (streaming using lfilter with state)
-    """
-    def __init__(self, order, cutoff, sample_rate):
-        nyquist = sample_rate / 2.0
-        self.b, self.a = signal.butter(order, cutoff / nyquist, btype="low", analog=False)
-        # filter state for streaming: length = max(len(a), len(b)) - 1
-        self.zi = np.zeros(max(len(self.a), len(self.b)) - 1, dtype=np.float64)
+    """Butterworth lowpass filter (streaming using lfilter with state)."""
 
-    def apply(self, data):
-        """
-        Apply the filter to streaming chunk, preserving state.
-        """
+    def __init__(self, order: int, cutoff: float, sample_rate: float) -> None:
+        nyquist = sample_rate / 2.0
+        self.b: np.ndarray
+        self.a: np.ndarray
+        self.b, self.a = signal.butter(order, cutoff / nyquist, btype="low", analog=False)
+        self.zi: np.ndarray = np.zeros(max(len(self.a), len(self.b)) - 1, dtype=np.float64)
+
+    def apply(self, data: np.ndarray) -> np.ndarray:
+        """Apply the filter to streaming chunk, preserving state."""
         y, self.zi = signal.lfilter(self.b, self.a, data, zi=self.zi)
         return y
 
 
 class BandpassFilter:
-    """
-    Butterworth bandpass filter (streaming using lfilter with state)
-    """
-    def __init__(self, order, lowcut, highcut, sample_rate):
+    """Butterworth bandpass filter (streaming using lfilter with state)."""
+
+    def __init__(self, order: int, lowcut: float, highcut: float, sample_rate: float) -> None:
         nyquist = sample_rate / 2.0
+        self.b: np.ndarray
+        self.a: np.ndarray
         self.b, self.a = signal.butter(order, [lowcut / nyquist, highcut / nyquist],
                                         btype="band", analog=False)
-        self.zi = np.zeros(max(len(self.a), len(self.b)) - 1, dtype=np.float64)
+        self.zi: np.ndarray = np.zeros(max(len(self.a), len(self.b)) - 1, dtype=np.float64)
 
-    def apply(self, data):
-        """
-        Apply the bandpass filter to streaming chunk, preserving state.
-        """
+    def apply(self, data: np.ndarray) -> np.ndarray:
+        """Apply the bandpass filter to streaming chunk, preserving state."""
         y, self.zi = signal.lfilter(self.b, self.a, data, zi=self.zi)
         return y

@@ -25,19 +25,20 @@
 #
 """Logging configuration for the FM receiver system."""
 
+from __future__ import annotations
+
 import logging
 
 
-def setup_logging(log_level=logging.INFO, log_file=None):
-    """
-    Setup logging configuration for the FM receiver system.
+def setup_logging(log_level: int = logging.INFO, log_file: str | None = None) -> None:
+    """Setup logging configuration for the FM receiver system.
 
     Args:
-        log_level: Logging level (default: INFO)
+        log_level: Logging level (default: INFO).
         log_file: Optional log file path. If None, logs to console only.
     """
-    log_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    handlers = [logging.StreamHandler()]
+    log_format: str = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
 
     if log_file:
         handlers.append(logging.FileHandler(log_file))
@@ -45,9 +46,9 @@ def setup_logging(log_level=logging.INFO, log_file=None):
     logging.basicConfig(
         level=log_level,
         format=log_format,
-        handlers=handlers
+        handlers=handlers,
     )
 
 
 # Initialize logger
-logger = logging.getLogger('fm_receiver')
+logger: logging.Logger = logging.getLogger('fm_receiver')

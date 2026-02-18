@@ -25,6 +25,8 @@
 #
 """Audio output and recording management."""
 
+from __future__ import annotations
+
 import queue
 import wave
 import threading
@@ -48,17 +50,22 @@ class AudioOutput(AudioOutputInterface):
 
     Uses PyAudio for audio output and recording.
     """
-    def __init__(self, output_rate=AUDIO_OUTPUT_RATE, frames_per_buffer=AUDIO_FRAMES_PER_BUFFER):
-        self.logger = logging.getLogger('fm_receiver.AudioOutput')
-        self.output_rate = output_rate
-        self.frames_per_buffer = frames_per_buffer
-        self.audio_buffer_queue = queue.Queue(maxsize=AUDIO_QUEUE_MAXSIZE)
-        self.recording = False
-        self.record_wave = None
-        self.record_lock = threading.Lock()
-        # replace large concatenating buffer with deque of numpy arrays
-        self._buffer_deque = deque()
-        self._buffer_len = 0  # total number of float32 samples in deque
+    def __init__(
+        self,
+        output_rate: int = AUDIO_OUTPUT_RATE,
+        frames_per_buffer: int = AUDIO_FRAMES_PER_BUFFER,
+    ) -> None:
+        self.logger: logging.Logger = logging.getLogger('fm_receiver.AudioOutput')
+        self.output_rate: int = output_rate
+        self.frames_per_buffer: int = frames_per_buffer
+        self.audio_buffer_queue: queue.Queue[tuple[np.ndarray, np.ndarray]] = queue.Queue(
+            maxsize=AUDIO_QUEUE_MAXSIZE,
+        )
+        self.recording: bool = False
+        self.record_wave: wave.Wave_write | None = None
+        self.record_lock: threading.Lock = threading.Lock()
+        self._buffer_deque: deque[np.ndarray] = deque()
+        self._buffer_len: int = 0
 
         try:
             self.pyaudio_instance = pyaudio.PyAudio()
@@ -76,7 +83,9 @@ class AudioOutput(AudioOutputInterface):
             self.logger.error(f"Failed to initialize audio output: {e}")
             raise
 
-    def callback(self, in_data, frame_count, time_info, status):
+    def callback(
+        self, in_data: bytes | None, frame_count: int, time_info: dict, status: int,
+    ) -> tuple[bytes, int]:
         try:
             if status:
                 self.logger.warning(f"Audio callback status: {status}")
@@ -123,7 +132,7 @@ class AudioOutput(AudioOutputInterface):
             silence = np.zeros(frame_count * AUDIO_CHANNELS, dtype=np.float32)
             return (silence.tobytes(), pyaudio.paContinue)
 
-    def enqueue_audio(self, left, right):
+    def enqueue_audio(self, left: np.ndarray, right: np.ndarray) -> None:
         try:
             left32 = np.asarray(left, dtype=np.float32, copy=False)
             right32 = np.asarray(right, dtype=np.float32, copy=False)
@@ -133,13 +142,12 @@ class AudioOutput(AudioOutputInterface):
         except Exception as e:
             self.logger.error(f"Error enqueueing audio: {e}", exc_info=True)
 
-    def start_recording(self, filename, channels=2):
-        """
-        Start recording audio.
+    def start_recording(self, filename: str, channels: int = 2) -> None:
+        """Start recording audio.
 
         Args:
-            filename (str): Filename to save the WAV file.
-            channels (int): Number of channels.
+            filename: Filename to save the WAV file.
+            channels: Number of channels.
         """
         with self.record_lock:
             if self.recording:
@@ -159,7 +167,7 @@ class AudioOutput(AudioOutputInterface):
                 self.logger.error(f"Recording start failed: {e}", exc_info=True)
                 print("Recording start failed:", e)
 
-    def stop_recording(self):
+    def stop_recording(self) -> None:
         """Stop recording and close the file."""
         with self.record_lock:
             if self.recording and self.record_wave is not None:
@@ -176,12 +184,11 @@ class AudioOutput(AudioOutputInterface):
                 self.logger.debug("stop_recording called but not currently recording")
                 print("Not currently recording.")
 
-    def record(self, stereo_audio):
-        """
-        Write audio data to file if recording.
+    def record(self, stereo_audio: np.ndarray) -> None:
+        """Write audio data to file if recording.
 
         Args:
-            stereo_audio (ndarray): Stereo audio data.
+            stereo_audio: Stereo audio data.
         """
         with self.record_lock:
             if self.recording and self.record_wave is not None:
@@ -193,7 +200,7 @@ class AudioOutput(AudioOutputInterface):
                 except Exception as e:
                     self.logger.error(f"Error writing audio to file: {e}", exc_info=True)
 
-    def cleanup(self):
+    def cleanup(self) -> None:
         """Stop audio stream and terminate PyAudio instance."""
         try:
             # Stop recording if active

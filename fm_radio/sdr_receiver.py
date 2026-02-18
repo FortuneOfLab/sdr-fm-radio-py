@@ -25,6 +25,8 @@
 #
 """SDR receiver class using RTL-SDR."""
 
+from __future__ import annotations
+
 import queue
 import logging
 
@@ -41,19 +43,24 @@ class SDRReceiver(SDRReceiverInterface):
 
     Retrieves samples from the RTL-SDR device and asynchronously stores them in a queue.
     """
-    def __init__(self, sample_rate=SDR_SAMPLE_RATE, center_freq=SDR_CENTER_FREQ_DEFAULT, block_size=SDR_BLOCK_SIZE):
-        self.logger = logging.getLogger('fm_receiver.SDRReceiver')
-        self.sample_rate = sample_rate
-        self.center_freq = center_freq
-        self.block_size = block_size
-        self.data_queue = queue.Queue(maxsize=SDR_QUEUE_MAXSIZE)
+    def __init__(
+        self,
+        sample_rate: float = SDR_SAMPLE_RATE,
+        center_freq: float = SDR_CENTER_FREQ_DEFAULT,
+        block_size: int = SDR_BLOCK_SIZE,
+    ) -> None:
+        self.logger: logging.Logger = logging.getLogger('fm_receiver.SDRReceiver')
+        self.sample_rate: float = sample_rate
+        self.center_freq: float = center_freq
+        self.block_size: int = block_size
+        self.data_queue: queue.Queue[np.ndarray] = queue.Queue(maxsize=SDR_QUEUE_MAXSIZE)
 
         try:
-            self.sdr = RtlSdr()
+            self.sdr: RtlSdr = RtlSdr()
             self.sdr.sample_rate = self.sample_rate
             self.sdr.center_freq = self.center_freq
             self.sdr.set_manual_gain_enabled(False)
-            self.manual_gain = False
+            self.manual_gain: bool = False
             self.sdr.set_gain(0)
             self.logger.info(f"SDR initialized: sample_rate={sample_rate/1e6:.3f}MHz, center_freq={center_freq/1e6:.1f}MHz")
         except Exception as e:
@@ -67,7 +74,7 @@ class SDRReceiver(SDRReceiverInterface):
         except Exception as e:
             self.logger.warning(f"Failed to disable direct_sampling (may not be supported): {e}")
 
-    def set_center_frequency(self, freq):
+    def set_center_frequency(self, freq: float) -> None:
         """Change the center frequency."""
         try:
             self.center_freq = freq
@@ -77,11 +84,11 @@ class SDRReceiver(SDRReceiverInterface):
             self.logger.error(f"Failed to set center frequency to {freq/1e6:.1f} MHz: {e}")
             raise
 
-    def get_center_frequency(self):
+    def get_center_frequency(self) -> float:
         """Retrieve the current center frequency."""
         return self.sdr.center_freq
 
-    def set_gain(self, gain):
+    def set_gain(self, gain: float) -> None:
         """Set gain value (for manual mode)."""
         try:
             self.sdr.set_gain(gain)
@@ -90,11 +97,11 @@ class SDRReceiver(SDRReceiverInterface):
             self.logger.error(f"Failed to set gain to {gain:.1f} dB: {e}")
             raise
 
-    def get_gain(self):
+    def get_gain(self) -> float:
         """Retrieve the current gain value."""
         return self.sdr.get_gain()
 
-    def set_manual_gain_mode(self, manual):
+    def set_manual_gain_mode(self, manual: bool) -> None:
         """
         Set manual gain mode.
 
@@ -110,12 +117,11 @@ class SDRReceiver(SDRReceiverInterface):
             self.logger.error(f"Failed to set gain mode: {e}")
             raise
 
-    def callback(self, iq_samples, sdr_obj):
-        """
-        Callback to store received IQ samples in the data queue.
+    def callback(self, iq_samples: np.ndarray, sdr_obj: RtlSdr) -> None:
+        """Callback to store received IQ samples in the data queue.
 
         Args:
-            iq_samples (ndarray): Received IQ samples.
+            iq_samples: Received IQ samples.
             sdr_obj: SDR object (unused).
         """
         try:
@@ -129,7 +135,7 @@ class SDRReceiver(SDRReceiverInterface):
             # Drop this buffer if conversion fails to avoid crashing the SDR ctypes callback.
             self.logger.error(f"Error in SDR callback: {e}", exc_info=True)
 
-    def start(self):
+    def start(self) -> None:
         """Start asynchronous sample retrieval."""
         try:
             self.logger.info("Starting SDR async read")
@@ -138,7 +144,7 @@ class SDRReceiver(SDRReceiverInterface):
             self.logger.error(f"Failed to start SDR async read: {e}")
             raise
 
-    def stop(self):
+    def stop(self) -> None:
         """Stop asynchronous sample retrieval and close SDR."""
         try:
             self.logger.info("Stopping SDR async read")
