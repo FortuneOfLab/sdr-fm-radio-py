@@ -56,6 +56,7 @@ from fm_radio.constants import (
     LR_BANDPASS_LOW, LR_BANDPASS_HIGH,
     DEEMPHASIS_TAU, DC_OFFSET_ALPHA,
     AUDIO_OUTPUT_RATE, COMPOSITE_RATE, LIGHT_COMPOSITE_SCALE,
+    AGC_TARGET_AMPLITUDE, AGC_SMOOTHING, AGC_MAX_GAIN, AGC_MIN_GAIN,
     STEREO_BLEND_PILOT_THRESHOLD_HI, STEREO_BLEND_PILOT_THRESHOLD_LO,
     STEREO_BLEND_SMOOTHING,
 )
@@ -118,6 +119,9 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         # --- DC offset tracking ---
         self.dc_offset = 0.0
         self.dc_alpha = DC_OFFSET_ALPHA
+
+        # --- Software AGC ---
+        self.agc_gain: float = 1.0
 
         # --- Adaptive stereo blend ---
         # blend_factor: 1.0 = full stereo, 0.0 = full mono
@@ -228,6 +232,34 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         return mono_48, mono_48
 
     # ------------------------------------------------------------------
+    # Software AGC
+    # ------------------------------------------------------------------
+
+    def _apply_agc(self, iq_samples: np.ndarray) -> np.ndarray:
+        """Normalise IQ amplitude using an EMA-tracked gain.
+
+        Measures the RMS amplitude of the block, updates the AGC gain
+        with exponential smoothing, and scales the samples toward a
+        fixed target amplitude.
+
+        Args:
+            iq_samples: DC-corrected IQ samples.
+
+        Returns:
+            Amplitude-normalised IQ samples.
+        """
+        rms = float(np.sqrt(np.mean(np.abs(iq_samples) ** 2)))
+        if rms > 0:
+            target_gain = AGC_TARGET_AMPLITUDE / rms
+            target_gain = max(AGC_MIN_GAIN, min(AGC_MAX_GAIN, target_gain))
+        else:
+            target_gain = self.agc_gain  # keep previous gain on silence
+        self.agc_gain = (
+            AGC_SMOOTHING * target_gain + (1.0 - AGC_SMOOTHING) * self.agc_gain
+        )
+        return iq_samples * self.agc_gain
+
+    # ------------------------------------------------------------------
     # Reset
     # ------------------------------------------------------------------
 
@@ -235,6 +267,7 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         """Reset shared state and delegate to subclass."""
         self.pilot_pll.reset()
         self.dc_offset = 0.0
+        self.agc_gain = 1.0
         self.blend_factor = 1.0
         self._reset_subclass()
 
@@ -301,6 +334,7 @@ class FMDemodulator(BaseFMDemodulator):
                 + (1 - self.dc_alpha) * self.dc_offset
             )
             iq_processed = iq_samples - self.dc_offset
+            iq_processed = self._apply_agc(iq_processed)
             iq_processed = np.asarray(iq_processed, dtype=np.complex64, copy=False)
             iq_filtered = signal.lfilter(self.iq_b, self.iq_a, iq_processed)
             main_output = self.main_pll.process(iq_filtered)
@@ -365,6 +399,7 @@ class FMDemodulatorLight(BaseFMDemodulator):
                 + (1 - self.dc_alpha) * self.dc_offset
             )
             iq_processed = iq_samples - self.dc_offset
+            iq_processed = self._apply_agc(iq_processed)
             current_phase = np.angle(iq_processed)
             if self.last_phase is None:
                 phase = np.unwrap(current_phase)
