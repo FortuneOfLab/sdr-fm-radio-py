@@ -36,6 +36,8 @@ import time
 import threading
 from typing import TYPE_CHECKING, Callable
 
+from fm_radio.exceptions import RecordingError
+
 if TYPE_CHECKING:
     from fm_radio.controller import FMReceiverController
 
@@ -158,12 +160,20 @@ class CommandLineInterface(threading.Thread):
         current_time = time.strftime("%Y%m%d_%H%M%S")
         freq = self.controller.get_frequency() / 1e6
         filename = f"{current_time}_{freq:.1f}MHz.wav"
-        self.controller.start_recording(filename)
+        try:
+            self.controller.start_recording(filename)
+            print(f"Recording started: {filename}")
+        except RecordingError as e:
+            print(f"Recording start failed: {e}")
         return True
 
     def _cmd_record_stop(self, cmd: str) -> bool:
         """Handle 'record stop' — stop recording."""
-        self.controller.stop_recording()
+        if self.controller.is_recording():
+            self.controller.stop_recording()
+            print("Recording stopped.")
+        else:
+            print("Not currently recording.")
         return True
 
     def _cmd_agc(self, cmd: str) -> bool:

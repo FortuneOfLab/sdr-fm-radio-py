@@ -42,6 +42,7 @@ import numpy as np
 import scipy.signal as signal
 
 from fm_radio.interfaces import FMDemodulatorInterface
+from fm_radio.exceptions import DemodulationError
 from fm_radio.filters import LowpassFilter, BandpassFilter, DeemphasisIIRFilter
 from fm_radio.pll import PLL
 from fm_radio.constants import (
@@ -278,9 +279,9 @@ class FMDemodulator(BaseFMDemodulator):
             main_output = self.main_pll.process(iq_filtered)
             composite = signal.resample_poly(main_output, up=self.up, down=self.down)
             return composite.astype(np.float32, copy=False)
-        except Exception as e:
+        except (ValueError, TypeError) as e:
             self.logger.error(f"Error processing IQ samples: {e}", exc_info=True)
-            raise
+            raise DemodulationError(f"Error processing IQ samples: {e}") from e
 
     def _reset_subclass(self) -> None:
         """Reset main PLL state."""
@@ -349,9 +350,9 @@ class FMDemodulatorLight(BaseFMDemodulator):
                 * LIGHT_COMPOSITE_SCALE
             )
             return np.asarray(composite, dtype=np.float32, copy=False)
-        except Exception as e:
+        except (ValueError, TypeError) as e:
             self.logger.error(f"Error processing IQ samples (Light): {e}", exc_info=True)
-            raise
+            raise DemodulationError(f"Error processing IQ samples (Light): {e}") from e
 
     def _reset_subclass(self) -> None:
         """Reset phase tracking state."""

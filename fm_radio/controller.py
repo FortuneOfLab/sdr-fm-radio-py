@@ -38,6 +38,7 @@ from fm_radio.sdr_receiver import SDRReceiver
 from fm_radio.demodulator import FMDemodulator, FMDemodulatorLight
 from fm_radio.audio_output import AudioOutput
 from fm_radio.cli import CommandLineInterface
+from fm_radio.exceptions import SDRDeviceError, AudioOutputError
 from fm_radio.constants import (
     SDR_SAMPLE_RATE, SDR_SAMPLE_RATE_LIGHT, SDR_CENTER_FREQ_DEFAULT,
     AUDIO_OUTPUT_RATE, AUDIO_FRAMES_PER_BUFFER,
@@ -100,7 +101,7 @@ class FMReceiverController:
             self.cmd_interface: CommandLineInterface = CommandLineInterface(self)
             self.threads: list[threading.Thread] = []
             self.logger.info("FM Receiver Controller initialized successfully")
-        except Exception as e:
+        except (SDRDeviceError, AudioOutputError) as e:
             self.logger.error(f"Failed to initialize FM Receiver Controller: {e}", exc_info=True)
             raise
 

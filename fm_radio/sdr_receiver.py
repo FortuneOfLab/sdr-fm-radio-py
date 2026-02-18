@@ -34,6 +34,7 @@ import numpy as np
 from rtlsdr import RtlSdr
 
 from fm_radio.interfaces import SDRReceiverInterface
+from fm_radio.exceptions import SDRDeviceError
 from fm_radio.constants import SDR_SAMPLE_RATE, SDR_CENTER_FREQ_DEFAULT, SDR_BLOCK_SIZE, SDR_QUEUE_MAXSIZE
 
 
@@ -63,15 +64,15 @@ class SDRReceiver(SDRReceiverInterface):
             self.manual_gain: bool = False
             self.sdr.set_gain(0)
             self.logger.info(f"SDR initialized: sample_rate={sample_rate/1e6:.3f}MHz, center_freq={center_freq/1e6:.1f}MHz")
-        except Exception as e:
+        except OSError as e:
             self.logger.error(f"Failed to initialize RTL-SDR device: {e}")
-            raise
+            raise SDRDeviceError(f"Failed to initialize RTL-SDR device: {e}") from e
 
         try:
             # Disable direct_sampling if available
             self.sdr.direct_sampling = 0
             self.logger.debug("Direct sampling disabled")
-        except Exception as e:
+        except OSError as e:
             self.logger.warning(f"Failed to disable direct_sampling (may not be supported): {e}")
 
     def set_center_frequency(self, freq: float) -> None:
@@ -80,9 +81,9 @@ class SDRReceiver(SDRReceiverInterface):
             self.center_freq = freq
             self.sdr.center_freq = freq
             self.logger.info(f"Center frequency set to {freq/1e6:.1f} MHz")
-        except Exception as e:
+        except OSError as e:
             self.logger.error(f"Failed to set center frequency to {freq/1e6:.1f} MHz: {e}")
-            raise
+            raise SDRDeviceError(f"Failed to set center frequency: {e}") from e
 
     def get_center_frequency(self) -> float:
         """Retrieve the current center frequency."""
@@ -93,9 +94,9 @@ class SDRReceiver(SDRReceiverInterface):
         try:
             self.sdr.set_gain(gain)
             self.logger.info(f"Gain set to {gain:.1f} dB")
-        except Exception as e:
+        except OSError as e:
             self.logger.error(f"Failed to set gain to {gain:.1f} dB: {e}")
-            raise
+            raise SDRDeviceError(f"Failed to set gain: {e}") from e
 
     def get_gain(self) -> float:
         """Retrieve the current gain value."""
@@ -113,9 +114,9 @@ class SDRReceiver(SDRReceiverInterface):
             self.sdr.set_manual_gain_enabled(manual)
             mode = "manual" if manual else "AGC"
             self.logger.info(f"Gain mode set to {mode}")
-        except Exception as e:
+        except OSError as e:
             self.logger.error(f"Failed to set gain mode: {e}")
-            raise
+            raise SDRDeviceError(f"Failed to set gain mode: {e}") from e
 
     def callback(self, iq_samples: np.ndarray, sdr_obj: RtlSdr) -> None:
         """Callback to store received IQ samples in the data queue.
@@ -140,20 +141,20 @@ class SDRReceiver(SDRReceiverInterface):
         try:
             self.logger.info("Starting SDR async read")
             self.sdr.read_samples_async(self.callback, num_samples=self.block_size)
-        except Exception as e:
+        except OSError as e:
             self.logger.error(f"Failed to start SDR async read: {e}")
-            raise
+            raise SDRDeviceError(f"Failed to start SDR async read: {e}") from e
 
     def stop(self) -> None:
         """Stop asynchronous sample retrieval and close SDR."""
         try:
             self.logger.info("Stopping SDR async read")
             self.sdr.cancel_read_async()
-        except Exception as e:
+        except OSError as e:
             self.logger.warning(f"Error canceling async read: {e}")
 
         try:
             self.sdr.close()
             self.logger.info("SDR closed successfully")
-        except Exception as e:
+        except OSError as e:
             self.logger.error(f"Error closing SDR: {e}")

@@ -37,6 +37,7 @@ import numpy as np
 import pyaudio
 
 from fm_radio.interfaces import AudioOutputInterface
+from fm_radio.exceptions import AudioOutputError, RecordingError
 from fm_radio.constants import (
     AUDIO_OUTPUT_RATE, AUDIO_FRAMES_PER_BUFFER, AUDIO_QUEUE_MAXSIZE,
     AUDIO_CHANNELS, AUDIO_ENQUEUE_TIMEOUT,
@@ -79,9 +80,9 @@ class AudioOutput(AudioOutputInterface):
             )
             self.stream.start_stream()
             self.logger.info(f"Audio output initialized: rate={output_rate}Hz, buffer={frames_per_buffer}")
-        except Exception as e:
+        except OSError as e:
             self.logger.error(f"Failed to initialize audio output: {e}")
-            raise
+            raise AudioOutputError(f"Failed to initialize audio output: {e}") from e
 
     def callback(
         self, in_data: bytes | None, frame_count: int, time_info: dict, status: int,
@@ -152,7 +153,6 @@ class AudioOutput(AudioOutputInterface):
         with self.record_lock:
             if self.recording:
                 self.logger.warning("Already recording")
-                print("Already recording.")
                 return
             try:
                 wf = wave.open(filename, 'wb')
@@ -162,10 +162,9 @@ class AudioOutput(AudioOutputInterface):
                 self.record_wave = wf
                 self.recording = True
                 self.logger.info(f"Recording started: {filename}")
-                print(f"Recording started: {filename}")
-            except Exception as e:
+            except (OSError, wave.Error) as e:
                 self.logger.error(f"Recording start failed: {e}", exc_info=True)
-                print("Recording start failed:", e)
+                raise RecordingError(f"Recording start failed: {e}") from e
 
     def stop_recording(self) -> None:
         """Stop recording and close the file."""
@@ -174,15 +173,13 @@ class AudioOutput(AudioOutputInterface):
                 try:
                     self.record_wave.close()
                     self.logger.info("Recording stopped")
-                    print("Recording stopped.")
-                except Exception as e:
+                except (OSError, wave.Error) as e:
                     self.logger.error(f"Error closing recording file: {e}", exc_info=True)
                 finally:
                     self.record_wave = None
                     self.recording = False
             else:
                 self.logger.debug("stop_recording called but not currently recording")
-                print("Not currently recording.")
 
     def record(self, stereo_audio: np.ndarray) -> None:
         """Write audio data to file if recording.
@@ -197,7 +194,7 @@ class AudioOutput(AudioOutputInterface):
                     clipped = np.clip(stereo_audio, -1.0, 1.0)
                     int16_audio = np.int16(clipped * RECORD_MAX_INT16)
                     self.record_wave.writeframes(int16_audio.tobytes())
-                except Exception as e:
+                except (OSError, wave.Error) as e:
                     self.logger.error(f"Error writing audio to file: {e}", exc_info=True)
 
     def cleanup(self) -> None:
