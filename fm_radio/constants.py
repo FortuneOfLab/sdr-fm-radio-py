@@ -85,3 +85,10 @@ RECORD_MAX_INT16 = 32767            # Max value for int16 conversion
 # --------------------------------------------------
 COMPOSITE_RATE = 192000             # Composite signal sample rate (Hz)
 LIGHT_COMPOSITE_SCALE = 0.35       # Scaling factor for light mode composite
+
+# --------------------------------------------------
+# Adaptive stereo blend
+# --------------------------------------------------
+STEREO_BLEND_PILOT_THRESHOLD_HI = 0.10  # Pilot power above this -> full stereo
+STEREO_BLEND_PILOT_THRESHOLD_LO = 0.01  # Pilot power below this -> full mono
+STEREO_BLEND_SMOOTHING = 0.05           # EMA smoothing for blend factor (0-1)

@@ -56,6 +56,8 @@ from fm_radio.constants import (
     LR_BANDPASS_LOW, LR_BANDPASS_HIGH,
     DEEMPHASIS_TAU, DC_OFFSET_ALPHA,
     AUDIO_OUTPUT_RATE, COMPOSITE_RATE, LIGHT_COMPOSITE_SCALE,
+    STEREO_BLEND_PILOT_THRESHOLD_HI, STEREO_BLEND_PILOT_THRESHOLD_LO,
+    STEREO_BLEND_SMOOTHING,
 )
 
 
@@ -117,6 +119,10 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         self.dc_offset = 0.0
         self.dc_alpha = DC_OFFSET_ALPHA
 
+        # --- Adaptive stereo blend ---
+        # blend_factor: 1.0 = full stereo, 0.0 = full mono
+        self.blend_factor: float = 1.0
+
         # --- Resample ratios ---
         # IQ sample rate -> composite rate
         ratio = Fraction(
@@ -147,15 +153,20 @@ class BaseFMDemodulator(FMDemodulatorInterface):
             return self._demodulate_mono(composite)
 
     def _demodulate_stereo(self, composite: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Stereo demodulation process.
+        """Stereo demodulation with adaptive blend.
+
+        When the 19 kHz pilot signal is strong the output is full stereo.
+        As the pilot weakens (weak signal / multipath) the output smoothly
+        transitions toward mono, improving the signal-to-noise ratio.
 
         Process flow:
           1. Extract mono signal via lowpass filter.
           2. Extract pilot signal using bandpass filter and Hilbert transform.
-          3. Generate subcarrier from pilot phase.
-          4. Extract and baseband LR signal.
-          5. Combine channels (L = mono + LR, R = mono - LR).
-          6. Resample and apply de-emphasis.
+          3. Measure pilot power and update blend factor (EMA-smoothed).
+          4. Generate subcarrier from pilot phase.
+          5. Extract and baseband LR signal, scaled by blend factor.
+          6. Combine channels (L = mono + LR, R = mono - LR).
+          7. Resample and apply de-emphasis.
 
         Returns:
             tuple: (left_channel_audio, right_channel_audio)
@@ -164,10 +175,25 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         pilot_signal = self.bp_pilot.apply(composite)
         pilot_complex = signal.hilbert(pilot_signal.astype(np.float32))
         pilot_phase = self.pilot_pll.process(pilot_complex)
+
+        # --- Adaptive stereo blend based on pilot power ---
+        pilot_power = float(np.mean(pilot_signal ** 2))
+        lo = STEREO_BLEND_PILOT_THRESHOLD_LO
+        hi = STEREO_BLEND_PILOT_THRESHOLD_HI
+        if pilot_power >= hi:
+            target = 1.0
+        elif pilot_power <= lo:
+            target = 0.0
+        else:
+            target = (pilot_power - lo) / (hi - lo)
+        # EMA smoothing to avoid abrupt transitions
+        alpha = STEREO_BLEND_SMOOTHING
+        self.blend_factor = alpha * target + (1.0 - alpha) * self.blend_factor
+
         subcarrier = np.cos(2.0 * pilot_phase)
         lr_band = self.bp_lr.apply(composite)
         lr_demodulated = lr_band * subcarrier
-        lr_baseband = self.lp_base.apply(lr_demodulated)
+        lr_baseband = self.lp_base.apply(lr_demodulated) * self.blend_factor
         left_channel = mono + lr_baseband
         right_channel = mono - lr_baseband
 
@@ -209,6 +235,7 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         """Reset shared state and delegate to subclass."""
         self.pilot_pll.reset()
         self.dc_offset = 0.0
+        self.blend_factor = 1.0
         self._reset_subclass()
 
     @abstractmethod
