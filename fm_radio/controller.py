@@ -98,7 +98,92 @@ class FMReceiverController:
             self.logger.error(f"Failed to initialize FM Receiver Controller: {e}", exc_info=True)
             raise
 
-    def flush_data_queue(self):
+    # ------------------------------------------------------------------
+    # Facade API — public interface for CLI and external consumers
+    # ------------------------------------------------------------------
+
+    def get_stations_list(self):
+        """Return the sorted list of (station_name, frequency_hz) tuples."""
+        return self.stations_list
+
+    def tune(self, freq_hz):
+        """Tune to a new frequency.
+
+        Sets the SDR center frequency, flushes stale IQ data, resets
+        demodulator state, and stops any active recording.
+
+        Args:
+            freq_hz (float): Target frequency in Hz.
+        """
+        self.sdr_receiver.set_center_frequency(freq_hz)
+        self._flush_data_queue()
+        self.fm_demodulator.reset()
+        if self.audio_output.recording:
+            self.audio_output.stop_recording()
+
+    def get_frequency(self):
+        """Return the current center frequency in Hz."""
+        return self.sdr_receiver.get_center_frequency()
+
+    def set_stereo(self, enabled):
+        """Set stereo/mono demodulation mode.
+
+        Args:
+            enabled (bool): True for stereo, False for mono.
+
+        Returns:
+            bool: True if stereo mode is supported, False otherwise.
+        """
+        if hasattr(self.fm_demodulator, 'stereo'):
+            self.fm_demodulator.stereo = enabled
+            return True
+        return False
+
+    def start_recording(self, filename):
+        """Start recording audio to a WAV file.
+
+        Args:
+            filename (str): Output WAV file path.
+        """
+        self.audio_output.start_recording(filename)
+
+    def stop_recording(self):
+        """Stop the current recording session."""
+        self.audio_output.stop_recording()
+
+    def is_recording(self):
+        """Return True if currently recording."""
+        return self.audio_output.recording
+
+    def set_agc_mode(self, enabled):
+        """Enable or disable automatic gain control.
+
+        Args:
+            enabled (bool): True to enable AGC, False for manual gain mode.
+        """
+        self.sdr_receiver.set_manual_gain_mode(not enabled)
+
+    def get_gain(self):
+        """Return the current gain value in dB."""
+        return self.sdr_receiver.get_gain()
+
+    def set_gain(self, gain):
+        """Set the manual gain value in dB.
+
+        Args:
+            gain (float): Gain value in dB.
+        """
+        self.sdr_receiver.set_gain(gain)
+
+    def is_manual_gain(self):
+        """Return True if manual gain mode is active."""
+        return self.sdr_receiver.manual_gain
+
+    # ------------------------------------------------------------------
+    # Internal methods
+    # ------------------------------------------------------------------
+
+    def _flush_data_queue(self):
         """Clear any unprocessed samples from the SDR data queue."""
         while not self.sdr_receiver.data_queue.empty():
             try:
