@@ -121,6 +121,7 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         self.dc_alpha = DC_OFFSET_ALPHA
 
         # --- Software AGC ---
+        self.agc_enabled: bool = True
         self.agc_gain: float = 1.0
 
         # --- Adaptive stereo blend ---
@@ -240,14 +241,17 @@ class BaseFMDemodulator(FMDemodulatorInterface):
 
         Measures the RMS amplitude of the block, updates the AGC gain
         with exponential smoothing, and scales the samples toward a
-        fixed target amplitude.
+        fixed target amplitude.  When software AGC is disabled the
+        samples are returned unchanged.
 
         Args:
             iq_samples: DC-corrected IQ samples.
 
         Returns:
-            Amplitude-normalised IQ samples.
+            Amplitude-normalised IQ samples (or unmodified if AGC disabled).
         """
+        if not self.agc_enabled:
+            return iq_samples
         rms = float(np.sqrt(np.mean(np.abs(iq_samples) ** 2)))
         if rms > 0:
             target_gain = AGC_TARGET_AMPLITUDE / rms

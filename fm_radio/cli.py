@@ -66,6 +66,8 @@ class CommandLineInterface(threading.Thread):
             'mono':         self._cmd_stereo_off,
             'record start': self._cmd_record_start,
             'record stop':  self._cmd_record_stop,
+            'sagc on':      self._cmd_sagc_on,
+            'sagc off':     self._cmd_sagc_off,
         }
 
     # ------------------------------------------------------------------
@@ -120,9 +122,11 @@ class CommandLineInterface(threading.Thread):
         print("  'stereo on/off' or 'mono' -> toggle stereo demodulation")
         print("  'record start' -> start recording with auto-generated filename")
         print("  'record stop' -> stop recording")
-        print("  'agc on' -> enable AGC")
-        print("  'agc off' -> disable AGC (manual mode)")
-        print("  'gain <value>' -> set manual gain")
+        print("  'agc on' -> enable hardware AGC (RTL-SDR)")
+        print("  'agc off' -> disable hardware AGC (manual mode)")
+        print("  'gain <value>' -> set manual gain (when hardware AGC is off)")
+        print("  'sagc on' -> enable software AGC (DSP-level)")
+        print("  'sagc off' -> disable software AGC")
         print("  <station_num> or <freq_MHz> -> tune")
         print("  'q' -> quit")
 
@@ -176,8 +180,20 @@ class CommandLineInterface(threading.Thread):
             print("Not currently recording.")
         return True
 
+    def _cmd_sagc_on(self, cmd: str) -> bool:
+        """Handle 'sagc on' — enable software AGC."""
+        self.controller.set_software_agc(True)
+        print("Software AGC enabled.")
+        return True
+
+    def _cmd_sagc_off(self, cmd: str) -> bool:
+        """Handle 'sagc off' — disable software AGC."""
+        self.controller.set_software_agc(False)
+        print("Software AGC disabled.")
+        return True
+
     def _cmd_agc(self, cmd: str) -> bool:
-        """Handle 'agc on', 'agc off', 'agc off <gain>' — AGC control."""
+        """Handle 'agc on', 'agc off', 'agc off <gain>' — hardware AGC control."""
         tokens = cmd.split()
         if len(tokens) == 2:
             if tokens[1] == "on":
