@@ -97,6 +97,6 @@ AGC_MIN_GAIN = 0.1                  # Minimum AGC gain
 # --------------------------------------------------
 # Adaptive stereo blend
 # --------------------------------------------------
-STEREO_BLEND_PILOT_THRESHOLD_HI = 0.10  # Pilot power above this -> full stereo
-STEREO_BLEND_PILOT_THRESHOLD_LO = 0.01  # Pilot power below this -> full mono
+STEREO_BLEND_PILOT_THRESHOLD_HI = 0.001   # Pilot power above this -> full stereo
+STEREO_BLEND_PILOT_THRESHOLD_LO = 0.0001  # Pilot power below this -> full mono
 STEREO_BLEND_SMOOTHING = 0.05           # EMA smoothing for blend factor (0-1)
