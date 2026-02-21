@@ -52,7 +52,7 @@ MONO_LOWPASS_ORDER = 15             # Mono lowpass filter order (standard)
 MONO_LOWPASS_ORDER_LIGHT = 1        # Mono lowpass filter order (light)
 MONO_LOWPASS_CUTOFF = 15000.0       # Mono/baseband lowpass cutoff (Hz)
 
-PILOT_BANDPASS_ORDER = 5            # Pilot bandpass filter order (standard)
+PILOT_BANDPASS_ORDER = 9            # Pilot bandpass filter order (standard)
 PILOT_BANDPASS_ORDER_LIGHT = 1      # Pilot bandpass filter order (light)
 PILOT_BANDPASS_LOW = 17000.0        # Pilot bandpass lower edge (Hz)
 PILOT_BANDPASS_HIGH = 21000.0       # Pilot bandpass upper edge (Hz)
