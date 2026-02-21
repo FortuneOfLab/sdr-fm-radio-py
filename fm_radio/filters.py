@@ -94,14 +94,14 @@ class LowpassFilter:
 
     def __init__(self, order: int, cutoff: float, sample_rate: float) -> None:
         nyquist = sample_rate / 2.0
-        self.b: np.ndarray
-        self.a: np.ndarray
-        self.b, self.a = signal.butter(order, cutoff / nyquist, btype="low", analog=False)
-        self.zi: np.ndarray = np.zeros(max(len(self.a), len(self.b)) - 1, dtype=np.float64)
+        self.sos: np.ndarray = signal.butter(
+            order, cutoff / nyquist, btype="low", analog=False, output="sos",
+        )
+        self.zi: np.ndarray = signal.sosfilt_zi(self.sos) * 0.0
 
     def apply(self, data: np.ndarray) -> np.ndarray:
         """Apply the filter to streaming chunk, preserving state."""
-        y, self.zi = signal.lfilter(self.b, self.a, data, zi=self.zi)
+        y, self.zi = signal.sosfilt(self.sos, data, zi=self.zi)
         return y
 
 
@@ -110,15 +110,15 @@ class BandpassFilter:
 
     def __init__(self, order: int, lowcut: float, highcut: float, sample_rate: float) -> None:
         nyquist = sample_rate / 2.0
-        self.b: np.ndarray
-        self.a: np.ndarray
-        self.b, self.a = signal.butter(order, [lowcut / nyquist, highcut / nyquist],
-                                        btype="band", analog=False)
-        self.zi: np.ndarray = np.zeros(max(len(self.a), len(self.b)) - 1, dtype=np.float64)
+        self.sos: np.ndarray = signal.butter(
+            order, [lowcut / nyquist, highcut / nyquist], btype="band",
+            analog=False, output="sos",
+        )
+        self.zi: np.ndarray = signal.sosfilt_zi(self.sos) * 0.0
 
     def apply(self, data: np.ndarray) -> np.ndarray:
         """Apply the bandpass filter to streaming chunk, preserving state."""
-        y, self.zi = signal.lfilter(self.b, self.a, data, zi=self.zi)
+        y, self.zi = signal.sosfilt(self.sos, data, zi=self.zi)
         return y
 
 
@@ -126,12 +126,11 @@ class NotchFilter:
     """IIR notch (band-reject) filter (streaming using lfilter with state)."""
 
     def __init__(self, freq: float, Q: float, sample_rate: float) -> None:
-        self.b: np.ndarray
-        self.a: np.ndarray
-        self.b, self.a = signal.iirnotch(freq, Q, sample_rate)
-        self.zi: np.ndarray = np.zeros(max(len(self.a), len(self.b)) - 1, dtype=np.float64)
+        b, a = signal.iirnotch(freq, Q, sample_rate)
+        self.sos: np.ndarray = signal.tf2sos(b, a)
+        self.zi: np.ndarray = signal.sosfilt_zi(self.sos) * 0.0
 
     def apply(self, data: np.ndarray) -> np.ndarray:
         """Apply the notch filter to streaming chunk, preserving state."""
-        y, self.zi = signal.lfilter(self.b, self.a, data, zi=self.zi)
+        y, self.zi = signal.sosfilt(self.sos, data, zi=self.zi)
         return y
