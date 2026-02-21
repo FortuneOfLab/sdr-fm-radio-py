@@ -59,6 +59,7 @@ from fm_radio.constants import (
     LR_BANDPASS_LOW, LR_BANDPASS_HIGH,
     DEEMPHASIS_TAU, DC_OFFSET_ALPHA,
     AUDIO_OUTPUT_RATE, COMPOSITE_RATE, LIGHT_COMPOSITE_SCALE,
+    STANDARD_RESAMPLE_KAISER_BETA,
     STEREO_BLEND_PILOT_SNR_DB_HI, STEREO_BLEND_PILOT_SNR_DB_LO,
     STEREO_BLEND_SMOOTHING,
     PILOT_NOTCH_FREQ, PILOT_NOTCH_Q,
@@ -348,7 +349,10 @@ class FMDemodulator(BaseFMDemodulator):
             iq_processed = np.asarray(iq_processed, dtype=np.complex64, copy=False)
             iq_filtered = signal.lfilter(self.iq_b, self.iq_a, iq_processed)
             main_output = self.main_pll.process(iq_filtered)
-            composite = signal.resample_poly(main_output, up=self.up, down=self.down)
+            composite = signal.resample_poly(
+                main_output, up=self.up, down=self.down,
+                window=("kaiser", STANDARD_RESAMPLE_KAISER_BETA),
+            )
             return composite.astype(np.float32, copy=False)
         except (ValueError, TypeError) as e:
             self.logger.error(f"Error processing IQ samples: {e}", exc_info=True)

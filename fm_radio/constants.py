@@ -90,6 +90,7 @@ RECORD_MAX_INT16 = 32767            # Max value for int16 conversion
 # --------------------------------------------------
 COMPOSITE_RATE = 192000             # Composite signal sample rate (Hz)
 LIGHT_COMPOSITE_SCALE = 0.35       # Scaling factor for light mode composite
+STANDARD_RESAMPLE_KAISER_BETA = 10.0  # Kaiser beta for standard IQ->composite resample
 # --------------------------------------------------
 # Adaptive stereo blend (pilot SNR based)
 # --------------------------------------------------
