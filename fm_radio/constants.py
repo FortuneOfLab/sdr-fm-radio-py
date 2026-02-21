@@ -39,8 +39,8 @@ SDR_QUEUE_MAXSIZE = 20              # Max queued SDR sample blocks
 # --------------------------------------------------
 MAIN_PLL_KP = 0.12926              # Main PLL proportional gain
 MAIN_PLL_KI = 0.0208844            # Main PLL integral gain
-PILOT_PLL_KP = 0.0432              # Pilot PLL proportional gain
-PILOT_PLL_KI = 0.000116            # Pilot PLL integral gain
+PILOT_PLL_KP = 0.032               # Pilot PLL proportional gain (reduced jitter)
+PILOT_PLL_KI = 0.00008             # Pilot PLL integral gain (reduced jitter)
 
 # --------------------------------------------------
 # Filter parameters
