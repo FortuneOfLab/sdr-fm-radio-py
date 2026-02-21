@@ -132,7 +132,15 @@ class BaseFMDemodulator(FMDemodulatorInterface):
             freq=PILOT_NOTCH_FREQ, Q=PILOT_NOTCH_Q,
             sample_rate=self.composite_rate,
         )
+        self.notch_pilot_l2 = NotchFilter(
+            freq=PILOT_NOTCH_FREQ, Q=PILOT_NOTCH_Q,
+            sample_rate=self.composite_rate,
+        )
         self.notch_pilot_r = NotchFilter(
+            freq=PILOT_NOTCH_FREQ, Q=PILOT_NOTCH_Q,
+            sample_rate=self.composite_rate,
+        )
+        self.notch_pilot_r2 = NotchFilter(
             freq=PILOT_NOTCH_FREQ, Q=PILOT_NOTCH_Q,
             sample_rate=self.composite_rate,
         )
@@ -227,7 +235,9 @@ class BaseFMDemodulator(FMDemodulatorInterface):
 
         # Remove 19 kHz pilot tone leakage
         left_channel = self.notch_pilot_l.apply(left_channel)
+        left_channel = self.notch_pilot_l2.apply(left_channel)
         right_channel = self.notch_pilot_r.apply(right_channel)
+        right_channel = self.notch_pilot_r2.apply(right_channel)
 
         # Resample composite -> final audio
         left_48 = signal.resample_poly(
@@ -253,6 +263,7 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         """
         mono = self.lp_mono.apply(composite)
         mono = self.notch_pilot_l.apply(mono)
+        mono = self.notch_pilot_l2.apply(mono)
         mono_48 = signal.resample_poly(
             mono.astype(np.float32),
             self._resample_up, self._resample_down,
