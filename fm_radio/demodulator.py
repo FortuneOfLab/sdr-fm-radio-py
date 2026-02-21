@@ -43,7 +43,7 @@ import scipy.signal as signal
 
 from fm_radio.interfaces import FMDemodulatorInterface
 from fm_radio.exceptions import DemodulationError
-from fm_radio.filters import LowpassFilter, BandpassFilter, DeemphasisIIRFilter
+from fm_radio.filters import LowpassFilter, BandpassFilter, NotchFilter, DeemphasisIIRFilter
 from fm_radio.pll import PLL
 from fm_radio.constants import (
     SDR_SAMPLE_RATE, SDR_SAMPLE_RATE_LIGHT,
@@ -58,6 +58,7 @@ from fm_radio.constants import (
     AUDIO_OUTPUT_RATE, COMPOSITE_RATE, LIGHT_COMPOSITE_SCALE,
     STEREO_BLEND_PILOT_THRESHOLD_HI, STEREO_BLEND_PILOT_THRESHOLD_LO,
     STEREO_BLEND_SMOOTHING,
+    PILOT_NOTCH_FREQ, PILOT_NOTCH_Q,
 )
 
 
@@ -113,6 +114,16 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         )
         self.deemph_right = DeemphasisIIRFilter(
             sample_rate=self.final_audio_rate, tau=DEEMPHASIS_TAU,
+        )
+
+        # --- Pilot tone notch filter (19 kHz removal) ---
+        self.notch_pilot_l = NotchFilter(
+            freq=PILOT_NOTCH_FREQ, Q=PILOT_NOTCH_Q,
+            sample_rate=self.composite_rate,
+        )
+        self.notch_pilot_r = NotchFilter(
+            freq=PILOT_NOTCH_FREQ, Q=PILOT_NOTCH_Q,
+            sample_rate=self.composite_rate,
         )
 
         # --- DC offset tracking ---
@@ -197,6 +208,10 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         left_channel = mono + lr_baseband
         right_channel = mono - lr_baseband
 
+        # Remove 19 kHz pilot tone leakage
+        left_channel = self.notch_pilot_l.apply(left_channel)
+        right_channel = self.notch_pilot_r.apply(right_channel)
+
         # Resample composite -> final audio
         left_48 = signal.resample_poly(
             left_channel.astype(np.float32),
@@ -220,6 +235,7 @@ class BaseFMDemodulator(FMDemodulatorInterface):
             tuple: (mono_channel, mono_channel) where both channels are identical.
         """
         mono = self.lp_mono.apply(composite)
+        mono = self.notch_pilot_l.apply(mono)
         mono_48 = signal.resample_poly(
             mono.astype(np.float32),
             self._resample_up, self._resample_down,

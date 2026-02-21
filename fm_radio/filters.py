@@ -120,3 +120,18 @@ class BandpassFilter:
         """Apply the bandpass filter to streaming chunk, preserving state."""
         y, self.zi = signal.lfilter(self.b, self.a, data, zi=self.zi)
         return y
+
+
+class NotchFilter:
+    """IIR notch (band-reject) filter (streaming using lfilter with state)."""
+
+    def __init__(self, freq: float, Q: float, sample_rate: float) -> None:
+        self.b: np.ndarray
+        self.a: np.ndarray
+        self.b, self.a = signal.iirnotch(freq, Q, sample_rate)
+        self.zi: np.ndarray = np.zeros(max(len(self.a), len(self.b)) - 1, dtype=np.float64)
+
+    def apply(self, data: np.ndarray) -> np.ndarray:
+        """Apply the notch filter to streaming chunk, preserving state."""
+        y, self.zi = signal.lfilter(self.b, self.a, data, zi=self.zi)
+        return y
