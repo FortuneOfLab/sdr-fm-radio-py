@@ -51,6 +51,8 @@ from fm_radio.constants import (
     IQ_LOWPASS_ORDER, IQ_LOWPASS_CUTOFF,
     MONO_LOWPASS_ORDER, MONO_LOWPASS_ORDER_LIGHT, MONO_LOWPASS_CUTOFF,
     LR_BASE_LOWPASS_CUTOFF, LR_HIGH_SPLIT_CUTOFF, LR_HIGH_MIN_GAIN,
+    LR_HIGH_GATE_THRESHOLD, LR_HIGH_GATE_KNEE_MULT,
+    LR_HIGH_GATE_MIN_GAIN, LR_HIGH_GATE_SMOOTHING,
     PILOT_BANDPASS_ORDER, PILOT_BANDPASS_ORDER_LIGHT,
     PILOT_BANDPASS_LOW, PILOT_BANDPASS_HIGH,
     PILOT_NOISE_BAND1_LOW, PILOT_NOISE_BAND1_HIGH,
@@ -157,6 +159,7 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         # --- Adaptive stereo blend ---
         # blend_factor: 1.0 = full stereo, 0.0 = full mono
         self.blend_factor: float = 1.0
+        self.lr_high_gate_gain: float = 1.0
 
         # --- Resample ratios ---
         # IQ sample rate -> composite rate
@@ -237,8 +240,24 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         lr_base_full = self.lp_lr_base.apply(lr_demodulated)
         lr_base_low = self.lp_lr_low.apply(lr_demodulated)
         lr_base_high = lr_base_full - lr_base_low
+
+        high_rms = float(np.sqrt(np.mean(lr_base_high ** 2) + 1e-12))
+        gate_thr = LR_HIGH_GATE_THRESHOLD
+        gate_knee = max(gate_thr * LR_HIGH_GATE_KNEE_MULT, gate_thr + 1e-12)
+        if high_rms <= gate_thr:
+            gate_target = LR_HIGH_GATE_MIN_GAIN
+        elif high_rms >= gate_knee:
+            gate_target = 1.0
+        else:
+            t = (high_rms - gate_thr) / (gate_knee - gate_thr)
+            gate_target = LR_HIGH_GATE_MIN_GAIN + (1.0 - LR_HIGH_GATE_MIN_GAIN) * t
+        gate_alpha = LR_HIGH_GATE_SMOOTHING
+        self.lr_high_gate_gain = (
+            gate_alpha * gate_target + (1.0 - gate_alpha) * self.lr_high_gate_gain
+        )
+
         high_gain = LR_HIGH_MIN_GAIN + (1.0 - LR_HIGH_MIN_GAIN) * self.blend_factor
-        lr_shaped = lr_base_low + high_gain * lr_base_high
+        lr_shaped = lr_base_low + (high_gain * self.lr_high_gate_gain) * lr_base_high
         lr_baseband = lr_shaped * self.blend_factor
         left_channel = mono + lr_baseband
         right_channel = mono - lr_baseband
@@ -290,6 +309,7 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         self.pilot_pll.reset()
         self.dc_offset = 0.0
         self.blend_factor = 1.0
+        self.lr_high_gate_gain = 1.0
         self._reset_subclass()
 
     @abstractmethod
