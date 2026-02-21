@@ -50,7 +50,7 @@ from fm_radio.constants import (
     MAIN_PLL_KP, MAIN_PLL_KI, PILOT_PLL_KP, PILOT_PLL_KI,
     IQ_LOWPASS_ORDER, IQ_LOWPASS_CUTOFF,
     MONO_LOWPASS_ORDER, MONO_LOWPASS_ORDER_LIGHT, MONO_LOWPASS_CUTOFF,
-    LR_BASE_LOWPASS_CUTOFF,
+    LR_BASE_LOWPASS_CUTOFF, LR_HIGH_SPLIT_CUTOFF, LR_HIGH_MIN_GAIN,
     PILOT_BANDPASS_ORDER, PILOT_BANDPASS_ORDER_LIGHT,
     PILOT_BANDPASS_LOW, PILOT_BANDPASS_HIGH,
     PILOT_NOISE_BAND1_LOW, PILOT_NOISE_BAND1_HIGH,
@@ -101,6 +101,10 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         )
         self.lp_lr_base = LowpassFilter(
             order=mono_order, cutoff=LR_BASE_LOWPASS_CUTOFF,
+            sample_rate=self.composite_rate,
+        )
+        self.lp_lr_low = LowpassFilter(
+            order=mono_order, cutoff=LR_HIGH_SPLIT_CUTOFF,
             sample_rate=self.composite_rate,
         )
         self.bp_pilot = BandpassFilter(
@@ -230,7 +234,12 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         subcarrier = np.cos(2.0 * pilot_phase)
         lr_band = self.bp_lr.apply(composite)
         lr_demodulated = lr_band * subcarrier
-        lr_baseband = self.lp_lr_base.apply(lr_demodulated) * self.blend_factor
+        lr_base_full = self.lp_lr_base.apply(lr_demodulated)
+        lr_base_low = self.lp_lr_low.apply(lr_demodulated)
+        lr_base_high = lr_base_full - lr_base_low
+        high_gain = LR_HIGH_MIN_GAIN + (1.0 - LR_HIGH_MIN_GAIN) * self.blend_factor
+        lr_shaped = lr_base_low + high_gain * lr_base_high
+        lr_baseband = lr_shaped * self.blend_factor
         left_channel = mono + lr_baseband
         right_channel = mono - lr_baseband
 
