@@ -102,6 +102,10 @@ STANDARD_RESAMPLE_KAISER_BETA = 10.0  # Kaiser beta for standard IQ->composite r
 # --------------------------------------------------
 STEREO_BLEND_PILOT_SNR_DB_HI = 18.0        # Pilot SNR above this -> full stereo
 STEREO_BLEND_PILOT_SNR_DB_LO = 8.0         # Pilot SNR below this -> full mono
+STEREO_BLEND_PILOT_SNR_EMA_ALPHA = 0.10    # EMA alpha for pilot SNR tracking
+STEREO_BLEND_PILOT_JITTER_EMA_ALPHA = 0.12  # EMA alpha for pilot SNR jitter tracking
+STEREO_BLEND_PILOT_JITTER_REF_DB = 2.5     # Jitter reference in dB (higher -> less sensitive)
+STEREO_BLEND_STABILITY_MIN_FACTOR = 0.50   # Minimum stereo factor when pilot is unstable
 STEREO_BLEND_SMOOTHING = 0.08              # EMA smoothing for blend factor (0-1)
 
 # --------------------------------------------------

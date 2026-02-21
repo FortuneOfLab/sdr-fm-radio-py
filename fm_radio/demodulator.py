@@ -63,6 +63,10 @@ from fm_radio.constants import (
     AUDIO_OUTPUT_RATE, COMPOSITE_RATE, LIGHT_COMPOSITE_SCALE,
     STANDARD_RESAMPLE_KAISER_BETA,
     STEREO_BLEND_PILOT_SNR_DB_HI, STEREO_BLEND_PILOT_SNR_DB_LO,
+    STEREO_BLEND_PILOT_SNR_EMA_ALPHA,
+    STEREO_BLEND_PILOT_JITTER_EMA_ALPHA,
+    STEREO_BLEND_PILOT_JITTER_REF_DB,
+    STEREO_BLEND_STABILITY_MIN_FACTOR,
     STEREO_BLEND_SMOOTHING,
     PILOT_NOTCH_FREQ, PILOT_NOTCH_Q,
 )
@@ -159,6 +163,8 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         # --- Adaptive stereo blend ---
         # blend_factor: 1.0 = full stereo, 0.0 = full mono
         self.blend_factor: float = 1.0
+        self.pilot_snr_ema: float | None = None
+        self.pilot_jitter_ema: float = 0.0
         self.lr_high_gate_gain: float = 1.0
 
         # --- Resample ratios ---
@@ -200,7 +206,7 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         Process flow:
           1. Extract mono signal via lowpass filter.
           2. Extract pilot signal using bandpass filter and Hilbert transform.
-          3. Measure pilot SNR and update blend factor (EMA-smoothed).
+          3. Measure pilot SNR/stability and update blend factor (EMA-smoothed).
           4. Generate subcarrier from pilot phase.
           5. Extract and baseband LR signal, scaled by blend factor.
           6. Combine channels (L = mono + LR, R = mono - LR).
@@ -222,14 +228,31 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         noise_power_2 = float(np.mean(pilot_noise_2 ** 2))
         noise_power = 0.5 * (noise_power_1 + noise_power_2)
         snr_db = 10.0 * np.log10((pilot_power + 1e-12) / (noise_power + 1e-12))
+        if self.pilot_snr_ema is None:
+            self.pilot_snr_ema = snr_db
+        snr_alpha = STEREO_BLEND_PILOT_SNR_EMA_ALPHA
+        self.pilot_snr_ema = snr_alpha * snr_db + (1.0 - snr_alpha) * self.pilot_snr_ema
+        snr_jitter = abs(snr_db - self.pilot_snr_ema)
+        jitter_alpha = STEREO_BLEND_PILOT_JITTER_EMA_ALPHA
+        self.pilot_jitter_ema = (
+            jitter_alpha * snr_jitter + (1.0 - jitter_alpha) * self.pilot_jitter_ema
+        )
+
         lo = STEREO_BLEND_PILOT_SNR_DB_LO
         hi = STEREO_BLEND_PILOT_SNR_DB_HI
         if snr_db >= hi:
-            target = 1.0
+            snr_score = 1.0
         elif snr_db <= lo:
-            target = 0.0
+            snr_score = 0.0
         else:
-            target = (snr_db - lo) / (hi - lo)
+            snr_score = (snr_db - lo) / (hi - lo)
+        jitter_ref = max(STEREO_BLEND_PILOT_JITTER_REF_DB, 1e-6)
+        stability = np.clip(1.0 - (self.pilot_jitter_ema / jitter_ref), 0.0, 1.0)
+        stability_factor = (
+            STEREO_BLEND_STABILITY_MIN_FACTOR
+            + (1.0 - STEREO_BLEND_STABILITY_MIN_FACTOR) * stability
+        )
+        target = snr_score * stability_factor
         # EMA smoothing to avoid abrupt transitions
         alpha = STEREO_BLEND_SMOOTHING
         self.blend_factor = alpha * target + (1.0 - alpha) * self.blend_factor
@@ -309,6 +332,8 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         self.pilot_pll.reset()
         self.dc_offset = 0.0
         self.blend_factor = 1.0
+        self.pilot_snr_ema = None
+        self.pilot_jitter_ema = 0.0
         self.lr_high_gate_gain = 1.0
         self._reset_subclass()
 
