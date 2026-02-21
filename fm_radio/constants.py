@@ -88,9 +88,9 @@ LIGHT_COMPOSITE_SCALE = 0.35       # Scaling factor for light mode composite
 # --------------------------------------------------
 # Adaptive stereo blend
 # --------------------------------------------------
-STEREO_BLEND_PILOT_THRESHOLD_HI = 0.001   # Pilot power above this -> full stereo
-STEREO_BLEND_PILOT_THRESHOLD_LO = 0.0001  # Pilot power below this -> full mono
-STEREO_BLEND_SMOOTHING = 0.05           # EMA smoothing for blend factor (0-1)
+STEREO_BLEND_PILOT_THRESHOLD_HI = 0.0015   # Pilot power above this -> full stereo
+STEREO_BLEND_PILOT_THRESHOLD_LO = 0.0002   # Pilot power below this -> full mono
+STEREO_BLEND_SMOOTHING = 0.08              # EMA smoothing for blend factor (0-1)
 
 # --------------------------------------------------
 # Pilot tone notch filter (19 kHz removal)
