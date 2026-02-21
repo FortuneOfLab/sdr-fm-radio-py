@@ -38,6 +38,7 @@ from fm_radio.sdr_receiver import SDRReceiver
 from fm_radio.demodulator import FMDemodulator, FMDemodulatorLight
 from fm_radio.audio_output import AudioOutput
 from fm_radio.cli import CommandLineInterface
+from fm_radio.auto_gain import AutoGainController
 from fm_radio.exceptions import SDRDeviceError, AudioOutputError
 from fm_radio.constants import (
     SDR_SAMPLE_RATE, SDR_SAMPLE_RATE_LIGHT, SDR_CENTER_FREQ_DEFAULT,
@@ -97,6 +98,8 @@ class FMReceiverController:
             self.audio_output: AudioOutput = AudioOutput(
                 output_rate=AUDIO_OUTPUT_RATE, frames_per_buffer=AUDIO_FRAMES_PER_BUFFER,
             )
+            # Auto gain controller (replaces hardware AGC)
+            self.auto_gain: AutoGainController = AutoGainController(self.sdr_receiver)
             # Start command line interface
             self.cmd_interface: CommandLineInterface = CommandLineInterface(self)
             self.threads: list[threading.Thread] = []
@@ -125,6 +128,7 @@ class FMReceiverController:
         self.sdr_receiver.set_center_frequency(freq_hz)
         self._flush_data_queue()
         self.fm_demodulator.reset()
+        self.auto_gain.reset_counters()
         if self.audio_output.recording:
             self.audio_output.stop_recording()
 
@@ -165,10 +169,17 @@ class FMReceiverController:
     def set_agc_mode(self, enabled: bool) -> None:
         """Enable or disable automatic gain control.
 
+        When enabled, the auto gain controller monitors IQ peak
+        amplitude and adjusts RTL-SDR hardware gain automatically.
+        When disabled, the user controls gain manually via CLI.
+
         Args:
-            enabled: True to enable AGC, False for manual gain mode.
+            enabled: True to enable auto gain, False for manual mode.
         """
-        self.sdr_receiver.set_manual_gain_mode(not enabled)
+        if enabled:
+            self.auto_gain.enable()
+        else:
+            self.auto_gain.disable()
 
     def get_gain(self) -> float:
         """Return the current gain value in dB."""
@@ -177,14 +188,16 @@ class FMReceiverController:
     def set_gain(self, gain: float) -> None:
         """Set the manual gain value in dB.
 
+        Only effective when auto gain is disabled.
+
         Args:
             gain: Gain value in dB.
         """
-        self.sdr_receiver.set_gain(gain)
+        self.auto_gain.set_gain_manual(gain)
 
     def is_manual_gain(self) -> bool:
-        """Return True if manual gain mode is active."""
-        return self.sdr_receiver.manual_gain
+        """Return True if manual gain mode is active (auto gain disabled)."""
+        return not self.auto_gain.enabled
 
     # ------------------------------------------------------------------
     # Internal methods
@@ -214,6 +227,9 @@ class FMReceiverController:
                     continue
 
                 try:
+                    # Auto gain adjustment (before demodulation)
+                    self.auto_gain.update(iq_samples)
+
                     composite = self.fm_demodulator.process_iq_samples(iq_samples)
                     left, right = self.fm_demodulator.demodulate(composite)
                     # Use AudioOutput method to enqueue audio data
@@ -242,9 +258,6 @@ class FMReceiverController:
         try:
             self.logger.info("Starting FM Receiver Controller")
 
-            # Enable hardware AGC at startup
-            self.set_agc_mode(True)
-
             sdr_thread = threading.Thread(target=self.sdr_receiver.start, daemon=True)
             sdr_thread.start()
             self.threads.append(sdr_thread)
@@ -261,7 +274,7 @@ class FMReceiverController:
                 print(f"Default station: {self.sdr_receiver.get_center_frequency()/1e6:.1f} MHz")
                 print("Stereo demodulation enabled.")
                 print("Commands: q, list, <freq>, stereo on/off, record start/stop, agc on/off, gain <value>, etc.")
-            print("Hardware AGC: ON")
+            print("Auto gain control: ON")
 
             # Start CLI thread after startup messages to avoid interleaving
             self.cmd_interface.start()

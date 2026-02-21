@@ -51,9 +51,9 @@ Command Examples (during execution):
   'stereo off' / 'mono': Enable mono demodulation
   'record start'      : Start recording (file name auto-generated)
   'record stop'       : Stop recording
-  'agc on'            : Enable hardware AGC (RTL-SDR)
-  'agc off'           : Disable hardware AGC (manual mode)
-  'gain <value>'      : Set manual gain (only when hardware AGC is off)
+  'agc on'            : Enable auto gain control
+  'agc off'           : Disable auto gain (manual mode)
+  'gain <value>'      : Set manual gain in dB (when auto gain is off)
   '<station_num>' or '<freq_MHz>' : Tune to the specified station
   'q'                 : Quit the program
 """

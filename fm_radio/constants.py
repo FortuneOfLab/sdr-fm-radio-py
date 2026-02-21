@@ -97,3 +97,19 @@ STEREO_BLEND_SMOOTHING = 0.05           # EMA smoothing for blend factor (0-1)
 # --------------------------------------------------
 PILOT_NOTCH_FREQ = 19000.0          # Notch centre frequency (Hz)
 PILOT_NOTCH_Q = 30.0                # Quality factor (narrow notch)
+
+# --------------------------------------------------
+# Auto gain control (hardware gain adjustment)
+# --------------------------------------------------
+# RTL-SDR valid gain values in tenths of dB (R820T tuner)
+AGC_GAIN_TABLE: tuple[int, ...] = (
+    0, 9, 14, 27, 37, 77, 87, 125, 144, 157,
+    166, 197, 207, 229, 254, 280, 297, 328, 338, 364,
+    372, 386, 402, 421, 434, 439, 445, 480, 496,
+)
+AGC_DEFAULT_GAIN_INDEX = 19         # 36.4 dB (upper-mid range)
+AGC_CLIP_THRESHOLD = 0.95           # Peak |IQ| above this -> clipping
+AGC_WEAK_THRESHOLD = 0.3            # Peak |IQ| below this -> weak signal
+AGC_CLIP_COUNT = 3                  # Consecutive clipping blocks to step down
+AGC_WEAK_COUNT = 15                 # Consecutive weak blocks to step up
+AGC_HOLDOFF_BLOCKS = 10             # Blocks to skip after a gain change

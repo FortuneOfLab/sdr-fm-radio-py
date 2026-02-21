@@ -120,9 +120,9 @@ class CommandLineInterface(threading.Thread):
         print("  'stereo on/off' or 'mono' -> toggle stereo demodulation")
         print("  'record start' -> start recording with auto-generated filename")
         print("  'record stop' -> stop recording")
-        print("  'agc on' -> enable hardware AGC (RTL-SDR)")
-        print("  'agc off' -> disable hardware AGC (manual mode)")
-        print("  'gain <value>' -> set manual gain (when hardware AGC is off)")
+        print("  'agc on' -> enable auto gain control")
+        print("  'agc off' -> disable auto gain (manual mode)")
+        print("  'gain <value>' -> set manual gain in dB (when auto gain is off)")
         print("  <station_num> or <freq_MHz> -> tune")
         print("  'q' -> quit")
 
@@ -177,15 +177,15 @@ class CommandLineInterface(threading.Thread):
         return True
 
     def _cmd_agc(self, cmd: str) -> bool:
-        """Handle 'agc on', 'agc off', 'agc off <gain>' — hardware AGC control."""
+        """Handle 'agc on', 'agc off', 'agc off <gain>' — auto gain control."""
         tokens = cmd.split()
         if len(tokens) == 2:
             if tokens[1] == "on":
                 self.controller.set_agc_mode(True)
-                print("Automatic gain control enabled.")
+                print("Auto gain control enabled.")
             elif tokens[1] == "off":
                 self.controller.set_agc_mode(False)
-                print(f"Manual gain control enabled. Current gain: {self.controller.get_gain():.1f}")
+                print(f"Manual gain mode. Current gain: {self.controller.get_gain():.1f} dB")
             else:
                 print("Invalid agc command format.")
         elif len(tokens) == 3 and tokens[1] == "off":
@@ -193,7 +193,7 @@ class CommandLineInterface(threading.Thread):
                 gain_value = float(tokens[2])
                 self.controller.set_agc_mode(False)
                 self.controller.set_gain(gain_value)
-                print(f"Manual gain control enabled. Gain set to {gain_value:.1f}")
+                print(f"Manual gain mode. Gain set to {self.controller.get_gain():.1f} dB")
             except ValueError:
                 print("Invalid gain value.")
         else:
@@ -208,9 +208,9 @@ class CommandLineInterface(threading.Thread):
                 gain_value = float(tokens[1])
                 if self.controller.is_manual_gain():
                     self.controller.set_gain(gain_value)
-                    print(f"Manual gain set to {gain_value:.1f}")
+                    print(f"Manual gain set to {self.controller.get_gain():.1f} dB")
                 else:
-                    print("Automatic gain control is enabled. Please disable it to set manual gain.")
+                    print("Auto gain control is active. Use 'agc off' first.")
             except ValueError:
                 print("Invalid gain command.")
         else:
