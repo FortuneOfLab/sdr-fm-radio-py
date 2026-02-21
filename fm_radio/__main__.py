@@ -54,8 +54,6 @@ Command Examples (during execution):
   'agc on'            : Enable hardware AGC (RTL-SDR)
   'agc off'           : Disable hardware AGC (manual mode)
   'gain <value>'      : Set manual gain (only when hardware AGC is off)
-  'sagc on'           : Enable software AGC (DSP-level)
-  'sagc off'          : Disable software AGC
   '<station_num>' or '<freq_MHz>' : Tune to the specified station
   'q'                 : Quit the program
 """

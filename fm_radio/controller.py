@@ -186,18 +186,6 @@ class FMReceiverController:
         """Return True if manual gain mode is active."""
         return self.sdr_receiver.manual_gain
 
-    def set_software_agc(self, enabled: bool) -> None:
-        """Enable or disable software AGC in the demodulator.
-
-        Args:
-            enabled: True to enable, False to disable.
-        """
-        self.fm_demodulator.agc_enabled = enabled
-
-    def is_software_agc(self) -> bool:
-        """Return True if software AGC is enabled."""
-        return self.fm_demodulator.agc_enabled
-
     # ------------------------------------------------------------------
     # Internal methods
     # ------------------------------------------------------------------
@@ -254,9 +242,8 @@ class FMReceiverController:
         try:
             self.logger.info("Starting FM Receiver Controller")
 
-            # Explicitly enable both AGC layers at startup
+            # Enable hardware AGC at startup
             self.set_agc_mode(True)
-            self.set_software_agc(True)
 
             sdr_thread = threading.Thread(target=self.sdr_receiver.start, daemon=True)
             sdr_thread.start()
@@ -273,8 +260,8 @@ class FMReceiverController:
                 print(f"SDR sample_rate: {self.sdr_receiver.sample_rate:.0f} Hz, Composite: {self.fm_demodulator.composite_rate:.0f} Hz, Audio: {self.audio_output.output_rate} Hz")
                 print(f"Default station: {self.sdr_receiver.get_center_frequency()/1e6:.1f} MHz")
                 print("Stereo demodulation enabled.")
-                print("Commands: q, list, <freq>, stereo on/off, record start/stop, agc on/off, sagc on/off, gain <value>, etc.")
-            print("Hardware AGC: ON, Software AGC: ON")
+                print("Commands: q, list, <freq>, stereo on/off, record start/stop, agc on/off, gain <value>, etc.")
+            print("Hardware AGC: ON")
 
             # Start CLI thread after startup messages to avoid interleaving
             self.cmd_interface.start()

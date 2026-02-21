@@ -85,15 +85,6 @@ RECORD_MAX_INT16 = 32767            # Max value for int16 conversion
 # --------------------------------------------------
 COMPOSITE_RATE = 192000             # Composite signal sample rate (Hz)
 LIGHT_COMPOSITE_SCALE = 0.35       # Scaling factor for light mode composite
-
-# --------------------------------------------------
-# Software AGC (IQ-level)
-# --------------------------------------------------
-AGC_TARGET_AMPLITUDE = 0.3          # Target RMS amplitude for IQ samples
-AGC_SMOOTHING = 0.01                # EMA smoothing for gain estimate (0-1)
-AGC_MAX_GAIN = 100.0                # Maximum AGC gain to prevent noise blow-up
-AGC_MIN_GAIN = 0.1                  # Minimum AGC gain
-
 # --------------------------------------------------
 # Adaptive stereo blend
 # --------------------------------------------------
