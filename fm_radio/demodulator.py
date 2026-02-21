@@ -50,13 +50,16 @@ from fm_radio.constants import (
     MAIN_PLL_KP, MAIN_PLL_KI, PILOT_PLL_KP, PILOT_PLL_KI,
     IQ_LOWPASS_ORDER, IQ_LOWPASS_CUTOFF,
     MONO_LOWPASS_ORDER, MONO_LOWPASS_ORDER_LIGHT, MONO_LOWPASS_CUTOFF,
+    LR_BASE_LOWPASS_CUTOFF,
     PILOT_BANDPASS_ORDER, PILOT_BANDPASS_ORDER_LIGHT,
     PILOT_BANDPASS_LOW, PILOT_BANDPASS_HIGH,
+    PILOT_NOISE_BAND1_LOW, PILOT_NOISE_BAND1_HIGH,
+    PILOT_NOISE_BAND2_LOW, PILOT_NOISE_BAND2_HIGH,
     LR_BANDPASS_ORDER, LR_BANDPASS_ORDER_LIGHT,
     LR_BANDPASS_LOW, LR_BANDPASS_HIGH,
     DEEMPHASIS_TAU, DC_OFFSET_ALPHA,
     AUDIO_OUTPUT_RATE, COMPOSITE_RATE, LIGHT_COMPOSITE_SCALE,
-    STEREO_BLEND_PILOT_THRESHOLD_HI, STEREO_BLEND_PILOT_THRESHOLD_LO,
+    STEREO_BLEND_PILOT_SNR_DB_HI, STEREO_BLEND_PILOT_SNR_DB_LO,
     STEREO_BLEND_SMOOTHING,
     PILOT_NOTCH_FREQ, PILOT_NOTCH_Q,
 )
@@ -95,13 +98,21 @@ class BaseFMDemodulator(FMDemodulatorInterface):
             order=mono_order, cutoff=MONO_LOWPASS_CUTOFF,
             sample_rate=self.composite_rate,
         )
-        self.lp_base = LowpassFilter(
-            order=mono_order, cutoff=MONO_LOWPASS_CUTOFF,
+        self.lp_lr_base = LowpassFilter(
+            order=mono_order, cutoff=LR_BASE_LOWPASS_CUTOFF,
             sample_rate=self.composite_rate,
         )
         self.bp_pilot = BandpassFilter(
             order=pilot_order, lowcut=PILOT_BANDPASS_LOW,
             highcut=PILOT_BANDPASS_HIGH, sample_rate=self.composite_rate,
+        )
+        self.bp_pilot_noise_1 = BandpassFilter(
+            order=pilot_order, lowcut=PILOT_NOISE_BAND1_LOW,
+            highcut=PILOT_NOISE_BAND1_HIGH, sample_rate=self.composite_rate,
+        )
+        self.bp_pilot_noise_2 = BandpassFilter(
+            order=pilot_order, lowcut=PILOT_NOISE_BAND2_LOW,
+            highcut=PILOT_NOISE_BAND2_HIGH, sample_rate=self.composite_rate,
         )
         self.bp_lr = BandpassFilter(
             order=lr_order, lowcut=LR_BANDPASS_LOW,
@@ -173,7 +184,7 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         Process flow:
           1. Extract mono signal via lowpass filter.
           2. Extract pilot signal using bandpass filter and Hilbert transform.
-          3. Measure pilot power and update blend factor (EMA-smoothed).
+          3. Measure pilot SNR and update blend factor (EMA-smoothed).
           4. Generate subcarrier from pilot phase.
           5. Extract and baseband LR signal, scaled by blend factor.
           6. Combine channels (L = mono + LR, R = mono - LR).
@@ -187,16 +198,22 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         pilot_complex = signal.hilbert(pilot_signal.astype(np.float32))
         pilot_phase = self.pilot_pll.process(pilot_complex)
 
-        # --- Adaptive stereo blend based on pilot power ---
+        # --- Adaptive stereo blend based on pilot SNR ---
         pilot_power = float(np.mean(pilot_signal ** 2))
-        lo = STEREO_BLEND_PILOT_THRESHOLD_LO
-        hi = STEREO_BLEND_PILOT_THRESHOLD_HI
-        if pilot_power >= hi:
+        pilot_noise_1 = self.bp_pilot_noise_1.apply(composite)
+        pilot_noise_2 = self.bp_pilot_noise_2.apply(composite)
+        noise_power_1 = float(np.mean(pilot_noise_1 ** 2))
+        noise_power_2 = float(np.mean(pilot_noise_2 ** 2))
+        noise_power = 0.5 * (noise_power_1 + noise_power_2)
+        snr_db = 10.0 * np.log10((pilot_power + 1e-12) / (noise_power + 1e-12))
+        lo = STEREO_BLEND_PILOT_SNR_DB_LO
+        hi = STEREO_BLEND_PILOT_SNR_DB_HI
+        if snr_db >= hi:
             target = 1.0
-        elif pilot_power <= lo:
+        elif snr_db <= lo:
             target = 0.0
         else:
-            target = (pilot_power - lo) / (hi - lo)
+            target = (snr_db - lo) / (hi - lo)
         # EMA smoothing to avoid abrupt transitions
         alpha = STEREO_BLEND_SMOOTHING
         self.blend_factor = alpha * target + (1.0 - alpha) * self.blend_factor
@@ -204,7 +221,7 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         subcarrier = np.cos(2.0 * pilot_phase)
         lr_band = self.bp_lr.apply(composite)
         lr_demodulated = lr_band * subcarrier
-        lr_baseband = self.lp_base.apply(lr_demodulated) * self.blend_factor
+        lr_baseband = self.lp_lr_base.apply(lr_demodulated) * self.blend_factor
         left_channel = mono + lr_baseband
         right_channel = mono - lr_baseband
 

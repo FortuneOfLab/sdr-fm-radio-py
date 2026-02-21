@@ -51,11 +51,16 @@ IQ_LOWPASS_CUTOFF = 200e3           # IQ lowpass cutoff frequency (Hz)
 MONO_LOWPASS_ORDER = 15             # Mono lowpass filter order (standard)
 MONO_LOWPASS_ORDER_LIGHT = 1        # Mono lowpass filter order (light)
 MONO_LOWPASS_CUTOFF = 15000.0       # Mono/baseband lowpass cutoff (Hz)
+LR_BASE_LOWPASS_CUTOFF = 13500.0    # L-R baseband lowpass cutoff (Hz)
 
 PILOT_BANDPASS_ORDER = 9            # Pilot bandpass filter order (standard)
 PILOT_BANDPASS_ORDER_LIGHT = 1      # Pilot bandpass filter order (light)
 PILOT_BANDPASS_LOW = 17000.0        # Pilot bandpass lower edge (Hz)
 PILOT_BANDPASS_HIGH = 21000.0       # Pilot bandpass upper edge (Hz)
+PILOT_NOISE_BAND1_LOW = 16000.0     # Pilot SNR noise band 1 lower edge (Hz)
+PILOT_NOISE_BAND1_HIGH = 17500.0    # Pilot SNR noise band 1 upper edge (Hz)
+PILOT_NOISE_BAND2_LOW = 20500.0     # Pilot SNR noise band 2 lower edge (Hz)
+PILOT_NOISE_BAND2_HIGH = 22000.0    # Pilot SNR noise band 2 upper edge (Hz)
 
 LR_BANDPASS_ORDER = 15              # L-R bandpass filter order (standard)
 LR_BANDPASS_ORDER_LIGHT = 1         # L-R bandpass filter order (light)
@@ -86,10 +91,10 @@ RECORD_MAX_INT16 = 32767            # Max value for int16 conversion
 COMPOSITE_RATE = 192000             # Composite signal sample rate (Hz)
 LIGHT_COMPOSITE_SCALE = 0.35       # Scaling factor for light mode composite
 # --------------------------------------------------
-# Adaptive stereo blend
+# Adaptive stereo blend (pilot SNR based)
 # --------------------------------------------------
-STEREO_BLEND_PILOT_THRESHOLD_HI = 0.0015   # Pilot power above this -> full stereo
-STEREO_BLEND_PILOT_THRESHOLD_LO = 0.0002   # Pilot power below this -> full mono
+STEREO_BLEND_PILOT_SNR_DB_HI = 18.0        # Pilot SNR above this -> full stereo
+STEREO_BLEND_PILOT_SNR_DB_LO = 8.0         # Pilot SNR below this -> full mono
 STEREO_BLEND_SMOOTHING = 0.08              # EMA smoothing for blend factor (0-1)
 
 # --------------------------------------------------
