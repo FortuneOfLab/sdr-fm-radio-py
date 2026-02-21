@@ -51,7 +51,9 @@ IQ_LOWPASS_CUTOFF = 200e3           # IQ lowpass cutoff frequency (Hz)
 MONO_LOWPASS_ORDER = 15             # Mono lowpass filter order (standard)
 MONO_LOWPASS_ORDER_LIGHT = 1        # Mono lowpass filter order (light)
 MONO_LOWPASS_CUTOFF = 15000.0       # Mono/baseband lowpass cutoff (Hz)
-LR_BASE_LOWPASS_CUTOFF = 13500.0    # L-R baseband lowpass cutoff (Hz)
+LR_BASE_LOWPASS_CUTOFF = 15000.0    # L-R baseband lowpass cutoff (Hz)
+LR_HIGH_SPLIT_CUTOFF = 7000.0       # L-R split frequency for high-band damping (Hz)
+LR_HIGH_MIN_GAIN = 0.30             # Minimum high-band gain at low stereo blend
 
 PILOT_BANDPASS_ORDER = 9            # Pilot bandpass filter order (standard)
 PILOT_BANDPASS_ORDER_LIGHT = 1      # Pilot bandpass filter order (light)
