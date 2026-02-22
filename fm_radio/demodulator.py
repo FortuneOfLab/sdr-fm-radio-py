@@ -60,6 +60,7 @@ from fm_radio.constants import (
     PILOT_BANDPASS_ORDER, PILOT_BANDPASS_ORDER_LIGHT,
     PILOT_BANDPASS_LOW, PILOT_BANDPASS_HIGH,
     STEREO_PHASE_ERR_SMOOTHING, STEREO_PHASE_ERR_LIMIT_DEG, STEREO_IQ_PHASE_CORRECTION_ENABLE,
+    STEREO_LEGACY_LR_DEMOD_ENABLE,
     PILOT_NOISE_BAND1_LOW, PILOT_NOISE_BAND1_HIGH,
     PILOT_NOISE_BAND2_LOW, PILOT_NOISE_BAND2_HIGH,
     LR_BANDPASS_ORDER, LR_BANDPASS_ORDER_LIGHT,
@@ -214,6 +215,7 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         self.lr_leak_cancel_coef: float = 0.0
         self.phase_align_enabled: bool = STEREO_PHASE_ALIGN_ENABLE
         self.iq_phase_correction_enabled: bool = STEREO_IQ_PHASE_CORRECTION_ENABLE
+        self.legacy_lr_demod_enabled: bool = STEREO_LEGACY_LR_DEMOD_ENABLE
         self.high_gate_enabled: bool = True
         self.leak_cancel_enabled: bool = True
         self.diag_enable: bool = STEREO_DIAG_ENABLE
@@ -315,35 +317,42 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         subcarrier_i = np.cos(2.0 * pilot_phase)
         subcarrier_q = np.sin(2.0 * pilot_phase)
         lr_band = self.bp_lr.apply(composite)
-        lr_demod_i = lr_band * subcarrier_i * STEREO_LR_DEMOD_GAIN
-        lr_demod_q = lr_band * subcarrier_q * STEREO_LR_DEMOD_GAIN
-        lr_base_full_i = self.lp_lr_base.apply(lr_demod_i)
-        lr_base_full_q = self.lp_lr_base_q.apply(lr_demod_q)
-        cov_iq = float(np.mean(lr_base_full_i * lr_base_full_q))
-        var_i = float(np.mean(lr_base_full_i ** 2))
-        var_q = float(np.mean(lr_base_full_q ** 2))
-        if self.iq_phase_correction_enabled:
-            phase_err_raw = 0.5 * np.arctan2(2.0 * cov_iq, var_i - var_q + 1e-12)
-            phase_lim = np.deg2rad(STEREO_PHASE_ERR_LIMIT_DEG)
-            phase_err_raw = float(np.clip(phase_err_raw, -phase_lim, phase_lim))
-            phase_alpha = STEREO_PHASE_ERR_SMOOTHING
-            self.stereo_phase_err_ema = (
-                phase_alpha * phase_err_raw + (1.0 - phase_alpha) * self.stereo_phase_err_ema
-            )
-            cph = np.cos(self.stereo_phase_err_ema)
-            sph = np.sin(self.stereo_phase_err_ema)
-        else:
+        if self.legacy_lr_demod_enabled:
+            lr_demod_i = lr_band * subcarrier_i * STEREO_LR_DEMOD_GAIN
             self.stereo_phase_err_ema = 0.0
-            cph = 1.0
-            sph = 0.0
-        lr_base_full = lr_base_full_i * cph + lr_base_full_q * sph
+            lr_base_full = self.lp_lr_base.apply(lr_demod_i)
+            lr_base_low = self.lp_lr_low.apply(lr_demod_i)
+            lr_base_mid = self.lp_lr_mid.apply(lr_demod_i)
+        else:
+            lr_demod_i = lr_band * subcarrier_i * STEREO_LR_DEMOD_GAIN
+            lr_demod_q = lr_band * subcarrier_q * STEREO_LR_DEMOD_GAIN
+            lr_base_full_i = self.lp_lr_base.apply(lr_demod_i)
+            lr_base_full_q = self.lp_lr_base_q.apply(lr_demod_q)
+            cov_iq = float(np.mean(lr_base_full_i * lr_base_full_q))
+            var_i = float(np.mean(lr_base_full_i ** 2))
+            var_q = float(np.mean(lr_base_full_q ** 2))
+            if self.iq_phase_correction_enabled:
+                phase_err_raw = 0.5 * np.arctan2(2.0 * cov_iq, var_i - var_q + 1e-12)
+                phase_lim = np.deg2rad(STEREO_PHASE_ERR_LIMIT_DEG)
+                phase_err_raw = float(np.clip(phase_err_raw, -phase_lim, phase_lim))
+                phase_alpha = STEREO_PHASE_ERR_SMOOTHING
+                self.stereo_phase_err_ema = (
+                    phase_alpha * phase_err_raw + (1.0 - phase_alpha) * self.stereo_phase_err_ema
+                )
+                cph = np.cos(self.stereo_phase_err_ema)
+                sph = np.sin(self.stereo_phase_err_ema)
+            else:
+                self.stereo_phase_err_ema = 0.0
+                cph = 1.0
+                sph = 0.0
+            lr_base_full = lr_base_full_i * cph + lr_base_full_q * sph
 
-        lr_base_low_i = self.lp_lr_low.apply(lr_demod_i)
-        lr_base_low_q = self.lp_lr_low_q.apply(lr_demod_q)
-        lr_base_low = lr_base_low_i * cph + lr_base_low_q * sph
-        lr_base_mid_i = self.lp_lr_mid.apply(lr_demod_i)
-        lr_base_mid_q = self.lp_lr_mid_q.apply(lr_demod_q)
-        lr_base_mid = lr_base_mid_i * cph + lr_base_mid_q * sph
+            lr_base_low_i = self.lp_lr_low.apply(lr_demod_i)
+            lr_base_low_q = self.lp_lr_low_q.apply(lr_demod_q)
+            lr_base_low = lr_base_low_i * cph + lr_base_low_q * sph
+            lr_base_mid_i = self.lp_lr_mid.apply(lr_demod_i)
+            lr_base_mid_q = self.lp_lr_mid_q.apply(lr_demod_q)
+            lr_base_mid = lr_base_mid_i * cph + lr_base_mid_q * sph
         lr_base_midhigh = lr_base_mid - lr_base_low
         lr_base_super = lr_base_full - lr_base_mid
 
@@ -459,7 +468,7 @@ class BaseFMDemodulator(FMDemodulatorInterface):
                 self.logger.info(
                     "StereoDiag snr=%.2fdB blend=%.3f pilotP=%.6g noiseP=%.6g "
                     "phJit=%.6g lrBandRMS=%.6g lrBaseRMS=%.6g phaseIQ=%.3fdeg "
-                    "monoLRAlign=%.3fdeg coh=%.3f side=%.3f align=%s iqCorr=%s highGate=%s "
+                    "monoLRAlign=%.3fdeg coh=%.3f side=%.3f align=%s iqCorr=%s legacyLR=%s highGate=%s "
                     "gateAssist=%.3f leakCancel=%s",
                     snr_db, self.blend_factor, pilot_power, noise_power,
                     phase_jitter,
@@ -471,6 +480,7 @@ class BaseFMDemodulator(FMDemodulatorInterface):
                     float(side_ratio_align),
                     "on" if self.phase_align_enabled else "off",
                     "on" if self.iq_phase_correction_enabled else "off",
+                    "on" if self.legacy_lr_demod_enabled else "off",
                     "on" if self.high_gate_enabled else "off",
                     gate_assist,
                     "on" if self.leak_cancel_enabled else "off",

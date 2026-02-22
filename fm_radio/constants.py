@@ -76,6 +76,7 @@ PILOT_NOISE_BAND2_HIGH = 22000.0    # Pilot SNR noise band 2 upper edge (Hz)
 STEREO_PHASE_ERR_SMOOTHING = 0.15   # EMA smoothing for LR demod phase correction
 STEREO_PHASE_ERR_LIMIT_DEG = 45.0   # Clamp limit for LR demod phase correction (deg)
 STEREO_IQ_PHASE_CORRECTION_ENABLE = True   # Enable I/Q rotation correction in LR demod
+STEREO_LEGACY_LR_DEMOD_ENABLE = False      # Use legacy cos-only LR synchronous demod path
 
 LR_BANDPASS_ORDER = 15              # L-R bandpass filter order (standard)
 LR_BANDPASS_ORDER_LIGHT = 1         # L-R bandpass filter order (light)
