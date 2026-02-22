@@ -64,6 +64,7 @@ STEREO_HIGH_GATE_SNR_ASSIST_ENABLE = True  # Boost high-gate opening only when p
 STEREO_HIGH_GATE_SNR_ASSIST_DB_LO = 12.0   # Assist starts above this pilot SNR (dB)
 STEREO_HIGH_GATE_SNR_ASSIST_DB_HI = 20.0   # Assist reaches max above this pilot SNR (dB)
 STEREO_HIGH_GATE_SNR_ASSIST_MAX = 0.35     # Max pull of gate_target toward 1.0 (0-1)
+STEREO_HIGH_GATE_SNR_FLOOR_BOOST_MAX = 0.20  # Max extra floor for gate_target at high pilot SNR
 
 PILOT_BANDPASS_ORDER = 9            # Pilot bandpass filter order (standard)
 PILOT_BANDPASS_ORDER_LIGHT = 1      # Pilot bandpass filter order (light)
@@ -73,6 +74,15 @@ PILOT_NOISE_BAND1_LOW = 16000.0     # Pilot SNR noise band 1 lower edge (Hz)
 PILOT_NOISE_BAND1_HIGH = 17500.0    # Pilot SNR noise band 1 upper edge (Hz)
 PILOT_NOISE_BAND2_LOW = 20500.0     # Pilot SNR noise band 2 lower edge (Hz)
 PILOT_NOISE_BAND2_HIGH = 22000.0    # Pilot SNR noise band 2 upper edge (Hz)
+STEREO_PILOT_PHASE_MODE = "residual"  # classic | residual | hilbert
+STEREO_PILOT_RESIDUAL_CENTER_HZ = 19000.0  # Center frequency used by residual pilot tracking
+STEREO_SUBCARRIER_PHASE_OFFSET_DEG = 300.0  # Fixed phase offset for 38k subcarrier generation
+STEREO_MONO_DELAY_SAMPLES = 18      # Delay mono path to match LR path group delay (at COMPOSITE_RATE)
+STEREO_LR_SIDE_RATIO_CAP_ENABLE = True     # Enable limiting of |L-R|/|L+R| ratio for stability
+STEREO_LR_SIDE_RATIO_CAP_TARGET = 0.06     # Target upper bound of |L-R|/|L+R| before limiting
+STEREO_LR_SIDE_RATIO_CAP_MIN_GAIN = 0.35   # Lower bound of side-cap gain to avoid mono-collapse
+STEREO_LR_SIDE_RATIO_CAP_ATTACK = 0.25     # Gain attack speed when limiting engages
+STEREO_LR_SIDE_RATIO_CAP_RELEASE = 0.45    # Gain release speed when limiting disengages
 STEREO_PHASE_ERR_SMOOTHING = 0.15   # EMA smoothing for LR demod phase correction
 STEREO_PHASE_ERR_LIMIT_DEG = 45.0   # Clamp limit for LR demod phase correction (deg)
 STEREO_IQ_PHASE_CORRECTION_ENABLE = True   # Enable I/Q rotation correction in LR demod
@@ -131,6 +141,7 @@ STEREO_BLEND_PILOT_SNR_EMA_ALPHA = 0.10    # EMA alpha for pilot SNR tracking
 STEREO_BLEND_PILOT_JITTER_EMA_ALPHA = 0.12  # EMA alpha for pilot SNR jitter tracking
 STEREO_BLEND_PILOT_JITTER_REF_DB = 2.5     # Jitter reference in dB (higher -> less sensitive)
 STEREO_BLEND_STABILITY_MIN_FACTOR = 0.60   # Minimum stereo factor when pilot is unstable
+STEREO_BLEND_STABILITY_MIN_FACTOR_RESIDUAL = 0.85  # Higher minimum factor for residual mode
 STEREO_BLEND_SMOOTHING = 0.08              # EMA smoothing for blend factor (0-1)
 
 # --------------------------------------------------

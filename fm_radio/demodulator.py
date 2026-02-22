@@ -56,9 +56,15 @@ from fm_radio.constants import (
     LR_HIGH_GATE_MIN_GAIN, LR_HIGH_GATE_SMOOTHING,
     STEREO_HIGH_GATE_SNR_ASSIST_ENABLE,
     STEREO_HIGH_GATE_SNR_ASSIST_DB_LO, STEREO_HIGH_GATE_SNR_ASSIST_DB_HI,
-    STEREO_HIGH_GATE_SNR_ASSIST_MAX,
+    STEREO_HIGH_GATE_SNR_ASSIST_MAX, STEREO_HIGH_GATE_SNR_FLOOR_BOOST_MAX,
     PILOT_BANDPASS_ORDER, PILOT_BANDPASS_ORDER_LIGHT,
     PILOT_BANDPASS_LOW, PILOT_BANDPASS_HIGH,
+    STEREO_PILOT_PHASE_MODE, STEREO_PILOT_RESIDUAL_CENTER_HZ,
+    STEREO_SUBCARRIER_PHASE_OFFSET_DEG,
+    STEREO_MONO_DELAY_SAMPLES,
+    STEREO_LR_SIDE_RATIO_CAP_ENABLE, STEREO_LR_SIDE_RATIO_CAP_TARGET,
+    STEREO_LR_SIDE_RATIO_CAP_MIN_GAIN,
+    STEREO_LR_SIDE_RATIO_CAP_ATTACK, STEREO_LR_SIDE_RATIO_CAP_RELEASE,
     STEREO_PHASE_ERR_SMOOTHING, STEREO_PHASE_ERR_LIMIT_DEG, STEREO_IQ_PHASE_CORRECTION_ENABLE,
     STEREO_LEGACY_LR_DEMOD_ENABLE,
     PILOT_NOISE_BAND1_LOW, PILOT_NOISE_BAND1_HIGH,
@@ -82,6 +88,7 @@ from fm_radio.constants import (
     STEREO_BLEND_PILOT_JITTER_EMA_ALPHA,
     STEREO_BLEND_PILOT_JITTER_REF_DB,
     STEREO_BLEND_STABILITY_MIN_FACTOR,
+    STEREO_BLEND_STABILITY_MIN_FACTOR_RESIDUAL,
     STEREO_BLEND_SMOOTHING,
     PILOT_NOTCH_FREQ, PILOT_NOTCH_Q,
 )
@@ -213,6 +220,16 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         self.mono_lr_phase_align_ema: float = 0.0
         self.lr_high_gate_gain: float = 1.0
         self.lr_leak_cancel_coef: float = 0.0
+        self.pilot_phase_mode: str = str(STEREO_PILOT_PHASE_MODE).strip().lower()
+        if self.pilot_phase_mode not in ("classic", "residual", "hilbert"):
+            self.pilot_phase_mode = "classic"
+        self.pilot_residual_center_hz: float = float(STEREO_PILOT_RESIDUAL_CENTER_HZ)
+        self.subcarrier_phase_offset_rad: float = np.deg2rad(STEREO_SUBCARRIER_PHASE_OFFSET_DEG)
+        self.mono_delay_samples: int = max(0, int(STEREO_MONO_DELAY_SAMPLES))
+        self._mono_delay_state: np.ndarray = np.zeros(self.mono_delay_samples, dtype=np.float32)
+        self._pilot_phase_last: float | None = None
+        self._pilot_mix_phase: float = 0.0
+        self.lr_side_cap_gain: float = 1.0
         self.phase_align_enabled: bool = STEREO_PHASE_ALIGN_ENABLE
         self.iq_phase_correction_enabled: bool = STEREO_IQ_PHASE_CORRECTION_ENABLE
         self.legacy_lr_demod_enabled: bool = STEREO_LEGACY_LR_DEMOD_ENABLE
@@ -251,6 +268,63 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         else:
             return self._demodulate_mono(composite)
 
+    def _estimate_pilot_phase(self, pilot_complex: np.ndarray) -> np.ndarray:
+        """Estimate pilot phase from analytic pilot signal."""
+        mode = self.pilot_phase_mode
+        if mode == "classic":
+            pilot_phase = self.pilot_pll.process(pilot_complex).astype(np.float64, copy=False)
+            if pilot_phase.size:
+                self._pilot_phase_last = float(pilot_phase[-1])
+            return pilot_phase
+
+        if mode == "residual":
+            n = np.arange(pilot_complex.size, dtype=np.float64)
+            w0 = 2.0 * np.pi * self.pilot_residual_center_hz / self.composite_rate
+            mix_phase = self._pilot_mix_phase + w0 * n
+            mix_phase_wrapped = np.mod(mix_phase, 2.0 * np.pi)
+            residual_in = pilot_complex * np.exp(-1j * mix_phase_wrapped)
+            residual_phase = self.pilot_pll.process(
+                np.asarray(residual_in, dtype=np.complex64)
+            ).astype(np.float64, copy=False)
+            pilot_phase = residual_phase + mix_phase
+            self._pilot_mix_phase = float(
+                np.mod(self._pilot_mix_phase + w0 * pilot_complex.size, 2.0 * np.pi)
+            )
+            if pilot_phase.size:
+                if self._pilot_phase_last is None:
+                    pilot_phase = np.unwrap(pilot_phase)
+                else:
+                    pilot_phase = np.unwrap(
+                        np.concatenate(([self._pilot_phase_last], pilot_phase))
+                    )[1:]
+                self._pilot_phase_last = float(pilot_phase[-1])
+            return pilot_phase
+
+        raw_phase = np.angle(
+            np.asarray(pilot_complex, dtype=np.complex64)
+        ).astype(np.float64, copy=False)
+        if raw_phase.size == 0:
+            return raw_phase
+        if self._pilot_phase_last is None:
+            pilot_phase = np.unwrap(raw_phase)
+        else:
+            pilot_phase = np.unwrap(np.concatenate(([self._pilot_phase_last], raw_phase)))[1:]
+        self._pilot_phase_last = float(pilot_phase[-1])
+        return pilot_phase
+
+    def _apply_mono_delay(self, mono: np.ndarray) -> np.ndarray:
+        """Delay mono path to compensate LR path group delay."""
+        delay = self.mono_delay_samples
+        mono_f32 = np.asarray(mono, dtype=np.float32)
+        if delay <= 0:
+            return mono_f32.astype(np.float64, copy=False)
+        if self._mono_delay_state.size != delay:
+            self._mono_delay_state = np.zeros(delay, dtype=np.float32)
+        stacked = np.concatenate((self._mono_delay_state, mono_f32))
+        out = stacked[:mono_f32.size]
+        self._mono_delay_state = stacked[mono_f32.size:]
+        return out.astype(np.float64, copy=False)
+
     def _demodulate_stereo(self, composite: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Stereo demodulation with adaptive blend.
 
@@ -270,10 +344,11 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         Returns:
             tuple: (left_channel_audio, right_channel_audio)
         """
-        mono = self.lp_mono.apply(composite)
+        mono_raw = self.lp_mono.apply(composite)
+        mono = self._apply_mono_delay(mono_raw)
         pilot_signal = self.bp_pilot.apply(composite)
         pilot_complex = signal.hilbert(pilot_signal.astype(np.float32))
-        pilot_phase = self.pilot_pll.process(pilot_complex)
+        pilot_phase = self._estimate_pilot_phase(pilot_complex)
 
         # --- Adaptive stereo blend based on pilot SNR ---
         pilot_power = float(np.mean(pilot_signal ** 2))
@@ -293,19 +368,25 @@ class BaseFMDemodulator(FMDemodulatorInterface):
             jitter_alpha * snr_jitter + (1.0 - jitter_alpha) * self.pilot_jitter_ema
         )
 
+        snr_for_blend = self.pilot_snr_ema if self.pilot_snr_ema is not None else snr_db
         lo = STEREO_BLEND_PILOT_SNR_DB_LO
         hi = STEREO_BLEND_PILOT_SNR_DB_HI
-        if snr_db >= hi:
+        if snr_for_blend >= hi:
             snr_score = 1.0
-        elif snr_db <= lo:
+        elif snr_for_blend <= lo:
             snr_score = 0.0
         else:
-            snr_score = (snr_db - lo) / (hi - lo)
+            snr_score = (snr_for_blend - lo) / (hi - lo)
         jitter_ref = max(STEREO_BLEND_PILOT_JITTER_REF_DB, 1e-6)
         stability = np.clip(1.0 - (self.pilot_jitter_ema / jitter_ref), 0.0, 1.0)
+        stability_min_factor = STEREO_BLEND_STABILITY_MIN_FACTOR
+        if self.pilot_phase_mode == "residual":
+            stability_min_factor = max(
+                stability_min_factor, STEREO_BLEND_STABILITY_MIN_FACTOR_RESIDUAL,
+            )
         stability_factor = (
-            STEREO_BLEND_STABILITY_MIN_FACTOR
-            + (1.0 - STEREO_BLEND_STABILITY_MIN_FACTOR) * stability
+            stability_min_factor
+            + (1.0 - stability_min_factor) * stability
         )
         target = snr_score * stability_factor
         # EMA smoothing to avoid abrupt transitions
@@ -314,8 +395,9 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         if self.force_blend_factor is not None:
             self.blend_factor = float(np.clip(self.force_blend_factor, 0.0, 1.0))
 
-        subcarrier_i = np.cos(2.0 * pilot_phase)
-        subcarrier_q = np.sin(2.0 * pilot_phase)
+        sub_phase = 2.0 * pilot_phase + self.subcarrier_phase_offset_rad
+        subcarrier_i = np.cos(sub_phase)
+        subcarrier_q = np.sin(sub_phase)
         lr_band = self.bp_lr.apply(composite)
         if self.legacy_lr_demod_enabled:
             lr_demod_i = lr_band * subcarrier_i * STEREO_LR_DEMOD_GAIN
@@ -357,6 +439,7 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         lr_base_super = lr_base_full - lr_base_mid
 
         gate_assist = 0.0
+        gate_floor = LR_HIGH_GATE_MIN_GAIN
         if self.high_gate_enabled:
             high_rms = float(np.sqrt(np.mean(lr_base_super ** 2) + 1e-12))
             gate_thr = LR_HIGH_GATE_THRESHOLD
@@ -372,14 +455,20 @@ class BaseFMDemodulator(FMDemodulatorInterface):
                 s_lo = STEREO_HIGH_GATE_SNR_ASSIST_DB_LO
                 s_hi = max(STEREO_HIGH_GATE_SNR_ASSIST_DB_HI, s_lo + 1e-6)
                 if self.pilot_snr_ema <= s_lo:
-                    gate_assist = 0.0
+                    snr_open = 0.0
                 elif self.pilot_snr_ema >= s_hi:
-                    gate_assist = STEREO_HIGH_GATE_SNR_ASSIST_MAX
+                    snr_open = 1.0
                 else:
-                    gate_assist = (
+                    snr_open = (
                         (self.pilot_snr_ema - s_lo) / (s_hi - s_lo)
-                    ) * STEREO_HIGH_GATE_SNR_ASSIST_MAX
+                    )
+                gate_assist = snr_open * STEREO_HIGH_GATE_SNR_ASSIST_MAX
                 gate_assist = float(np.clip(gate_assist, 0.0, 1.0))
+                gate_floor = LR_HIGH_GATE_MIN_GAIN + (
+                    np.clip(snr_open, 0.0, 1.0) * STEREO_HIGH_GATE_SNR_FLOOR_BOOST_MAX
+                )
+                gate_floor = float(np.clip(gate_floor, LR_HIGH_GATE_MIN_GAIN, 1.0))
+                gate_target = max(gate_target, gate_floor)
                 gate_target = gate_target + gate_assist * (1.0 - gate_target)
             gate_alpha = LR_HIGH_GATE_SMOOTHING
             self.lr_high_gate_gain = (
@@ -456,6 +545,25 @@ class BaseFMDemodulator(FMDemodulatorInterface):
             self.lr_leak_cancel_coef = 0.0
             lr_corrected = lr_low_for_leak + lr_rest
 
+        side_ratio_now = float(
+            np.sqrt(np.mean(lr_corrected ** 2) + 1e-12) / np.sqrt(np.mean(mono ** 2) + 1e-12)
+        )
+        if STEREO_LR_SIDE_RATIO_CAP_ENABLE:
+            cap_target = max(STEREO_LR_SIDE_RATIO_CAP_TARGET, 1e-6)
+            cap_min_gain = float(np.clip(STEREO_LR_SIDE_RATIO_CAP_MIN_GAIN, 0.0, 1.0))
+            cap_gain_target = min(1.0, cap_target / max(side_ratio_now, 1e-12))
+            cap_gain_target = max(cap_min_gain, cap_gain_target)
+            cap_attack = float(np.clip(STEREO_LR_SIDE_RATIO_CAP_ATTACK, 0.0, 1.0))
+            cap_release = float(np.clip(STEREO_LR_SIDE_RATIO_CAP_RELEASE, 0.0, 1.0))
+            cap_alpha = cap_attack if cap_gain_target < self.lr_side_cap_gain else cap_release
+            self.lr_side_cap_gain = (
+                cap_alpha * cap_gain_target + (1.0 - cap_alpha) * self.lr_side_cap_gain
+            )
+            self.lr_side_cap_gain = float(np.clip(self.lr_side_cap_gain, cap_min_gain, 1.0))
+            lr_corrected = lr_corrected * self.lr_side_cap_gain
+        else:
+            self.lr_side_cap_gain = 1.0
+
         lr_baseband = lr_corrected * self.blend_factor
         left_channel = mono + lr_baseband
         right_channel = mono - lr_baseband
@@ -469,7 +577,8 @@ class BaseFMDemodulator(FMDemodulatorInterface):
                     "StereoDiag snr=%.2fdB blend=%.3f pilotP=%.6g noiseP=%.6g "
                     "phJit=%.6g lrBandRMS=%.6g lrBaseRMS=%.6g phaseIQ=%.3fdeg "
                     "monoLRAlign=%.3fdeg coh=%.3f side=%.3f align=%s iqCorr=%s legacyLR=%s highGate=%s "
-                    "gateAssist=%.3f leakCancel=%s",
+                    "gateAssist=%.3f gateFloor=%.3f leakCancel=%s pilotMode=%s "
+                    "monoDelay=%d scOff=%.1fdeg sideCap=%.3f",
                     snr_db, self.blend_factor, pilot_power, noise_power,
                     phase_jitter,
                     float(np.sqrt(np.mean(lr_band ** 2) + 1e-12)),
@@ -483,7 +592,12 @@ class BaseFMDemodulator(FMDemodulatorInterface):
                     "on" if self.legacy_lr_demod_enabled else "off",
                     "on" if self.high_gate_enabled else "off",
                     gate_assist,
+                    gate_floor,
                     "on" if self.leak_cancel_enabled else "off",
+                    self.pilot_phase_mode,
+                    self.mono_delay_samples,
+                    float(np.rad2deg(self.subcarrier_phase_offset_rad)),
+                    self.lr_side_cap_gain,
                 )
 
         # Remove 19 kHz pilot tone leakage
@@ -539,6 +653,11 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         self.mono_lr_phase_align_ema = 0.0
         self.lr_high_gate_gain = 1.0
         self.lr_leak_cancel_coef = 0.0
+        self.lr_side_cap_gain = 1.0
+        if self.mono_delay_samples > 0:
+            self._mono_delay_state = np.zeros(self.mono_delay_samples, dtype=np.float32)
+        self._pilot_mix_phase = 0.0
+        self._pilot_phase_last = None
         self._diag_counter = 0
         self._reset_subclass()
 
