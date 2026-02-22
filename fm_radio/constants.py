@@ -53,10 +53,10 @@ MONO_LOWPASS_ORDER_LIGHT = 1        # Mono lowpass filter order (light)
 MONO_LOWPASS_CUTOFF = 15000.0       # Mono/baseband lowpass cutoff (Hz)
 LR_BASE_LOWPASS_CUTOFF = 15000.0    # L-R baseband lowpass cutoff (Hz)
 LR_HIGH_SPLIT_CUTOFF = 7000.0       # L-R split frequency for high-band damping (Hz)
-LR_HIGH_MIN_GAIN = 0.30             # Minimum high-band gain at low stereo blend
-LR_HIGH_GATE_THRESHOLD = 0.004      # RMS threshold for opening L-R high-band gate
+LR_HIGH_MIN_GAIN = 0.42             # Minimum high-band gain at low stereo blend
+LR_HIGH_GATE_THRESHOLD = 0.0035     # RMS threshold for opening L-R high-band gate
 LR_HIGH_GATE_KNEE_MULT = 3.0        # Full-open level as multiple of threshold
-LR_HIGH_GATE_MIN_GAIN = 0.45        # Minimum gate gain when below threshold
+LR_HIGH_GATE_MIN_GAIN = 0.58        # Minimum gate gain when below threshold
 LR_HIGH_GATE_SMOOTHING = 0.20       # EMA smoothing for high-band gate gain
 
 PILOT_BANDPASS_ORDER = 9            # Pilot bandpass filter order (standard)
@@ -100,12 +100,12 @@ STANDARD_RESAMPLE_KAISER_BETA = 10.0  # Kaiser beta for standard IQ->composite r
 # --------------------------------------------------
 # Adaptive stereo blend (pilot SNR based)
 # --------------------------------------------------
-STEREO_BLEND_PILOT_SNR_DB_HI = 18.0        # Pilot SNR above this -> full stereo
-STEREO_BLEND_PILOT_SNR_DB_LO = 8.0         # Pilot SNR below this -> full mono
+STEREO_BLEND_PILOT_SNR_DB_HI = 16.5        # Pilot SNR above this -> full stereo
+STEREO_BLEND_PILOT_SNR_DB_LO = 7.0         # Pilot SNR below this -> full mono
 STEREO_BLEND_PILOT_SNR_EMA_ALPHA = 0.10    # EMA alpha for pilot SNR tracking
 STEREO_BLEND_PILOT_JITTER_EMA_ALPHA = 0.12  # EMA alpha for pilot SNR jitter tracking
 STEREO_BLEND_PILOT_JITTER_REF_DB = 2.5     # Jitter reference in dB (higher -> less sensitive)
-STEREO_BLEND_STABILITY_MIN_FACTOR = 0.50   # Minimum stereo factor when pilot is unstable
+STEREO_BLEND_STABILITY_MIN_FACTOR = 0.60   # Minimum stereo factor when pilot is unstable
 STEREO_BLEND_SMOOTHING = 0.08              # EMA smoothing for blend factor (0-1)
 
 # --------------------------------------------------
