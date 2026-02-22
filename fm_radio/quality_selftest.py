@@ -214,6 +214,9 @@ def _run_demod_from_iq(
     disable_iq_phase_correction: bool = False,
     disable_high_gate: bool = False,
     disable_leak_cancel: bool = False,
+    pilot_mode: str | None = None,
+    mono_delay_samples: int | None = None,
+    subcarrier_phase_offset_deg: float | None = None,
     demod_diag: bool = False,
     demod_diag_interval: int | None = None,
                ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -228,6 +231,13 @@ def _run_demod_from_iq(
         demod.high_gate_enabled = False
     if disable_leak_cancel:
         demod.leak_cancel_enabled = False
+    if pilot_mode:
+        demod.pilot_phase_mode = str(pilot_mode).strip().lower()
+    if mono_delay_samples is not None and int(mono_delay_samples) >= 0:
+        demod.mono_delay_samples = int(mono_delay_samples)
+        demod._mono_delay_state = np.zeros(demod.mono_delay_samples, dtype=np.float32)
+    if subcarrier_phase_offset_deg is not None:
+        demod.subcarrier_phase_offset_rad = np.deg2rad(float(subcarrier_phase_offset_deg))
     if demod_diag:
         demod.diag_enable = True
     if demod_diag_interval is not None and demod_diag_interval > 0:
@@ -264,6 +274,9 @@ def _run_demod_from_composite(
     disable_iq_phase_correction: bool = False,
     disable_high_gate: bool = False,
     disable_leak_cancel: bool = False,
+    pilot_mode: str | None = None,
+    mono_delay_samples: int | None = None,
+    subcarrier_phase_offset_deg: float | None = None,
     demod_diag: bool = False,
     demod_diag_interval: int | None = None,
                      ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -278,6 +291,13 @@ def _run_demod_from_composite(
         demod.high_gate_enabled = False
     if disable_leak_cancel:
         demod.leak_cancel_enabled = False
+    if pilot_mode:
+        demod.pilot_phase_mode = str(pilot_mode).strip().lower()
+    if mono_delay_samples is not None and int(mono_delay_samples) >= 0:
+        demod.mono_delay_samples = int(mono_delay_samples)
+        demod._mono_delay_state = np.zeros(demod.mono_delay_samples, dtype=np.float32)
+    if subcarrier_phase_offset_deg is not None:
+        demod.subcarrier_phase_offset_rad = np.deg2rad(float(subcarrier_phase_offset_deg))
     if demod_diag:
         demod.diag_enable = True
     if demod_diag_interval is not None and demod_diag_interval > 0:
@@ -418,6 +438,9 @@ def evaluate_quality(
     disable_iq_phase_correction: bool = False,
     disable_high_gate: bool = False,
     disable_leak_cancel: bool = False,
+    pilot_mode: str | None = None,
+    mono_delay_samples: int | None = None,
+    subcarrier_phase_offset_deg: float | None = None,
     demod_diag: bool = False,
     demod_diag_interval: int | None = None,
 ) -> QualityMetrics:
@@ -443,6 +466,8 @@ def evaluate_quality(
             mpx, fixed_blend=fixed_blend, disable_phase_align=disable_phase_align,
             disable_iq_phase_correction=disable_iq_phase_correction,
             disable_high_gate=disable_high_gate, disable_leak_cancel=disable_leak_cancel,
+            pilot_mode=pilot_mode, mono_delay_samples=mono_delay_samples,
+            subcarrier_phase_offset_deg=subcarrier_phase_offset_deg,
             demod_diag=demod_diag, demod_diag_interval=demod_diag_interval,
         )
     else:
@@ -451,6 +476,8 @@ def evaluate_quality(
             iq, fixed_blend=fixed_blend, disable_phase_align=disable_phase_align,
             disable_iq_phase_correction=disable_iq_phase_correction,
             disable_high_gate=disable_high_gate, disable_leak_cancel=disable_leak_cancel,
+            pilot_mode=pilot_mode, mono_delay_samples=mono_delay_samples,
+            subcarrier_phase_offset_deg=subcarrier_phase_offset_deg,
             demod_diag=demod_diag, demod_diag_interval=demod_diag_interval,
         )
 
@@ -485,6 +512,8 @@ def evaluate_quality(
             mpx_l, fixed_blend=fixed_blend, disable_phase_align=disable_phase_align,
             disable_iq_phase_correction=disable_iq_phase_correction,
             disable_high_gate=disable_high_gate, disable_leak_cancel=disable_leak_cancel,
+            pilot_mode=pilot_mode, mono_delay_samples=mono_delay_samples,
+            subcarrier_phase_offset_deg=subcarrier_phase_offset_deg,
             demod_diag=demod_diag, demod_diag_interval=demod_diag_interval,
         )
     else:
@@ -493,6 +522,8 @@ def evaluate_quality(
             iq_l, fixed_blend=fixed_blend, disable_phase_align=disable_phase_align,
             disable_iq_phase_correction=disable_iq_phase_correction,
             disable_high_gate=disable_high_gate, disable_leak_cancel=disable_leak_cancel,
+            pilot_mode=pilot_mode, mono_delay_samples=mono_delay_samples,
+            subcarrier_phase_offset_deg=subcarrier_phase_offset_deg,
             demod_diag=demod_diag, demod_diag_interval=demod_diag_interval,
         )
     sep_l2r = _stereo_separation_ls_db(l_main[settle:], r_leak[settle:], max_lag)
@@ -508,6 +539,8 @@ def evaluate_quality(
             mpx_r, fixed_blend=fixed_blend, disable_phase_align=disable_phase_align,
             disable_iq_phase_correction=disable_iq_phase_correction,
             disable_high_gate=disable_high_gate, disable_leak_cancel=disable_leak_cancel,
+            pilot_mode=pilot_mode, mono_delay_samples=mono_delay_samples,
+            subcarrier_phase_offset_deg=subcarrier_phase_offset_deg,
             demod_diag=demod_diag, demod_diag_interval=demod_diag_interval,
         )
     else:
@@ -516,6 +549,8 @@ def evaluate_quality(
             iq_r, fixed_blend=fixed_blend, disable_phase_align=disable_phase_align,
             disable_iq_phase_correction=disable_iq_phase_correction,
             disable_high_gate=disable_high_gate, disable_leak_cancel=disable_leak_cancel,
+            pilot_mode=pilot_mode, mono_delay_samples=mono_delay_samples,
+            subcarrier_phase_offset_deg=subcarrier_phase_offset_deg,
             demod_diag=demod_diag, demod_diag_interval=demod_diag_interval,
         )
     sep_r2l = _stereo_separation_ls_db(r_main[settle:], l_leak[settle:], max_lag)
@@ -586,6 +621,18 @@ def _parser() -> argparse.ArgumentParser:
         help="Disable mono leakage cancellation from LR",
     )
     p.add_argument(
+        "--pilot-mode", choices=("classic", "residual", "hilbert"), default="",
+        help="Pilot phase tracking mode override",
+    )
+    p.add_argument(
+        "--mono-delay-samples", type=int, default=-1,
+        help="Mono delay override in composite samples (-1=default)",
+    )
+    p.add_argument(
+        "--subcarrier-phase-offset-deg", type=float, default=float("nan"),
+        help="Subcarrier phase offset override in degrees",
+    )
+    p.add_argument(
         "--demod-diag", action="store_true",
         help="Enable demodulator StereoDiag logging during self-test",
     )
@@ -627,6 +674,12 @@ def main() -> None:
         disable_iq_phase_correction=bool(args.disable_iq_phase_correction),
         disable_high_gate=bool(args.disable_high_gate),
         disable_leak_cancel=bool(args.disable_leak_cancel),
+        pilot_mode=(str(args.pilot_mode).strip().lower() if str(args.pilot_mode).strip() else None),
+        mono_delay_samples=(None if int(args.mono_delay_samples) < 0 else int(args.mono_delay_samples)),
+        subcarrier_phase_offset_deg=(
+            None if np.isnan(float(args.subcarrier_phase_offset_deg))
+            else float(args.subcarrier_phase_offset_deg)
+        ),
         demod_diag=bool(args.demod_diag),
         demod_diag_interval=(None if int(args.demod_diag_interval) <= 0 else int(args.demod_diag_interval)),
     )
@@ -649,6 +702,12 @@ def main() -> None:
             disable_iq_phase_correction=bool(args.disable_iq_phase_correction),
             disable_high_gate=bool(args.disable_high_gate),
             disable_leak_cancel=bool(args.disable_leak_cancel),
+            pilot_mode=(str(args.pilot_mode).strip().lower() if str(args.pilot_mode).strip() else None),
+            mono_delay_samples=(None if int(args.mono_delay_samples) < 0 else int(args.mono_delay_samples)),
+            subcarrier_phase_offset_deg=(
+                None if np.isnan(float(args.subcarrier_phase_offset_deg))
+                else float(args.subcarrier_phase_offset_deg)
+            ),
             demod_diag=bool(args.demod_diag),
             demod_diag_interval=(
                 None if int(args.demod_diag_interval) <= 0 else int(args.demod_diag_interval)
