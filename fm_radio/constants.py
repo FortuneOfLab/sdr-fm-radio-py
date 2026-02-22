@@ -54,9 +54,9 @@ MONO_LOWPASS_CUTOFF = 15000.0       # Mono/baseband lowpass cutoff (Hz)
 LR_BASE_LOWPASS_CUTOFF = 15000.0    # L-R baseband lowpass cutoff (Hz)
 LR_HIGH_SPLIT_CUTOFF = 7000.0       # L-R split frequency for high-band damping (Hz)
 LR_HIGH_MIN_GAIN = 0.35             # Minimum high-band gain at low stereo blend
-LR_HIGH_GATE_THRESHOLD = 0.0035     # RMS threshold for opening L-R high-band gate
-LR_HIGH_GATE_KNEE_MULT = 3.0        # Full-open level as multiple of threshold
-LR_HIGH_GATE_MIN_GAIN = 0.50        # Minimum gate gain when below threshold
+LR_HIGH_GATE_THRESHOLD = 0.0028     # RMS threshold for opening L-R high-band gate
+LR_HIGH_GATE_KNEE_MULT = 2.2        # Full-open level as multiple of threshold
+LR_HIGH_GATE_MIN_GAIN = 0.75        # Minimum gate gain when below threshold
 LR_HIGH_GATE_SMOOTHING = 0.20       # EMA smoothing for high-band gate gain
 
 PILOT_BANDPASS_ORDER = 9            # Pilot bandpass filter order (standard)
