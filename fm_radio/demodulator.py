@@ -545,8 +545,9 @@ class BaseFMDemodulator(FMDemodulatorInterface):
             self.lr_leak_cancel_coef = 0.0
             lr_corrected = lr_low_for_leak + lr_rest
 
+        lr_baseband = lr_corrected * self.blend_factor
         side_ratio_now = float(
-            np.sqrt(np.mean(lr_corrected ** 2) + 1e-12) / np.sqrt(np.mean(mono ** 2) + 1e-12)
+            np.sqrt(np.mean(lr_baseband ** 2) + 1e-12) / np.sqrt(np.mean(mono ** 2) + 1e-12)
         )
         if STEREO_LR_SIDE_RATIO_CAP_ENABLE:
             cap_target = max(STEREO_LR_SIDE_RATIO_CAP_TARGET, 1e-6)
@@ -560,11 +561,10 @@ class BaseFMDemodulator(FMDemodulatorInterface):
                 cap_alpha * cap_gain_target + (1.0 - cap_alpha) * self.lr_side_cap_gain
             )
             self.lr_side_cap_gain = float(np.clip(self.lr_side_cap_gain, cap_min_gain, 1.0))
-            lr_corrected = lr_corrected * self.lr_side_cap_gain
+            lr_baseband = lr_baseband * self.lr_side_cap_gain
         else:
             self.lr_side_cap_gain = 1.0
 
-        lr_baseband = lr_corrected * self.blend_factor
         left_channel = mono + lr_baseband
         right_channel = mono - lr_baseband
 
