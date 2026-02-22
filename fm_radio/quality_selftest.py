@@ -93,26 +93,41 @@ def _make_stereo_tone(
     return left.astype(np.float32), right.astype(np.float32)
 
 
+def _preemphasis(x: np.ndarray, fs: int, tau_s: float) -> np.ndarray:
+    # H(s) = 1 + s*tau, bilinear transformed.
+    b, a = signal.bilinear([tau_s, 1.0], [1.0], fs=fs)
+    return signal.lfilter(b, a, x).astype(np.float32)
+
+
 def _build_mpx(
     left_audio: np.ndarray,
     right_audio: np.ndarray,
     fs_audio: int,
     fs_composite: int,
     pilot_amp: float,
+    enable_preemphasis: bool,
+    preemphasis_tau_s: float,
+    dsb_phase_deg: float,
 ) -> np.ndarray:
+    if enable_preemphasis:
+        left_audio = _preemphasis(left_audio, fs_audio, preemphasis_tau_s)
+        right_audio = _preemphasis(right_audio, fs_audio, preemphasis_tau_s)
+
     left = _resample(left_audio, fs_audio, fs_composite).astype(np.float64)
     right = _resample(right_audio, fs_audio, fs_composite).astype(np.float64)
     n = min(left.size, right.size)
     left = left[:n]
     right = right[:n]
     t = np.arange(n, dtype=np.float64) / fs_composite
-    lpr = left + right
-    lmr = left - right
+    # Broadcast-like MPX scaling:
+    # mono (L+R) at ~45%, stereo DSB (L-R) at ~45%, pilot at ~10%.
+    lpr = 0.45 * (left + right)
+    lmr = 0.45 * (left - right)
     pilot = pilot_amp * np.cos(2.0 * np.pi * 19_000.0 * t)
-    dsb = lmr * np.cos(2.0 * np.pi * 38_000.0 * t)
+    dsb_phase_rad = np.deg2rad(dsb_phase_deg)
+    dsb = lmr * np.cos(2.0 * np.pi * 38_000.0 * t + dsb_phase_rad)
     mpx = lpr + dsb + pilot
-    peak = float(np.max(np.abs(mpx)) + EPS)
-    return (0.9 * mpx / peak).astype(np.float32)
+    return mpx.astype(np.float32)
 
 
 def _fm_modulate_iq(
@@ -135,8 +150,11 @@ def _fm_modulate_iq(
     return (iq + noise.astype(np.complex64)).astype(np.complex64)
 
 
-def _run_demod(iq: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _run_demod_from_iq(iq: np.ndarray, fixed_blend: float | None = None
+               ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     demod = FMDemodulator(stereo=True)
+    if fixed_blend is not None:
+        demod.force_blend_factor = float(np.clip(fixed_blend, 0.0, 1.0))
     left_chunks: list[np.ndarray] = []
     right_chunks: list[np.ndarray] = []
     blend_hist: list[float] = []
@@ -146,6 +164,40 @@ def _run_demod(iq: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
             break
         composite = demod.process_iq_samples(chunk)
         left, right = demod.demodulate(composite)
+        left_chunks.append(left.astype(np.float32))
+        right_chunks.append(right.astype(np.float32))
+        blend_hist.append(float(demod.blend_factor))
+    if not left_chunks:
+        return (
+            np.zeros(0, dtype=np.float32),
+            np.zeros(0, dtype=np.float32),
+            np.zeros(0, dtype=np.float32),
+        )
+    return (
+        np.concatenate(left_chunks),
+        np.concatenate(right_chunks),
+        np.asarray(blend_hist, dtype=np.float32),
+    )
+
+
+def _run_demod_from_composite(
+    composite: np.ndarray, fixed_blend: float | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    demod = FMDemodulator(stereo=True)
+    if fixed_blend is not None:
+        demod.force_blend_factor = float(np.clip(fixed_blend, 0.0, 1.0))
+
+    ratio = Fraction(int(COMPOSITE_RATE), int(SDR_SAMPLE_RATE)).limit_denominator()
+    composite_block = max(256, int(SDR_BLOCK_SIZE * ratio.numerator / ratio.denominator))
+
+    left_chunks: list[np.ndarray] = []
+    right_chunks: list[np.ndarray] = []
+    blend_hist: list[float] = []
+    for i in range(0, composite.size, composite_block):
+        chunk = composite[i:i + composite_block]
+        if chunk.size < 8:
+            break
+        left, right = demod.demodulate(chunk)
         left_chunks.append(left.astype(np.float32))
         right_chunks.append(right.astype(np.float32))
         blend_hist.append(float(demod.blend_factor))
@@ -218,23 +270,39 @@ def _thdn_db(x: np.ndarray, fs: int, tone_hz: float) -> float:
     return 10.0 * np.log10(noise_power / fund_power)
 
 
-def _tone_amplitude(x: np.ndarray, fs: int, tone_hz: float) -> float:
+def _align_pair(ref: np.ndarray, x: np.ndarray, max_lag: int) -> tuple[np.ndarray, np.ndarray]:
+    ref = np.asarray(ref, dtype=np.float64)
     x = np.asarray(x, dtype=np.float64)
-    n = x.size
-    if n < 16:
-        return 0.0
-    t = np.arange(n, dtype=np.float64) / fs
-    s = np.sin(2.0 * np.pi * tone_hz * t)
-    c = np.cos(2.0 * np.pi * tone_hz * t)
-    a_s = 2.0 * np.dot(x, s) / n
-    a_c = 2.0 * np.dot(x, c) / n
-    return float(np.sqrt(a_s * a_s + a_c * a_c))
+    if ref.size == 0 or x.size == 0:
+        return np.zeros(0), np.zeros(0)
+
+    n = min(ref.size, x.size)
+    ref_w = ref[:n]
+    x_w = x[:n]
+    corr = signal.correlate(x_w, ref_w, mode="full", method="fft")
+    lags = signal.correlation_lags(x_w.size, ref_w.size, mode="full")
+    valid = np.abs(lags) <= max_lag
+    best_lag = int(lags[valid][np.argmax(corr[valid])])
+
+    if best_lag >= 0:
+        x_a = x[best_lag:]
+        ref_a = ref[:x_a.size]
+    else:
+        ref_a = ref[-best_lag:]
+        x_a = x[:ref_a.size]
+
+    m = min(ref_a.size, x_a.size)
+    return ref_a[:m].astype(np.float64), x_a[:m].astype(np.float64)
 
 
-def _stereo_separation_db(main: np.ndarray, leak: np.ndarray, fs: int, tone_hz: float) -> float:
-    a_main = _tone_amplitude(main, fs, tone_hz)
-    a_leak = _tone_amplitude(leak, fs, tone_hz)
-    return 20.0 * np.log10((a_main + EPS) / (a_leak + EPS))
+def _stereo_separation_ls_db(main: np.ndarray, leak: np.ndarray, max_lag: int) -> float:
+    main_a, leak_a = _align_pair(main, leak, max_lag)
+    if main_a.size == 0 or leak_a.size == 0:
+        return float("nan")
+    main_zm = main_a - np.mean(main_a)
+    leak_zm = leak_a - np.mean(leak_a)
+    k = float(np.dot(leak_zm, main_zm) / (np.dot(main_zm, main_zm) + EPS))
+    return 20.0 * np.log10(1.0 / (abs(k) + EPS))
 
 
 def evaluate_quality(
@@ -243,18 +311,33 @@ def evaluate_quality(
     cnr_db: float | None,
     pilot_amp: float,
     freq_dev_hz: float,
+    fixed_blend: float | None = None,
+    path: str = "full",
+    warmup_s: float = 0.5,
+    enable_preemphasis: bool = False,
+    preemphasis_tau_s: float = 50e-6,
+    dsb_phase_deg: float = 0.0,
 ) -> QualityMetrics:
     fs_audio = AUDIO_OUTPUT_RATE
     fs_composite = int(COMPOSITE_RATE)
     fs_iq = int(SDR_SAMPLE_RATE)
     max_lag = int(0.2 * fs_audio)
-    settle = int(0.5 * fs_audio)
+    settle = int(max(0.0, warmup_s) * fs_audio)
 
     # 1) Equal L/R tone: THD+N and SNR.
     left_ref, right_ref = _make_stereo_tone(duration_s, fs_audio, tone_hz, 0.6, 0.6)
-    mpx = _build_mpx(left_ref, right_ref, fs_audio, fs_composite, pilot_amp)
-    iq = _fm_modulate_iq(mpx, fs_composite, fs_iq, freq_dev_hz, cnr_db)
-    left_out, right_out, blend_hist = _run_demod(iq)
+    mpx = _build_mpx(
+        left_ref, right_ref, fs_audio, fs_composite, pilot_amp,
+        enable_preemphasis=enable_preemphasis, preemphasis_tau_s=preemphasis_tau_s,
+        dsb_phase_deg=dsb_phase_deg,
+    )
+    if path == "composite":
+        left_out, right_out, blend_hist = _run_demod_from_composite(
+            mpx, fixed_blend=fixed_blend,
+        )
+    else:
+        iq = _fm_modulate_iq(mpx, fs_composite, fs_iq, freq_dev_hz, cnr_db)
+        left_out, right_out, blend_hist = _run_demod_from_iq(iq, fixed_blend=fixed_blend)
 
     left_ref_fit, left_x = _align_and_fit(left_ref, left_out, max_lag)
     right_ref_fit, right_x = _align_and_fit(right_ref, right_out, max_lag)
@@ -271,20 +354,30 @@ def evaluate_quality(
 
     # 2) Separation: left-only then right-only.
     l_only, r_zero = _make_stereo_tone(duration_s, fs_audio, tone_hz, 0.7, 0.0)
-    iq_l = _fm_modulate_iq(
-        _build_mpx(l_only, r_zero, fs_audio, fs_composite, pilot_amp),
-        fs_composite, fs_iq, freq_dev_hz, cnr_db,
+    mpx_l = _build_mpx(
+        l_only, r_zero, fs_audio, fs_composite, pilot_amp,
+        enable_preemphasis=enable_preemphasis, preemphasis_tau_s=preemphasis_tau_s,
+        dsb_phase_deg=dsb_phase_deg,
     )
-    l_main, r_leak, _ = _run_demod(iq_l)
-    sep_l2r = _stereo_separation_db(l_main[settle:], r_leak[settle:], fs_audio, tone_hz)
+    if path == "composite":
+        l_main, r_leak, _ = _run_demod_from_composite(mpx_l, fixed_blend=fixed_blend)
+    else:
+        iq_l = _fm_modulate_iq(mpx_l, fs_composite, fs_iq, freq_dev_hz, cnr_db)
+        l_main, r_leak, _ = _run_demod_from_iq(iq_l, fixed_blend=fixed_blend)
+    sep_l2r = _stereo_separation_ls_db(l_main[settle:], r_leak[settle:], max_lag)
 
     l_zero, r_only = _make_stereo_tone(duration_s, fs_audio, tone_hz, 0.0, 0.7)
-    iq_r = _fm_modulate_iq(
-        _build_mpx(l_zero, r_only, fs_audio, fs_composite, pilot_amp),
-        fs_composite, fs_iq, freq_dev_hz, cnr_db,
+    mpx_r = _build_mpx(
+        l_zero, r_only, fs_audio, fs_composite, pilot_amp,
+        enable_preemphasis=enable_preemphasis, preemphasis_tau_s=preemphasis_tau_s,
+        dsb_phase_deg=dsb_phase_deg,
     )
-    l_leak, r_main, _ = _run_demod(iq_r)
-    sep_r2l = _stereo_separation_db(r_main[settle:], l_leak[settle:], fs_audio, tone_hz)
+    if path == "composite":
+        l_leak, r_main, _ = _run_demod_from_composite(mpx_r, fixed_blend=fixed_blend)
+    else:
+        iq_r = _fm_modulate_iq(mpx_r, fs_composite, fs_iq, freq_dev_hz, cnr_db)
+        l_leak, r_main, _ = _run_demod_from_iq(iq_r, fixed_blend=fixed_blend)
+    sep_r2l = _stereo_separation_ls_db(r_main[settle:], l_leak[settle:], max_lag)
 
     return QualityMetrics(
         thdn_left_db=thdn_l,
@@ -307,19 +400,81 @@ def _parser() -> argparse.ArgumentParser:
                    help="Carrier-to-noise ratio in dB (set <0 to disable noise)")
     p.add_argument("--pilot-amp", type=float, default=0.10, help="Pilot amplitude in MPX")
     p.add_argument("--freq-dev-hz", type=float, default=75_000.0, help="FM frequency deviation")
+    p.add_argument(
+        "--path", choices=("full", "composite"), default="full",
+        help="Evaluation path: full=MPX->FM IQ->demod, composite=MPX->stereo demod only",
+    )
+    p.add_argument(
+        "--warmup-s", type=float, default=0.8,
+        help="Seconds to discard at head for loop/filter settling",
+    )
+    p.add_argument(
+        "--preemphasis", action="store_true",
+        help="Apply pre-emphasis to synthetic L/R before MPX synthesis",
+    )
+    p.add_argument(
+        "--preemphasis-tau-us", type=float, default=50.0,
+        help="Pre-emphasis tau in microseconds",
+    )
+    p.add_argument(
+        "--fixed-blend", type=float, default=-1.0,
+        help="Set 0.0-1.0 to bypass adaptive blend (negative value disables)",
+    )
+    p.add_argument(
+        "--dsb-phase-deg", type=float, default=0.0,
+        help="Phase offset (degrees) for synthetic 38kHz DSB (L-R) generation",
+    )
+    p.add_argument(
+        "--sweep-dsb-phase", action="store_true",
+        help="Sweep DSB phase candidates and report the best separation score",
+    )
+    p.add_argument(
+        "--sweep-candidates", type=str, default="0,90,180,270",
+        help="Comma-separated DSB phase candidates in degrees for sweep mode",
+    )
     return p
 
 
 def main() -> None:
     args = _parser().parse_args()
     cnr_db = None if args.cnr_db < 0 else float(args.cnr_db)
-    m = evaluate_quality(
+    fixed_blend = None if args.fixed_blend < 0.0 else float(args.fixed_blend)
+    eval_kwargs = dict(
         duration_s=float(args.duration),
         tone_hz=float(args.tone_hz),
         cnr_db=cnr_db,
         pilot_amp=float(args.pilot_amp),
         freq_dev_hz=float(args.freq_dev_hz),
+        fixed_blend=fixed_blend,
+        path=str(args.path),
+        warmup_s=float(args.warmup_s),
+        enable_preemphasis=bool(args.preemphasis),
+        preemphasis_tau_s=float(args.preemphasis_tau_us) * 1e-6,
     )
+
+    if args.sweep_dsb_phase:
+        phases = [float(x.strip()) for x in args.sweep_candidates.split(",") if x.strip()]
+        rows: list[tuple[float, QualityMetrics]] = []
+        for phase_deg in phases:
+            m = evaluate_quality(dsb_phase_deg=phase_deg, **eval_kwargs)
+            rows.append((phase_deg, m))
+        rows.sort(key=lambda r: 0.5 * (r[1].separation_l_to_r_db + r[1].separation_r_to_l_db), reverse=True)
+        print("FM Quality Self-Test (DSB phase sweep)")
+        print("phase_deg,sep_l2r_db,sep_r2l_db,snr_l_db,thdn_l_db,blend_avg")
+        for phase_deg, m in rows:
+            print(
+                f"{phase_deg:.1f},{m.separation_l_to_r_db:.2f},{m.separation_r_to_l_db:.2f},"
+                f"{m.snr_left_db:.2f},{m.thdn_left_db:.2f},{m.blend_mean:.3f}"
+            )
+        best_phase, best = rows[0]
+        print(f"Best phase: {best_phase:.1f} deg")
+        print(
+            f"Best separation avg: "
+            f"{0.5 * (best.separation_l_to_r_db + best.separation_r_to_l_db):.2f} dB"
+        )
+        return
+
+    m = evaluate_quality(dsb_phase_deg=float(args.dsb_phase_deg), **eval_kwargs)
     print("FM Quality Self-Test")
     print(f"THD+N L: {m.thdn_left_db:.2f} dB")
     print(f"THD+N R: {m.thdn_right_db:.2f} dB")

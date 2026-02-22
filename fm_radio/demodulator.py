@@ -163,6 +163,7 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         # --- Adaptive stereo blend ---
         # blend_factor: 1.0 = full stereo, 0.0 = full mono
         self.blend_factor: float = 1.0
+        self.force_blend_factor: float | None = None
         self.pilot_snr_ema: float | None = None
         self.pilot_jitter_ema: float = 0.0
         self.lr_high_gate_gain: float = 1.0
@@ -256,6 +257,8 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         # EMA smoothing to avoid abrupt transitions
         alpha = STEREO_BLEND_SMOOTHING
         self.blend_factor = alpha * target + (1.0 - alpha) * self.blend_factor
+        if self.force_blend_factor is not None:
+            self.blend_factor = float(np.clip(self.force_blend_factor, 0.0, 1.0))
 
         subcarrier = np.cos(2.0 * pilot_phase)
         lr_band = self.bp_lr.apply(composite)
