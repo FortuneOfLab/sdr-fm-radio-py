@@ -53,7 +53,9 @@ MONO_LOWPASS_ORDER_LIGHT = 1        # Mono lowpass filter order (light)
 MONO_LOWPASS_CUTOFF = 15000.0       # Mono/baseband lowpass cutoff (Hz)
 LR_BASE_LOWPASS_CUTOFF = 15000.0    # L-R baseband lowpass cutoff (Hz)
 LR_HIGH_SPLIT_CUTOFF = 7000.0       # L-R split frequency for high-band damping (Hz)
-LR_HIGH_MIN_GAIN = 0.35             # Minimum high-band gain at low stereo blend
+LR_HIGH_SUPER_SPLIT_CUTOFF = 12000.0  # L-R split frequency between mid-high and super-high (Hz)
+LR_HIGH_MIN_GAIN = 0.40             # Minimum mid-high gain at low stereo blend
+LR_SUPER_HIGH_MIN_GAIN = 0.20       # Minimum super-high gain at low stereo blend
 LR_HIGH_GATE_THRESHOLD = 0.0028     # RMS threshold for opening L-R high-band gate
 LR_HIGH_GATE_KNEE_MULT = 2.2        # Full-open level as multiple of threshold
 LR_HIGH_GATE_MIN_GAIN = 0.75        # Minimum gate gain when below threshold
@@ -84,11 +86,16 @@ STEREO_LR_LEAK_CANCEL_MAX = 0.0     # Max mono->LR leakage cancellation coeffici
 STEREO_LR_LEAK_CANCEL_SMOOTHING = 0.10  # EMA smoothing for leakage cancellation
 STEREO_LR_LEAK_CANCEL_SIDE_RATIO_MAX = 0.25  # Enable leakage cancel only below this |L-R|/|L+R|
 STEREO_MONO_LR_PHASE_ALIGN_COH_MIN = 0.25   # Minimum mono/LR coherence to update phase align
+STEREO_MONO_LR_PHASE_ALIGN_SIDE_RATIO_MIN = 0.01  # Minimum |L-R|/|L+R| ratio to trust align update
+STEREO_MONO_LR_PHASE_ALIGN_SIDE_RATIO_MAX = 0.40  # Maximum |L-R|/|L+R| ratio to trust align update
 STEREO_MONO_LR_PHASE_ALIGN_LIMIT_DEG = 30.0  # Clamp limit for mono/LR phase alignment (deg)
 STEREO_MONO_LR_PHASE_ALIGN_SMOOTHING = 0.12  # EMA smoothing for mono/LR phase alignment
+STEREO_MONO_LR_PHASE_ALIGN_DECAY = 0.05      # Decay-to-zero rate when align update is not trusted
 STEREO_PHASE_ALIGN_ENABLE = True            # Enable mono/LR phase alignment correction
 STEREO_DIAG_ENABLE = False                  # Enable stereo demod diagnostics logging
 STEREO_DIAG_LOG_INTERVAL_BLOCKS = 120       # Log interval (composite blocks) for diagnostics
+
+STEREO_LR_LEAK_CANCEL_LOW_CUTOFF = 5000.0   # Low-band cutoff used for mono leakage cancellation
 
 DEEMPHASIS_TAU = 50e-6              # De-emphasis time constant (seconds)
 DC_OFFSET_ALPHA = 0.01              # DC offset smoothing coefficient
