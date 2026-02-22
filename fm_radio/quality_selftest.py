@@ -39,6 +39,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import logging
 from dataclasses import dataclass
 from fractions import Fraction
 
@@ -207,13 +208,30 @@ def _fm_modulate_iq(
 
 
 def _run_demod_from_iq(
-    iq: np.ndarray, fixed_blend: float | None = None, disable_phase_align: bool = False,
+    iq: np.ndarray,
+    fixed_blend: float | None = None,
+    disable_phase_align: bool = False,
+    disable_iq_phase_correction: bool = False,
+    disable_high_gate: bool = False,
+    disable_leak_cancel: bool = False,
+    demod_diag: bool = False,
+    demod_diag_interval: int | None = None,
                ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     demod = FMDemodulator(stereo=True)
     if fixed_blend is not None:
         demod.force_blend_factor = float(np.clip(fixed_blend, 0.0, 1.0))
     if disable_phase_align:
         demod.phase_align_enabled = False
+    if disable_iq_phase_correction:
+        demod.iq_phase_correction_enabled = False
+    if disable_high_gate:
+        demod.high_gate_enabled = False
+    if disable_leak_cancel:
+        demod.leak_cancel_enabled = False
+    if demod_diag:
+        demod.diag_enable = True
+    if demod_diag_interval is not None and demod_diag_interval > 0:
+        demod.diag_log_interval_blocks = int(demod_diag_interval)
     left_chunks: list[np.ndarray] = []
     right_chunks: list[np.ndarray] = []
     blend_hist: list[float] = []
@@ -240,13 +258,30 @@ def _run_demod_from_iq(
 
 
 def _run_demod_from_composite(
-    composite: np.ndarray, fixed_blend: float | None = None, disable_phase_align: bool = False,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    composite: np.ndarray,
+    fixed_blend: float | None = None,
+    disable_phase_align: bool = False,
+    disable_iq_phase_correction: bool = False,
+    disable_high_gate: bool = False,
+    disable_leak_cancel: bool = False,
+    demod_diag: bool = False,
+    demod_diag_interval: int | None = None,
+                     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     demod = FMDemodulator(stereo=True)
     if fixed_blend is not None:
         demod.force_blend_factor = float(np.clip(fixed_blend, 0.0, 1.0))
     if disable_phase_align:
         demod.phase_align_enabled = False
+    if disable_iq_phase_correction:
+        demod.iq_phase_correction_enabled = False
+    if disable_high_gate:
+        demod.high_gate_enabled = False
+    if disable_leak_cancel:
+        demod.leak_cancel_enabled = False
+    if demod_diag:
+        demod.diag_enable = True
+    if demod_diag_interval is not None and demod_diag_interval > 0:
+        demod.diag_log_interval_blocks = int(demod_diag_interval)
 
     ratio = Fraction(int(COMPOSITE_RATE), int(SDR_SAMPLE_RATE)).limit_denominator()
     composite_block = max(256, int(SDR_BLOCK_SIZE * ratio.numerator / ratio.denominator))
@@ -380,6 +415,11 @@ def evaluate_quality(
     dsb_phase_deg: float = 0.0,
     source_lr: tuple[np.ndarray, np.ndarray] | None = None,
     disable_phase_align: bool = False,
+    disable_iq_phase_correction: bool = False,
+    disable_high_gate: bool = False,
+    disable_leak_cancel: bool = False,
+    demod_diag: bool = False,
+    demod_diag_interval: int | None = None,
 ) -> QualityMetrics:
     fs_audio = AUDIO_OUTPUT_RATE
     fs_composite = int(COMPOSITE_RATE)
@@ -401,11 +441,17 @@ def evaluate_quality(
     if path == "composite":
         left_out, right_out, blend_hist = _run_demod_from_composite(
             mpx, fixed_blend=fixed_blend, disable_phase_align=disable_phase_align,
+            disable_iq_phase_correction=disable_iq_phase_correction,
+            disable_high_gate=disable_high_gate, disable_leak_cancel=disable_leak_cancel,
+            demod_diag=demod_diag, demod_diag_interval=demod_diag_interval,
         )
     else:
         iq = _fm_modulate_iq(mpx, fs_composite, fs_iq, freq_dev_hz, cnr_db)
         left_out, right_out, blend_hist = _run_demod_from_iq(
             iq, fixed_blend=fixed_blend, disable_phase_align=disable_phase_align,
+            disable_iq_phase_correction=disable_iq_phase_correction,
+            disable_high_gate=disable_high_gate, disable_leak_cancel=disable_leak_cancel,
+            demod_diag=demod_diag, demod_diag_interval=demod_diag_interval,
         )
 
     left_ref_fit, left_x = _align_and_fit(left_ref, left_out, max_lag)
@@ -437,11 +483,17 @@ def evaluate_quality(
     if path == "composite":
         l_main, r_leak, _ = _run_demod_from_composite(
             mpx_l, fixed_blend=fixed_blend, disable_phase_align=disable_phase_align,
+            disable_iq_phase_correction=disable_iq_phase_correction,
+            disable_high_gate=disable_high_gate, disable_leak_cancel=disable_leak_cancel,
+            demod_diag=demod_diag, demod_diag_interval=demod_diag_interval,
         )
     else:
         iq_l = _fm_modulate_iq(mpx_l, fs_composite, fs_iq, freq_dev_hz, cnr_db)
         l_main, r_leak, _ = _run_demod_from_iq(
             iq_l, fixed_blend=fixed_blend, disable_phase_align=disable_phase_align,
+            disable_iq_phase_correction=disable_iq_phase_correction,
+            disable_high_gate=disable_high_gate, disable_leak_cancel=disable_leak_cancel,
+            demod_diag=demod_diag, demod_diag_interval=demod_diag_interval,
         )
     sep_l2r = _stereo_separation_ls_db(l_main[settle:], r_leak[settle:], max_lag)
 
@@ -454,11 +506,17 @@ def evaluate_quality(
     if path == "composite":
         l_leak, r_main, _ = _run_demod_from_composite(
             mpx_r, fixed_blend=fixed_blend, disable_phase_align=disable_phase_align,
+            disable_iq_phase_correction=disable_iq_phase_correction,
+            disable_high_gate=disable_high_gate, disable_leak_cancel=disable_leak_cancel,
+            demod_diag=demod_diag, demod_diag_interval=demod_diag_interval,
         )
     else:
         iq_r = _fm_modulate_iq(mpx_r, fs_composite, fs_iq, freq_dev_hz, cnr_db)
         l_leak, r_main, _ = _run_demod_from_iq(
             iq_r, fixed_blend=fixed_blend, disable_phase_align=disable_phase_align,
+            disable_iq_phase_correction=disable_iq_phase_correction,
+            disable_high_gate=disable_high_gate, disable_leak_cancel=disable_leak_cancel,
+            demod_diag=demod_diag, demod_diag_interval=demod_diag_interval,
         )
     sep_r2l = _stereo_separation_ls_db(r_main[settle:], l_leak[settle:], max_lag)
 
@@ -516,6 +574,26 @@ def _parser() -> argparse.ArgumentParser:
         help="Disable mono/LR phase-alignment correction in demodulator",
     )
     p.add_argument(
+        "--disable-iq-phase-correction", action="store_true",
+        help="Disable I/Q phase rotation correction in LR synchronous demod",
+    )
+    p.add_argument(
+        "--disable-high-gate", action="store_true",
+        help="Disable high-band LR gate in stereo shaping",
+    )
+    p.add_argument(
+        "--disable-leak-cancel", action="store_true",
+        help="Disable mono leakage cancellation from LR",
+    )
+    p.add_argument(
+        "--demod-diag", action="store_true",
+        help="Enable demodulator StereoDiag logging during self-test",
+    )
+    p.add_argument(
+        "--demod-diag-interval", type=int, default=0,
+        help="StereoDiag log interval in composite blocks (0=default)",
+    )
+    p.add_argument(
         "--dsb-phase-deg", type=float, default=0.0,
         help="Phase offset (degrees) for synthetic 38kHz DSB (L-R) generation",
     )
@@ -546,6 +624,11 @@ def main() -> None:
         enable_preemphasis=bool(args.preemphasis),
         preemphasis_tau_s=float(args.preemphasis_tau_us) * 1e-6,
         disable_phase_align=bool(args.disable_phase_align),
+        disable_iq_phase_correction=bool(args.disable_iq_phase_correction),
+        disable_high_gate=bool(args.disable_high_gate),
+        disable_leak_cancel=bool(args.disable_leak_cancel),
+        demod_diag=bool(args.demod_diag),
+        demod_diag_interval=(None if int(args.demod_diag_interval) <= 0 else int(args.demod_diag_interval)),
     )
     if args.source_wav:
         eval_kwargs["source_lr"] = _load_stereo_wav(
@@ -553,9 +636,23 @@ def main() -> None:
         )
 
     if args.iq_wav:
+        if args.demod_diag:
+            logging.basicConfig(
+                level=logging.INFO,
+                format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+            )
         iq = _load_iq_wav(args.iq_wav, int(SDR_SAMPLE_RATE), float(args.duration))
         left, right, blend = _run_demod_from_iq(
-            iq, fixed_blend=fixed_blend, disable_phase_align=bool(args.disable_phase_align),
+            iq,
+            fixed_blend=fixed_blend,
+            disable_phase_align=bool(args.disable_phase_align),
+            disable_iq_phase_correction=bool(args.disable_iq_phase_correction),
+            disable_high_gate=bool(args.disable_high_gate),
+            disable_leak_cancel=bool(args.disable_leak_cancel),
+            demod_diag=bool(args.demod_diag),
+            demod_diag_interval=(
+                None if int(args.demod_diag_interval) <= 0 else int(args.demod_diag_interval)
+            ),
         )
         s = int(max(0.0, float(args.warmup_s)) * AUDIO_OUTPUT_RATE)
         left = left[s:]
