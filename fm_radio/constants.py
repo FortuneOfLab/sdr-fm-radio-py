@@ -61,17 +61,29 @@ LR_HIGH_GATE_SMOOTHING = 0.20       # EMA smoothing for high-band gate gain
 
 PILOT_BANDPASS_ORDER = 9            # Pilot bandpass filter order (standard)
 PILOT_BANDPASS_ORDER_LIGHT = 1      # Pilot bandpass filter order (light)
-PILOT_BANDPASS_LOW = 17000.0        # Pilot bandpass lower edge (Hz)
-PILOT_BANDPASS_HIGH = 21000.0       # Pilot bandpass upper edge (Hz)
+PILOT_BANDPASS_LOW = 18000.0        # Pilot bandpass lower edge (Hz)
+PILOT_BANDPASS_HIGH = 20000.0       # Pilot bandpass upper edge (Hz)
 PILOT_NOISE_BAND1_LOW = 16000.0     # Pilot SNR noise band 1 lower edge (Hz)
 PILOT_NOISE_BAND1_HIGH = 17500.0    # Pilot SNR noise band 1 upper edge (Hz)
 PILOT_NOISE_BAND2_LOW = 20500.0     # Pilot SNR noise band 2 lower edge (Hz)
 PILOT_NOISE_BAND2_HIGH = 22000.0    # Pilot SNR noise band 2 upper edge (Hz)
+STEREO_PHASE_ERR_SMOOTHING = 0.15   # EMA smoothing for LR demod phase correction
+STEREO_PHASE_ERR_LIMIT_DEG = 45.0   # Clamp limit for LR demod phase correction (deg)
 
 LR_BANDPASS_ORDER = 15              # L-R bandpass filter order (standard)
 LR_BANDPASS_ORDER_LIGHT = 1         # L-R bandpass filter order (light)
 LR_BANDPASS_LOW = 23000.0           # L-R bandpass lower edge (Hz)
 LR_BANDPASS_HIGH = 53000.0          # L-R bandpass upper edge (Hz)
+STEREO_LR_DEMOD_GAIN = 2.0          # Gain compensation for DSB-SC synchronous demod
+STEREO_LR_LEAK_CANCEL_MAX = 0.0     # Max mono->LR leakage cancellation coefficient
+STEREO_LR_LEAK_CANCEL_SMOOTHING = 0.10  # EMA smoothing for leakage cancellation
+STEREO_LR_LEAK_CANCEL_SIDE_RATIO_MAX = 0.25  # Enable leakage cancel only below this |L-R|/|L+R|
+STEREO_MONO_LR_PHASE_ALIGN_COH_MIN = 0.25   # Minimum mono/LR coherence to update phase align
+STEREO_MONO_LR_PHASE_ALIGN_LIMIT_DEG = 30.0  # Clamp limit for mono/LR phase alignment (deg)
+STEREO_MONO_LR_PHASE_ALIGN_SMOOTHING = 0.12  # EMA smoothing for mono/LR phase alignment
+STEREO_PHASE_ALIGN_ENABLE = True            # Enable mono/LR phase alignment correction
+STEREO_DIAG_ENABLE = False                  # Enable stereo demod diagnostics logging
+STEREO_DIAG_LOG_INTERVAL_BLOCKS = 120       # Log interval (composite blocks) for diagnostics
 
 DEEMPHASIS_TAU = 50e-6              # De-emphasis time constant (seconds)
 DC_OFFSET_ALPHA = 0.01              # DC offset smoothing coefficient

@@ -44,6 +44,7 @@ from fractions import Fraction
 
 import numpy as np
 import scipy.signal as signal
+from scipy.io import wavfile
 
 from fm_radio.constants import (
     AUDIO_OUTPUT_RATE,
@@ -77,6 +78,61 @@ def _rms(x: np.ndarray) -> float:
 def _resample(x: np.ndarray, src_fs: float, dst_fs: float) -> np.ndarray:
     ratio = Fraction(int(dst_fs), int(src_fs)).limit_denominator()
     return signal.resample_poly(x, ratio.numerator, ratio.denominator).astype(np.float32)
+
+
+def _to_float_audio(x: np.ndarray) -> np.ndarray:
+    if np.issubdtype(x.dtype, np.floating):
+        return x.astype(np.float32)
+    if np.issubdtype(x.dtype, np.integer):
+        scale = float(np.iinfo(x.dtype).max)
+        return (x.astype(np.float32) / max(scale, 1.0)).astype(np.float32)
+    return x.astype(np.float32)
+
+
+def _load_stereo_wav(path: str, target_fs: int, duration_s: float | None = None
+                     ) -> tuple[np.ndarray, np.ndarray]:
+    fs, raw = wavfile.read(path)
+    x = _to_float_audio(np.asarray(raw))
+    if x.ndim == 1:
+        left = x
+        right = x
+    else:
+        left = x[:, 0]
+        right = x[:, 1] if x.shape[1] > 1 else x[:, 0]
+
+    if duration_s is not None and duration_s > 0:
+        n = int(duration_s * fs)
+        left = left[:n]
+        right = right[:n]
+    left = _resample(left, fs, target_fs)
+    right = _resample(right, fs, target_fs)
+    n = min(left.size, right.size)
+    left = left[:n]
+    right = right[:n]
+    peak = float(max(np.max(np.abs(left)), np.max(np.abs(right)), EPS))
+    if peak > 0:
+        left = (0.8 * left / peak).astype(np.float32)
+        right = (0.8 * right / peak).astype(np.float32)
+    return left, right
+
+
+def _load_iq_wav(path: str, target_fs: int, duration_s: float | None = None) -> np.ndarray:
+    fs, raw = wavfile.read(path)
+    x = _to_float_audio(np.asarray(raw))
+    if x.ndim < 2 or x.shape[1] < 2:
+        raise ValueError("IQ wav must have at least 2 channels (I=ch0, Q=ch1).")
+    i = x[:, 0]
+    q = x[:, 1]
+    if duration_s is not None and duration_s > 0:
+        n = int(duration_s * fs)
+        i = i[:n]
+        q = q[:n]
+    i = _resample(i, fs, target_fs)
+    q = _resample(q, fs, target_fs)
+    n = min(i.size, q.size)
+    iq = i[:n].astype(np.float32) + 1j * q[:n].astype(np.float32)
+    peak = float(np.max(np.abs(iq)) + EPS)
+    return (0.95 * iq / peak).astype(np.complex64)
 
 
 def _make_stereo_tone(
@@ -150,11 +206,14 @@ def _fm_modulate_iq(
     return (iq + noise.astype(np.complex64)).astype(np.complex64)
 
 
-def _run_demod_from_iq(iq: np.ndarray, fixed_blend: float | None = None
+def _run_demod_from_iq(
+    iq: np.ndarray, fixed_blend: float | None = None, disable_phase_align: bool = False,
                ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     demod = FMDemodulator(stereo=True)
     if fixed_blend is not None:
         demod.force_blend_factor = float(np.clip(fixed_blend, 0.0, 1.0))
+    if disable_phase_align:
+        demod.phase_align_enabled = False
     left_chunks: list[np.ndarray] = []
     right_chunks: list[np.ndarray] = []
     blend_hist: list[float] = []
@@ -181,11 +240,13 @@ def _run_demod_from_iq(iq: np.ndarray, fixed_blend: float | None = None
 
 
 def _run_demod_from_composite(
-    composite: np.ndarray, fixed_blend: float | None = None,
+    composite: np.ndarray, fixed_blend: float | None = None, disable_phase_align: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     demod = FMDemodulator(stereo=True)
     if fixed_blend is not None:
         demod.force_blend_factor = float(np.clip(fixed_blend, 0.0, 1.0))
+    if disable_phase_align:
+        demod.phase_align_enabled = False
 
     ratio = Fraction(int(COMPOSITE_RATE), int(SDR_SAMPLE_RATE)).limit_denominator()
     composite_block = max(256, int(SDR_BLOCK_SIZE * ratio.numerator / ratio.denominator))
@@ -317,6 +378,8 @@ def evaluate_quality(
     enable_preemphasis: bool = False,
     preemphasis_tau_s: float = 50e-6,
     dsb_phase_deg: float = 0.0,
+    source_lr: tuple[np.ndarray, np.ndarray] | None = None,
+    disable_phase_align: bool = False,
 ) -> QualityMetrics:
     fs_audio = AUDIO_OUTPUT_RATE
     fs_composite = int(COMPOSITE_RATE)
@@ -324,8 +387,12 @@ def evaluate_quality(
     max_lag = int(0.2 * fs_audio)
     settle = int(max(0.0, warmup_s) * fs_audio)
 
-    # 1) Equal L/R tone: THD+N and SNR.
-    left_ref, right_ref = _make_stereo_tone(duration_s, fs_audio, tone_hz, 0.6, 0.6)
+    if source_lr is None:
+        left_ref, right_ref = _make_stereo_tone(duration_s, fs_audio, tone_hz, 0.6, 0.6)
+        calc_thdn = True
+    else:
+        left_ref, right_ref = source_lr
+        calc_thdn = False
     mpx = _build_mpx(
         left_ref, right_ref, fs_audio, fs_composite, pilot_amp,
         enable_preemphasis=enable_preemphasis, preemphasis_tau_s=preemphasis_tau_s,
@@ -333,11 +400,13 @@ def evaluate_quality(
     )
     if path == "composite":
         left_out, right_out, blend_hist = _run_demod_from_composite(
-            mpx, fixed_blend=fixed_blend,
+            mpx, fixed_blend=fixed_blend, disable_phase_align=disable_phase_align,
         )
     else:
         iq = _fm_modulate_iq(mpx, fs_composite, fs_iq, freq_dev_hz, cnr_db)
-        left_out, right_out, blend_hist = _run_demod_from_iq(iq, fixed_blend=fixed_blend)
+        left_out, right_out, blend_hist = _run_demod_from_iq(
+            iq, fixed_blend=fixed_blend, disable_phase_align=disable_phase_align,
+        )
 
     left_ref_fit, left_x = _align_and_fit(left_ref, left_out, max_lag)
     right_ref_fit, right_x = _align_and_fit(right_ref, right_out, max_lag)
@@ -349,34 +418,48 @@ def evaluate_quality(
 
     snr_l = _snr_db(left_ref_fit, left_x)
     snr_r = _snr_db(right_ref_fit, right_x)
-    thdn_l = _thdn_db(left_x, fs_audio, tone_hz)
-    thdn_r = _thdn_db(right_x, fs_audio, tone_hz)
+    thdn_l = _thdn_db(left_x, fs_audio, tone_hz) if calc_thdn else float("nan")
+    thdn_r = _thdn_db(right_x, fs_audio, tone_hz) if calc_thdn else float("nan")
 
     # 2) Separation: left-only then right-only.
-    l_only, r_zero = _make_stereo_tone(duration_s, fs_audio, tone_hz, 0.7, 0.0)
+    if source_lr is None:
+        l_only, _ = _make_stereo_tone(duration_s, fs_audio, tone_hz, 0.7, 0.0)
+        _, r_only = _make_stereo_tone(duration_s, fs_audio, tone_hz, 0.0, 0.7)
+    else:
+        l_only = left_ref
+        r_only = right_ref
+    r_zero = np.zeros_like(l_only)
     mpx_l = _build_mpx(
         l_only, r_zero, fs_audio, fs_composite, pilot_amp,
         enable_preemphasis=enable_preemphasis, preemphasis_tau_s=preemphasis_tau_s,
         dsb_phase_deg=dsb_phase_deg,
     )
     if path == "composite":
-        l_main, r_leak, _ = _run_demod_from_composite(mpx_l, fixed_blend=fixed_blend)
+        l_main, r_leak, _ = _run_demod_from_composite(
+            mpx_l, fixed_blend=fixed_blend, disable_phase_align=disable_phase_align,
+        )
     else:
         iq_l = _fm_modulate_iq(mpx_l, fs_composite, fs_iq, freq_dev_hz, cnr_db)
-        l_main, r_leak, _ = _run_demod_from_iq(iq_l, fixed_blend=fixed_blend)
+        l_main, r_leak, _ = _run_demod_from_iq(
+            iq_l, fixed_blend=fixed_blend, disable_phase_align=disable_phase_align,
+        )
     sep_l2r = _stereo_separation_ls_db(l_main[settle:], r_leak[settle:], max_lag)
 
-    l_zero, r_only = _make_stereo_tone(duration_s, fs_audio, tone_hz, 0.0, 0.7)
+    l_zero = np.zeros_like(r_only)
     mpx_r = _build_mpx(
         l_zero, r_only, fs_audio, fs_composite, pilot_amp,
         enable_preemphasis=enable_preemphasis, preemphasis_tau_s=preemphasis_tau_s,
         dsb_phase_deg=dsb_phase_deg,
     )
     if path == "composite":
-        l_leak, r_main, _ = _run_demod_from_composite(mpx_r, fixed_blend=fixed_blend)
+        l_leak, r_main, _ = _run_demod_from_composite(
+            mpx_r, fixed_blend=fixed_blend, disable_phase_align=disable_phase_align,
+        )
     else:
         iq_r = _fm_modulate_iq(mpx_r, fs_composite, fs_iq, freq_dev_hz, cnr_db)
-        l_leak, r_main, _ = _run_demod_from_iq(iq_r, fixed_blend=fixed_blend)
+        l_leak, r_main, _ = _run_demod_from_iq(
+            iq_r, fixed_blend=fixed_blend, disable_phase_align=disable_phase_align,
+        )
     sep_r2l = _stereo_separation_ls_db(r_main[settle:], l_leak[settle:], max_lag)
 
     return QualityMetrics(
@@ -396,6 +479,14 @@ def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="FM demodulation quality self-test")
     p.add_argument("--duration", type=float, default=6.0, help="Test duration in seconds")
     p.add_argument("--tone-hz", type=float, default=1000.0, help="Tone frequency for THD/Sep")
+    p.add_argument(
+        "--source-wav", type=str, default="",
+        help="Stereo WAV source for known-material injection (disables THD+N)",
+    )
+    p.add_argument(
+        "--iq-wav", type=str, default="",
+        help="Measured IQ WAV (I=ch0,Q=ch1). Runs diagnostics-only path.",
+    )
     p.add_argument("--cnr-db", type=float, default=40.0,
                    help="Carrier-to-noise ratio in dB (set <0 to disable noise)")
     p.add_argument("--pilot-amp", type=float, default=0.10, help="Pilot amplitude in MPX")
@@ -419,6 +510,10 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--fixed-blend", type=float, default=-1.0,
         help="Set 0.0-1.0 to bypass adaptive blend (negative value disables)",
+    )
+    p.add_argument(
+        "--disable-phase-align", action="store_true",
+        help="Disable mono/LR phase-alignment correction in demodulator",
     )
     p.add_argument(
         "--dsb-phase-deg", type=float, default=0.0,
@@ -450,7 +545,43 @@ def main() -> None:
         warmup_s=float(args.warmup_s),
         enable_preemphasis=bool(args.preemphasis),
         preemphasis_tau_s=float(args.preemphasis_tau_us) * 1e-6,
+        disable_phase_align=bool(args.disable_phase_align),
     )
+    if args.source_wav:
+        eval_kwargs["source_lr"] = _load_stereo_wav(
+            args.source_wav, AUDIO_OUTPUT_RATE, float(args.duration),
+        )
+
+    if args.iq_wav:
+        iq = _load_iq_wav(args.iq_wav, int(SDR_SAMPLE_RATE), float(args.duration))
+        left, right, blend = _run_demod_from_iq(
+            iq, fixed_blend=fixed_blend, disable_phase_align=bool(args.disable_phase_align),
+        )
+        s = int(max(0.0, float(args.warmup_s)) * AUDIO_OUTPUT_RATE)
+        left = left[s:]
+        right = right[s:]
+        n = min(left.size, right.size)
+        left = left[:n]
+        right = right[:n]
+        corr = float(np.corrcoef(left, right)[0, 1]) if n > 8 else float("nan")
+        rms_l = _rms(left)
+        rms_r = _rms(right)
+        side = _rms(left - right)
+        mono = _rms(left + right)
+        print("FM Quality Self-Test (Measured IQ Diagnostics)")
+        print(f"Samples(out): {n}")
+        print(f"RMS L/R: {rms_l:.6f} / {rms_r:.6f}")
+        print(f"L-R / L+R RMS ratio: {side/(mono+EPS):.4f}")
+        print(f"L/R correlation: {corr:.4f}")
+        if blend.size:
+            print(
+                f"Blend avg/min/max: {float(np.mean(blend)):.3f} / "
+                f"{float(np.min(blend)):.3f} / {float(np.max(blend)):.3f}"
+            )
+        else:
+            print("Blend avg/min/max: nan / nan / nan")
+        print("Reference metrics (THD+N/SNR/separation) require synthetic or source-wav mode.")
+        return
 
     if args.sweep_dsb_phase:
         phases = [float(x.strip()) for x in args.sweep_candidates.split(",") if x.strip()]

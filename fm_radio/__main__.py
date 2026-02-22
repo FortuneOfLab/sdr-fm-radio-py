@@ -51,6 +51,8 @@ Command Examples (during execution):
   'stereo off' / 'mono': Enable mono demodulation
   'record start'      : Start recording (file name auto-generated)
   'record stop'       : Stop recording
+  'iqrec start'       : Start raw IQ recording (I/Q 2ch WAV)
+  'iqrec stop'        : Stop raw IQ recording
   'agc on'            : Enable auto gain control
   'agc off'           : Disable auto gain (manual mode)
   'gain <value>'      : Set manual gain in dB (when auto gain is off)

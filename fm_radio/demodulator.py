@@ -55,10 +55,17 @@ from fm_radio.constants import (
     LR_HIGH_GATE_MIN_GAIN, LR_HIGH_GATE_SMOOTHING,
     PILOT_BANDPASS_ORDER, PILOT_BANDPASS_ORDER_LIGHT,
     PILOT_BANDPASS_LOW, PILOT_BANDPASS_HIGH,
+    STEREO_PHASE_ERR_SMOOTHING, STEREO_PHASE_ERR_LIMIT_DEG,
     PILOT_NOISE_BAND1_LOW, PILOT_NOISE_BAND1_HIGH,
     PILOT_NOISE_BAND2_LOW, PILOT_NOISE_BAND2_HIGH,
     LR_BANDPASS_ORDER, LR_BANDPASS_ORDER_LIGHT,
     LR_BANDPASS_LOW, LR_BANDPASS_HIGH,
+    STEREO_LR_DEMOD_GAIN, STEREO_LR_LEAK_CANCEL_MAX, STEREO_LR_LEAK_CANCEL_SMOOTHING,
+    STEREO_LR_LEAK_CANCEL_SIDE_RATIO_MAX,
+    STEREO_MONO_LR_PHASE_ALIGN_COH_MIN,
+    STEREO_MONO_LR_PHASE_ALIGN_LIMIT_DEG,
+    STEREO_MONO_LR_PHASE_ALIGN_SMOOTHING,
+    STEREO_PHASE_ALIGN_ENABLE, STEREO_DIAG_ENABLE, STEREO_DIAG_LOG_INTERVAL_BLOCKS,
     DEEMPHASIS_TAU, DC_OFFSET_ALPHA,
     AUDIO_OUTPUT_RATE, COMPOSITE_RATE, LIGHT_COMPOSITE_SCALE,
     STANDARD_RESAMPLE_KAISER_BETA,
@@ -109,7 +116,19 @@ class BaseFMDemodulator(FMDemodulatorInterface):
             order=mono_order, cutoff=LR_BASE_LOWPASS_CUTOFF,
             sample_rate=self.composite_rate,
         )
+        self.lp_lr_base_q = LowpassFilter(
+            order=mono_order, cutoff=LR_BASE_LOWPASS_CUTOFF,
+            sample_rate=self.composite_rate,
+        )
         self.lp_lr_low = LowpassFilter(
+            order=mono_order, cutoff=LR_HIGH_SPLIT_CUTOFF,
+            sample_rate=self.composite_rate,
+        )
+        self.lp_mono_align = LowpassFilter(
+            order=mono_order, cutoff=LR_HIGH_SPLIT_CUTOFF,
+            sample_rate=self.composite_rate,
+        )
+        self.lp_lr_low_q = LowpassFilter(
             order=mono_order, cutoff=LR_HIGH_SPLIT_CUTOFF,
             sample_rate=self.composite_rate,
         )
@@ -166,7 +185,13 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         self.force_blend_factor: float | None = None
         self.pilot_snr_ema: float | None = None
         self.pilot_jitter_ema: float = 0.0
+        self.stereo_phase_err_ema: float = 0.0
+        self.mono_lr_phase_align_ema: float = 0.0
         self.lr_high_gate_gain: float = 1.0
+        self.lr_leak_cancel_coef: float = 0.0
+        self.phase_align_enabled: bool = STEREO_PHASE_ALIGN_ENABLE
+        self.diag_enable: bool = STEREO_DIAG_ENABLE
+        self._diag_counter: int = 0
 
         # --- Resample ratios ---
         # IQ sample rate -> composite rate
@@ -260,11 +285,30 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         if self.force_blend_factor is not None:
             self.blend_factor = float(np.clip(self.force_blend_factor, 0.0, 1.0))
 
-        subcarrier = np.cos(2.0 * pilot_phase)
+        subcarrier_i = np.cos(2.0 * pilot_phase)
+        subcarrier_q = np.sin(2.0 * pilot_phase)
         lr_band = self.bp_lr.apply(composite)
-        lr_demodulated = lr_band * subcarrier
-        lr_base_full = self.lp_lr_base.apply(lr_demodulated)
-        lr_base_low = self.lp_lr_low.apply(lr_demodulated)
+        lr_demod_i = lr_band * subcarrier_i * STEREO_LR_DEMOD_GAIN
+        lr_demod_q = lr_band * subcarrier_q * STEREO_LR_DEMOD_GAIN
+        lr_base_full_i = self.lp_lr_base.apply(lr_demod_i)
+        lr_base_full_q = self.lp_lr_base_q.apply(lr_demod_q)
+        cov_iq = float(np.mean(lr_base_full_i * lr_base_full_q))
+        var_i = float(np.mean(lr_base_full_i ** 2))
+        var_q = float(np.mean(lr_base_full_q ** 2))
+        phase_err_raw = 0.5 * np.arctan2(2.0 * cov_iq, var_i - var_q + 1e-12)
+        phase_lim = np.deg2rad(STEREO_PHASE_ERR_LIMIT_DEG)
+        phase_err_raw = float(np.clip(phase_err_raw, -phase_lim, phase_lim))
+        phase_alpha = STEREO_PHASE_ERR_SMOOTHING
+        self.stereo_phase_err_ema = (
+            phase_alpha * phase_err_raw + (1.0 - phase_alpha) * self.stereo_phase_err_ema
+        )
+        cph = np.cos(self.stereo_phase_err_ema)
+        sph = np.sin(self.stereo_phase_err_ema)
+        lr_base_full = lr_base_full_i * cph + lr_base_full_q * sph
+
+        lr_base_low_i = self.lp_lr_low.apply(lr_demod_i)
+        lr_base_low_q = self.lp_lr_low_q.apply(lr_demod_q)
+        lr_base_low = lr_base_low_i * cph + lr_base_low_q * sph
         lr_base_high = lr_base_full - lr_base_low
 
         high_rms = float(np.sqrt(np.mean(lr_base_high ** 2) + 1e-12))
@@ -284,9 +328,70 @@ class BaseFMDemodulator(FMDemodulatorInterface):
 
         high_gain = LR_HIGH_MIN_GAIN + (1.0 - LR_HIGH_MIN_GAIN) * self.blend_factor
         lr_shaped = lr_base_low + (high_gain * self.lr_high_gate_gain) * lr_base_high
-        lr_baseband = lr_shaped * self.blend_factor
+
+        # Align LR phase to mono when coherence is high (helps separation).
+        mono_align = self.lp_mono_align.apply(mono)
+        mono_a = signal.hilbert(mono_align.astype(np.float32))
+        lr_a = signal.hilbert(lr_base_low.astype(np.float32))
+        cross = np.mean(lr_a * np.conj(mono_a))
+        p_mono = float(np.mean(np.abs(mono_a) ** 2))
+        p_lr = float(np.mean(np.abs(lr_a) ** 2))
+        coh = abs(cross) / (np.sqrt(p_mono * p_lr) + 1e-12)
+        if self.phase_align_enabled:
+            if coh >= STEREO_MONO_LR_PHASE_ALIGN_COH_MIN:
+                align_raw = float(np.angle(cross))
+                align_lim = np.deg2rad(STEREO_MONO_LR_PHASE_ALIGN_LIMIT_DEG)
+                align_raw = float(np.clip(align_raw, -align_lim, align_lim))
+                align_alpha = STEREO_MONO_LR_PHASE_ALIGN_SMOOTHING
+                self.mono_lr_phase_align_ema = (
+                    align_alpha * align_raw
+                    + (1.0 - align_alpha) * self.mono_lr_phase_align_ema
+                )
+            lr_shaped_a = signal.hilbert(lr_shaped.astype(np.float32))
+            lr_shaped = np.real(
+                lr_shaped_a * np.exp(-1j * self.mono_lr_phase_align_ema)
+            ).astype(np.float64, copy=False)
+
+        # Cancel mono leakage into L-R using a bounded, smoothed LS estimate.
+        mono_var = float(np.mean(mono ** 2))
+        side_ratio = float(np.sqrt(np.mean(lr_shaped ** 2) + 1e-12) / np.sqrt(mono_var + 1e-12))
+        if mono_var > 1e-12:
+            leak_est = float(np.mean(lr_shaped * mono) / (mono_var + 1e-12))
+        else:
+            leak_est = 0.0
+        if side_ratio > STEREO_LR_LEAK_CANCEL_SIDE_RATIO_MAX:
+            leak_est = 0.0
+        leak_est = float(np.clip(
+            leak_est, -STEREO_LR_LEAK_CANCEL_MAX, STEREO_LR_LEAK_CANCEL_MAX,
+        ))
+        leak_alpha = STEREO_LR_LEAK_CANCEL_SMOOTHING
+        self.lr_leak_cancel_coef = (
+            leak_alpha * leak_est + (1.0 - leak_alpha) * self.lr_leak_cancel_coef
+        )
+        lr_corrected = lr_shaped - self.lr_leak_cancel_coef * mono
+
+        lr_baseband = lr_corrected * self.blend_factor
         left_channel = mono + lr_baseband
         right_channel = mono - lr_baseband
+
+        if self.diag_enable:
+            self._diag_counter += 1
+            if self._diag_counter % max(1, STEREO_DIAG_LOG_INTERVAL_BLOCKS) == 0:
+                phase_step = np.diff(np.unwrap(pilot_phase.astype(np.float64)))
+                phase_jitter = float(np.std(phase_step - np.mean(phase_step))) if phase_step.size else 0.0
+                self.logger.info(
+                    "StereoDiag snr=%.2fdB blend=%.3f pilotP=%.6g noiseP=%.6g "
+                    "phJit=%.6g lrBandRMS=%.6g lrBaseRMS=%.6g phaseIQ=%.3fdeg "
+                    "monoLRAlign=%.3fdeg coh=%.3f align=%s",
+                    snr_db, self.blend_factor, pilot_power, noise_power,
+                    phase_jitter,
+                    float(np.sqrt(np.mean(lr_band ** 2) + 1e-12)),
+                    float(np.sqrt(np.mean(lr_baseband ** 2) + 1e-12)),
+                    float(np.rad2deg(self.stereo_phase_err_ema)),
+                    float(np.rad2deg(self.mono_lr_phase_align_ema)),
+                    float(coh),
+                    "on" if self.phase_align_enabled else "off",
+                )
 
         # Remove 19 kHz pilot tone leakage
         left_channel = self.notch_pilot_l.apply(left_channel)
@@ -337,7 +442,11 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         self.blend_factor = 1.0
         self.pilot_snr_ema = None
         self.pilot_jitter_ema = 0.0
+        self.stereo_phase_err_ema = 0.0
+        self.mono_lr_phase_align_ema = 0.0
         self.lr_high_gate_gain = 1.0
+        self.lr_leak_cancel_coef = 0.0
+        self._diag_counter = 0
         self._reset_subclass()
 
     @abstractmethod

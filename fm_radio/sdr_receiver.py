@@ -29,12 +29,14 @@ from __future__ import annotations
 
 import queue
 import logging
+import wave
+import threading
 
 import numpy as np
 from rtlsdr import RtlSdr
 
 from fm_radio.interfaces import SDRReceiverInterface
-from fm_radio.exceptions import SDRDeviceError
+from fm_radio.exceptions import SDRDeviceError, RecordingError
 from fm_radio.constants import SDR_SAMPLE_RATE, SDR_CENTER_FREQ_DEFAULT, SDR_BLOCK_SIZE, SDR_QUEUE_MAXSIZE
 
 
@@ -55,6 +57,9 @@ class SDRReceiver(SDRReceiverInterface):
         self.center_freq: float = center_freq
         self.block_size: int = block_size
         self.data_queue: queue.Queue[np.ndarray] = queue.Queue(maxsize=SDR_QUEUE_MAXSIZE)
+        self.iq_recording: bool = False
+        self.iq_record_wave: wave.Wave_write | None = None
+        self.iq_record_lock: threading.Lock = threading.Lock()
 
         try:
             self.sdr: RtlSdr = RtlSdr()
@@ -129,12 +134,52 @@ class SDRReceiver(SDRReceiverInterface):
             # Convert to numpy array allowing a copy if necessary (NumPy 2.x compatibility).
             iq = np.asarray(iq_samples, dtype=np.complex64)
             self.data_queue.put(iq, block=False)
+
+            with self.iq_record_lock:
+                if self.iq_recording and self.iq_record_wave is not None:
+                    clipped_i = np.clip(iq.real, -1.0, 1.0)
+                    clipped_q = np.clip(iq.imag, -1.0, 1.0)
+                    iq_interleaved = np.empty(iq.size * 2, dtype=np.int16)
+                    iq_interleaved[0::2] = np.int16(clipped_i * 32767.0)
+                    iq_interleaved[1::2] = np.int16(clipped_q * 32767.0)
+                    self.iq_record_wave.writeframes(iq_interleaved.tobytes())
         except queue.Full:
             # Discard sample if queue is full.
             self.logger.debug("SDR data queue full, dropping samples")
         except Exception as e:
             # Drop this buffer if conversion fails to avoid crashing the SDR ctypes callback.
             self.logger.error(f"Error in SDR callback: {e}", exc_info=True)
+
+    def start_iq_recording(self, filename: str) -> None:
+        """Start recording raw IQ samples to a 2-channel WAV file."""
+        with self.iq_record_lock:
+            if self.iq_recording:
+                self.logger.warning("IQ recording already active")
+                return
+            try:
+                wf = wave.open(filename, 'wb')
+                wf.setnchannels(2)           # I/Q
+                wf.setsampwidth(2)           # int16
+                wf.setframerate(int(self.sample_rate))
+                self.iq_record_wave = wf
+                self.iq_recording = True
+                self.logger.info(f"IQ recording started: {filename}")
+            except (OSError, wave.Error) as e:
+                self.logger.error(f"IQ recording start failed: {e}", exc_info=True)
+                raise RecordingError(f"IQ recording start failed: {e}") from e
+
+    def stop_iq_recording(self) -> None:
+        """Stop IQ recording and close the file."""
+        with self.iq_record_lock:
+            if self.iq_recording and self.iq_record_wave is not None:
+                try:
+                    self.iq_record_wave.close()
+                    self.logger.info("IQ recording stopped")
+                except (OSError, wave.Error) as e:
+                    self.logger.error(f"Error closing IQ recording file: {e}", exc_info=True)
+                finally:
+                    self.iq_record_wave = None
+                    self.iq_recording = False
 
     def start(self) -> None:
         """Start asynchronous sample retrieval."""
@@ -147,6 +192,7 @@ class SDRReceiver(SDRReceiverInterface):
 
     def stop(self) -> None:
         """Stop asynchronous sample retrieval and close SDR."""
+        self.stop_iq_recording()
         try:
             self.logger.info("Stopping SDR async read")
             self.sdr.cancel_read_async()

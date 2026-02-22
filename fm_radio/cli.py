@@ -66,6 +66,8 @@ class CommandLineInterface(threading.Thread):
             'mono':         self._cmd_stereo_off,
             'record start': self._cmd_record_start,
             'record stop':  self._cmd_record_stop,
+            'iqrec start':  self._cmd_iq_record_start,
+            'iqrec stop':   self._cmd_iq_record_stop,
         }
 
     # ------------------------------------------------------------------
@@ -120,6 +122,8 @@ class CommandLineInterface(threading.Thread):
         print("  'stereo on/off' or 'mono' -> toggle stereo demodulation")
         print("  'record start' -> start recording with auto-generated filename")
         print("  'record stop' -> stop recording")
+        print("  'iqrec start' -> start raw IQ recording (I/Q 2ch WAV)")
+        print("  'iqrec stop' -> stop raw IQ recording")
         print("  'agc on' -> enable auto gain control")
         print("  'agc off' -> disable auto gain (manual mode)")
         print("  'gain <value>' -> set manual gain in dB (when auto gain is off)")
@@ -174,6 +178,27 @@ class CommandLineInterface(threading.Thread):
             print("Recording stopped.")
         else:
             print("Not currently recording.")
+        return True
+
+    def _cmd_iq_record_start(self, cmd: str) -> bool:
+        """Handle 'iqrec start' - begin IQ recording with auto-generated filename."""
+        current_time = time.strftime("%Y%m%d_%H%M%S")
+        freq = self.controller.get_frequency() / 1e6
+        filename = f"{current_time}_{freq:.1f}MHz_IQ.wav"
+        try:
+            self.controller.start_iq_recording(filename)
+            print(f"IQ recording started: {filename}")
+        except RecordingError as e:
+            print(f"IQ recording start failed: {e}")
+        return True
+
+    def _cmd_iq_record_stop(self, cmd: str) -> bool:
+        """Handle 'iqrec stop' - stop IQ recording."""
+        if self.controller.is_iq_recording():
+            self.controller.stop_iq_recording()
+            print("IQ recording stopped.")
+        else:
+            print("IQ recording is not active.")
         return True
 
     def _cmd_agc(self, cmd: str) -> bool:

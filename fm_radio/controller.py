@@ -131,6 +131,8 @@ class FMReceiverController:
         self.auto_gain.reset_counters()
         if self.audio_output.recording:
             self.audio_output.stop_recording()
+        if self.sdr_receiver.iq_recording:
+            self.sdr_receiver.stop_iq_recording()
 
     def get_frequency(self) -> float:
         """Return the current center frequency in Hz."""
@@ -165,6 +167,18 @@ class FMReceiverController:
     def is_recording(self) -> bool:
         """Return True if currently recording."""
         return self.audio_output.recording
+
+    def start_iq_recording(self, filename: str) -> None:
+        """Start recording raw IQ samples to a 2-channel WAV file."""
+        self.sdr_receiver.start_iq_recording(filename)
+
+    def stop_iq_recording(self) -> None:
+        """Stop the current IQ recording session."""
+        self.sdr_receiver.stop_iq_recording()
+
+    def is_iq_recording(self) -> bool:
+        """Return True if raw IQ recording is active."""
+        return self.sdr_receiver.iq_recording
 
     def set_agc_mode(self, enabled: bool) -> None:
         """Enable or disable automatic gain control.
@@ -273,7 +287,7 @@ class FMReceiverController:
                 print(f"SDR sample_rate: {self.sdr_receiver.sample_rate:.0f} Hz, Composite: {self.fm_demodulator.composite_rate:.0f} Hz, Audio: {self.audio_output.output_rate} Hz")
                 print(f"Default station: {self.sdr_receiver.get_center_frequency()/1e6:.1f} MHz")
                 print("Stereo demodulation enabled.")
-                print("Commands: q, list, <freq>, stereo on/off, record start/stop, agc on/off, gain <value>, etc.")
+                print("Commands: q, list, <freq>, stereo on/off, record start/stop, iqrec start/stop, agc on/off, gain <value>, etc.")
             print("Auto gain control: ON")
 
             # Start CLI thread after startup messages to avoid interleaving
