@@ -213,7 +213,6 @@ def _run_demod_from_iq(
     disable_phase_align: bool = False,
     disable_iq_phase_correction: bool = False,
     disable_high_gate: bool = False,
-    disable_leak_cancel: bool = False,
     pilot_mode: str | None = None,
     mono_delay_samples: int | None = None,
     subcarrier_phase_offset_deg: float | None = None,
@@ -229,8 +228,6 @@ def _run_demod_from_iq(
         demod.iq_phase_correction_enabled = False
     if disable_high_gate:
         demod.high_gate_enabled = False
-    if disable_leak_cancel:
-        demod.leak_cancel_enabled = False
     if pilot_mode:
         demod.pilot_phase_mode = str(pilot_mode).strip().lower()
     if mono_delay_samples is not None and int(mono_delay_samples) >= 0:
@@ -273,7 +270,6 @@ def _run_demod_from_composite(
     disable_phase_align: bool = False,
     disable_iq_phase_correction: bool = False,
     disable_high_gate: bool = False,
-    disable_leak_cancel: bool = False,
     pilot_mode: str | None = None,
     mono_delay_samples: int | None = None,
     subcarrier_phase_offset_deg: float | None = None,
@@ -289,8 +285,6 @@ def _run_demod_from_composite(
         demod.iq_phase_correction_enabled = False
     if disable_high_gate:
         demod.high_gate_enabled = False
-    if disable_leak_cancel:
-        demod.leak_cancel_enabled = False
     if pilot_mode:
         demod.pilot_phase_mode = str(pilot_mode).strip().lower()
     if mono_delay_samples is not None and int(mono_delay_samples) >= 0:
@@ -437,7 +431,6 @@ def evaluate_quality(
     disable_phase_align: bool = False,
     disable_iq_phase_correction: bool = False,
     disable_high_gate: bool = False,
-    disable_leak_cancel: bool = False,
     pilot_mode: str | None = None,
     mono_delay_samples: int | None = None,
     subcarrier_phase_offset_deg: float | None = None,
@@ -465,7 +458,7 @@ def evaluate_quality(
         left_out, right_out, blend_hist = _run_demod_from_composite(
             mpx, fixed_blend=fixed_blend, disable_phase_align=disable_phase_align,
             disable_iq_phase_correction=disable_iq_phase_correction,
-            disable_high_gate=disable_high_gate, disable_leak_cancel=disable_leak_cancel,
+            disable_high_gate=disable_high_gate,
             pilot_mode=pilot_mode, mono_delay_samples=mono_delay_samples,
             subcarrier_phase_offset_deg=subcarrier_phase_offset_deg,
             demod_diag=demod_diag, demod_diag_interval=demod_diag_interval,
@@ -475,7 +468,7 @@ def evaluate_quality(
         left_out, right_out, blend_hist = _run_demod_from_iq(
             iq, fixed_blend=fixed_blend, disable_phase_align=disable_phase_align,
             disable_iq_phase_correction=disable_iq_phase_correction,
-            disable_high_gate=disable_high_gate, disable_leak_cancel=disable_leak_cancel,
+            disable_high_gate=disable_high_gate,
             pilot_mode=pilot_mode, mono_delay_samples=mono_delay_samples,
             subcarrier_phase_offset_deg=subcarrier_phase_offset_deg,
             demod_diag=demod_diag, demod_diag_interval=demod_diag_interval,
@@ -511,7 +504,7 @@ def evaluate_quality(
         l_main, r_leak, _ = _run_demod_from_composite(
             mpx_l, fixed_blend=fixed_blend, disable_phase_align=disable_phase_align,
             disable_iq_phase_correction=disable_iq_phase_correction,
-            disable_high_gate=disable_high_gate, disable_leak_cancel=disable_leak_cancel,
+            disable_high_gate=disable_high_gate,
             pilot_mode=pilot_mode, mono_delay_samples=mono_delay_samples,
             subcarrier_phase_offset_deg=subcarrier_phase_offset_deg,
             demod_diag=demod_diag, demod_diag_interval=demod_diag_interval,
@@ -521,7 +514,7 @@ def evaluate_quality(
         l_main, r_leak, _ = _run_demod_from_iq(
             iq_l, fixed_blend=fixed_blend, disable_phase_align=disable_phase_align,
             disable_iq_phase_correction=disable_iq_phase_correction,
-            disable_high_gate=disable_high_gate, disable_leak_cancel=disable_leak_cancel,
+            disable_high_gate=disable_high_gate,
             pilot_mode=pilot_mode, mono_delay_samples=mono_delay_samples,
             subcarrier_phase_offset_deg=subcarrier_phase_offset_deg,
             demod_diag=demod_diag, demod_diag_interval=demod_diag_interval,
@@ -538,7 +531,7 @@ def evaluate_quality(
         l_leak, r_main, _ = _run_demod_from_composite(
             mpx_r, fixed_blend=fixed_blend, disable_phase_align=disable_phase_align,
             disable_iq_phase_correction=disable_iq_phase_correction,
-            disable_high_gate=disable_high_gate, disable_leak_cancel=disable_leak_cancel,
+            disable_high_gate=disable_high_gate,
             pilot_mode=pilot_mode, mono_delay_samples=mono_delay_samples,
             subcarrier_phase_offset_deg=subcarrier_phase_offset_deg,
             demod_diag=demod_diag, demod_diag_interval=demod_diag_interval,
@@ -548,7 +541,7 @@ def evaluate_quality(
         l_leak, r_main, _ = _run_demod_from_iq(
             iq_r, fixed_blend=fixed_blend, disable_phase_align=disable_phase_align,
             disable_iq_phase_correction=disable_iq_phase_correction,
-            disable_high_gate=disable_high_gate, disable_leak_cancel=disable_leak_cancel,
+            disable_high_gate=disable_high_gate,
             pilot_mode=pilot_mode, mono_delay_samples=mono_delay_samples,
             subcarrier_phase_offset_deg=subcarrier_phase_offset_deg,
             demod_diag=demod_diag, demod_diag_interval=demod_diag_interval,
@@ -617,10 +610,6 @@ def _parser() -> argparse.ArgumentParser:
         help="Disable high-band LR gate in stereo shaping",
     )
     p.add_argument(
-        "--disable-leak-cancel", action="store_true",
-        help="Disable mono leakage cancellation from LR",
-    )
-    p.add_argument(
         "--pilot-mode", choices=("classic", "residual", "hilbert"), default="",
         help="Pilot phase tracking mode override",
     )
@@ -673,7 +662,6 @@ def main() -> None:
         disable_phase_align=bool(args.disable_phase_align),
         disable_iq_phase_correction=bool(args.disable_iq_phase_correction),
         disable_high_gate=bool(args.disable_high_gate),
-        disable_leak_cancel=bool(args.disable_leak_cancel),
         pilot_mode=(str(args.pilot_mode).strip().lower() if str(args.pilot_mode).strip() else None),
         mono_delay_samples=(None if int(args.mono_delay_samples) < 0 else int(args.mono_delay_samples)),
         subcarrier_phase_offset_deg=(
@@ -701,7 +689,6 @@ def main() -> None:
             disable_phase_align=bool(args.disable_phase_align),
             disable_iq_phase_correction=bool(args.disable_iq_phase_correction),
             disable_high_gate=bool(args.disable_high_gate),
-            disable_leak_cancel=bool(args.disable_leak_cancel),
             pilot_mode=(str(args.pilot_mode).strip().lower() if str(args.pilot_mode).strip() else None),
             mono_delay_samples=(None if int(args.mono_delay_samples) < 0 else int(args.mono_delay_samples)),
             subcarrier_phase_offset_deg=(

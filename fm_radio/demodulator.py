@@ -71,15 +71,13 @@ from fm_radio.constants import (
     PILOT_NOISE_BAND2_LOW, PILOT_NOISE_BAND2_HIGH,
     LR_BANDPASS_ORDER, LR_BANDPASS_ORDER_LIGHT,
     LR_BANDPASS_LOW, LR_BANDPASS_HIGH,
-    STEREO_LR_DEMOD_GAIN, STEREO_LR_LEAK_CANCEL_MAX, STEREO_LR_LEAK_CANCEL_SMOOTHING,
-    STEREO_LR_LEAK_CANCEL_SIDE_RATIO_MAX,
+    STEREO_LR_DEMOD_GAIN,
     STEREO_MONO_LR_PHASE_ALIGN_COH_MIN,
     STEREO_MONO_LR_PHASE_ALIGN_SIDE_RATIO_MIN,
     STEREO_MONO_LR_PHASE_ALIGN_SIDE_RATIO_MAX,
     STEREO_MONO_LR_PHASE_ALIGN_LIMIT_DEG,
     STEREO_MONO_LR_PHASE_ALIGN_SMOOTHING, STEREO_MONO_LR_PHASE_ALIGN_DECAY,
     STEREO_PHASE_ALIGN_ENABLE, STEREO_DIAG_ENABLE, STEREO_DIAG_LOG_INTERVAL_BLOCKS,
-    STEREO_LR_LEAK_CANCEL_LOW_CUTOFF,
     DEEMPHASIS_TAU, DC_OFFSET_ALPHA,
     AUDIO_OUTPUT_RATE, COMPOSITE_RATE, LIGHT_COMPOSITE_SCALE,
     STANDARD_RESAMPLE_KAISER_BETA,
@@ -155,14 +153,6 @@ class BaseFMDemodulator(FMDemodulatorInterface):
             order=mono_order, cutoff=LR_HIGH_SPLIT_CUTOFF,
             sample_rate=self.composite_rate,
         )
-        self.lp_mono_leak = LowpassFilter(
-            order=mono_order, cutoff=STEREO_LR_LEAK_CANCEL_LOW_CUTOFF,
-            sample_rate=self.composite_rate,
-        )
-        self.lp_lr_leak = LowpassFilter(
-            order=mono_order, cutoff=STEREO_LR_LEAK_CANCEL_LOW_CUTOFF,
-            sample_rate=self.composite_rate,
-        )
         self.bp_pilot = BandpassFilter(
             order=pilot_order, lowcut=PILOT_BANDPASS_LOW,
             highcut=PILOT_BANDPASS_HIGH, sample_rate=self.composite_rate,
@@ -219,7 +209,6 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         self.stereo_phase_err_ema: float = 0.0
         self.mono_lr_phase_align_ema: float = 0.0
         self.lr_high_gate_gain: float = 1.0
-        self.lr_leak_cancel_coef: float = 0.0
         self.pilot_phase_mode: str = str(STEREO_PILOT_PHASE_MODE).strip().lower()
         if self.pilot_phase_mode not in ("classic", "residual", "hilbert"):
             self.pilot_phase_mode = "classic"
@@ -234,7 +223,6 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         self.iq_phase_correction_enabled: bool = STEREO_IQ_PHASE_CORRECTION_ENABLE
         self.legacy_lr_demod_enabled: bool = STEREO_LEGACY_LR_DEMOD_ENABLE
         self.high_gate_enabled: bool = True
-        self.leak_cancel_enabled: bool = True
         self.diag_enable: bool = STEREO_DIAG_ENABLE
         self.diag_log_interval_blocks: int = STEREO_DIAG_LOG_INTERVAL_BLOCKS
         self._diag_counter: int = 0
@@ -517,35 +505,7 @@ class BaseFMDemodulator(FMDemodulatorInterface):
                 lr_shaped_a * np.exp(-1j * self.mono_lr_phase_align_ema)
             ).astype(np.float64, copy=False)
 
-        # Cancel mono leakage into L-R in low band only (preserve high-band ambience).
-        mono_leak = self.lp_mono_leak.apply(mono)
-        lr_low_for_leak = self.lp_lr_leak.apply(lr_shaped)
-        lr_rest = lr_shaped - lr_low_for_leak
-        if self.leak_cancel_enabled:
-            mono_var = float(np.mean(mono_leak ** 2))
-            side_ratio = float(
-                np.sqrt(np.mean(lr_low_for_leak ** 2) + 1e-12) / np.sqrt(mono_var + 1e-12)
-            )
-            if mono_var > 1e-12:
-                leak_est = float(np.mean(lr_low_for_leak * mono_leak) / (mono_var + 1e-12))
-            else:
-                leak_est = 0.0
-            if side_ratio > STEREO_LR_LEAK_CANCEL_SIDE_RATIO_MAX:
-                leak_est = 0.0
-            leak_est = float(np.clip(
-                leak_est, -STEREO_LR_LEAK_CANCEL_MAX, STEREO_LR_LEAK_CANCEL_MAX,
-            ))
-            leak_alpha = STEREO_LR_LEAK_CANCEL_SMOOTHING
-            self.lr_leak_cancel_coef = (
-                leak_alpha * leak_est + (1.0 - leak_alpha) * self.lr_leak_cancel_coef
-            )
-            lr_low_corrected = lr_low_for_leak - self.lr_leak_cancel_coef * mono_leak
-            lr_corrected = lr_low_corrected + lr_rest
-        else:
-            self.lr_leak_cancel_coef = 0.0
-            lr_corrected = lr_low_for_leak + lr_rest
-
-        lr_baseband = lr_corrected * self.blend_factor
+        lr_baseband = lr_shaped * self.blend_factor
         side_ratio_now = float(
             np.sqrt(np.mean(lr_baseband ** 2) + 1e-12) / np.sqrt(np.mean(mono ** 2) + 1e-12)
         )
@@ -577,7 +537,7 @@ class BaseFMDemodulator(FMDemodulatorInterface):
                     "StereoDiag snr=%.2fdB blend=%.3f pilotP=%.6g noiseP=%.6g "
                     "phJit=%.6g lrBandRMS=%.6g lrBaseRMS=%.6g phaseIQ=%.3fdeg "
                     "monoLRAlign=%.3fdeg coh=%.3f side=%.3f align=%s iqCorr=%s legacyLR=%s highGate=%s "
-                    "gateAssist=%.3f gateFloor=%.3f leakCancel=%s pilotMode=%s "
+                    "gateAssist=%.3f gateFloor=%.3f pilotMode=%s "
                     "monoDelay=%d scOff=%.1fdeg sideCap=%.3f",
                     snr_db, self.blend_factor, pilot_power, noise_power,
                     phase_jitter,
@@ -593,7 +553,6 @@ class BaseFMDemodulator(FMDemodulatorInterface):
                     "on" if self.high_gate_enabled else "off",
                     gate_assist,
                     gate_floor,
-                    "on" if self.leak_cancel_enabled else "off",
                     self.pilot_phase_mode,
                     self.mono_delay_samples,
                     float(np.rad2deg(self.subcarrier_phase_offset_rad)),
@@ -652,7 +611,6 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         self.stereo_phase_err_ema = 0.0
         self.mono_lr_phase_align_ema = 0.0
         self.lr_high_gate_gain = 1.0
-        self.lr_leak_cancel_coef = 0.0
         self.lr_side_cap_gain = 1.0
         if self.mono_delay_samples > 0:
             self._mono_delay_state = np.zeros(self.mono_delay_samples, dtype=np.float32)

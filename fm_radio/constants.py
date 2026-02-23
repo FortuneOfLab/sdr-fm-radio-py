@@ -93,9 +93,6 @@ LR_BANDPASS_ORDER_LIGHT = 1         # L-R bandpass filter order (light)
 LR_BANDPASS_LOW = 23000.0           # L-R bandpass lower edge (Hz)
 LR_BANDPASS_HIGH = 53000.0          # L-R bandpass upper edge (Hz)
 STEREO_LR_DEMOD_GAIN = 2.0          # Gain compensation for DSB-SC synchronous demod
-STEREO_LR_LEAK_CANCEL_MAX = 0.0     # Max mono->LR leakage cancellation coefficient
-STEREO_LR_LEAK_CANCEL_SMOOTHING = 0.10  # EMA smoothing for leakage cancellation
-STEREO_LR_LEAK_CANCEL_SIDE_RATIO_MAX = 0.25  # Enable leakage cancel only below this |L-R|/|L+R|
 STEREO_MONO_LR_PHASE_ALIGN_COH_MIN = 0.25   # Minimum mono/LR coherence to update phase align
 STEREO_MONO_LR_PHASE_ALIGN_SIDE_RATIO_MIN = 0.01  # Minimum |L-R|/|L+R| ratio to trust align update
 STEREO_MONO_LR_PHASE_ALIGN_SIDE_RATIO_MAX = 0.40  # Maximum |L-R|/|L+R| ratio to trust align update
@@ -105,8 +102,6 @@ STEREO_MONO_LR_PHASE_ALIGN_DECAY = 0.05      # Decay-to-zero rate when align upd
 STEREO_PHASE_ALIGN_ENABLE = True            # Enable mono/LR phase alignment correction
 STEREO_DIAG_ENABLE = False                  # Enable stereo demod diagnostics logging
 STEREO_DIAG_LOG_INTERVAL_BLOCKS = 120       # Log interval (composite blocks) for diagnostics
-
-STEREO_LR_LEAK_CANCEL_LOW_CUTOFF = 5000.0   # Low-band cutoff used for mono leakage cancellation
 
 DEEMPHASIS_TAU = 50e-6              # De-emphasis time constant (seconds)
 DC_OFFSET_ALPHA = 0.01              # DC offset smoothing coefficient
