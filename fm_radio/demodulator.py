@@ -59,7 +59,7 @@ from fm_radio.constants import (
     STEREO_HIGH_GATE_SNR_ASSIST_MAX, STEREO_HIGH_GATE_SNR_FLOOR_BOOST_MAX,
     PILOT_BANDPASS_ORDER, PILOT_BANDPASS_ORDER_LIGHT,
     PILOT_BANDPASS_LOW, PILOT_BANDPASS_HIGH,
-    STEREO_PILOT_PHASE_MODE, STEREO_PILOT_RESIDUAL_CENTER_HZ,
+    STEREO_PILOT_RESIDUAL_CENTER_HZ,
     STEREO_SUBCARRIER_PHASE_OFFSET_DEG,
     STEREO_MONO_DELAY_SAMPLES,
     STEREO_LR_SIDE_RATIO_CAP_ENABLE, STEREO_LR_SIDE_RATIO_CAP_TARGET,
@@ -86,7 +86,6 @@ from fm_radio.constants import (
     STEREO_BLEND_PILOT_JITTER_EMA_ALPHA,
     STEREO_BLEND_PILOT_JITTER_REF_DB,
     STEREO_BLEND_STABILITY_MIN_FACTOR,
-    STEREO_BLEND_STABILITY_MIN_FACTOR_RESIDUAL,
     STEREO_BLEND_SMOOTHING,
     PILOT_NOTCH_FREQ, PILOT_NOTCH_Q,
 )
@@ -209,9 +208,6 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         self.stereo_phase_err_ema: float = 0.0
         self.mono_lr_phase_align_ema: float = 0.0
         self.lr_high_gate_gain: float = 1.0
-        self.pilot_phase_mode: str = str(STEREO_PILOT_PHASE_MODE).strip().lower()
-        if self.pilot_phase_mode not in ("classic", "residual", "hilbert"):
-            self.pilot_phase_mode = "classic"
         self.pilot_residual_center_hz: float = float(STEREO_PILOT_RESIDUAL_CENTER_HZ)
         self.subcarrier_phase_offset_rad: float = np.deg2rad(STEREO_SUBCARRIER_PHASE_OFFSET_DEG)
         self.mono_delay_samples: int = max(0, int(STEREO_MONO_DELAY_SAMPLES))
@@ -257,47 +253,27 @@ class BaseFMDemodulator(FMDemodulatorInterface):
             return self._demodulate_mono(composite)
 
     def _estimate_pilot_phase(self, pilot_complex: np.ndarray) -> np.ndarray:
-        """Estimate pilot phase from analytic pilot signal."""
-        mode = self.pilot_phase_mode
-        if mode == "classic":
-            pilot_phase = self.pilot_pll.process(pilot_complex).astype(np.float64, copy=False)
-            if pilot_phase.size:
-                self._pilot_phase_last = float(pilot_phase[-1])
-            return pilot_phase
-
-        if mode == "residual":
-            n = np.arange(pilot_complex.size, dtype=np.float64)
-            w0 = 2.0 * np.pi * self.pilot_residual_center_hz / self.composite_rate
-            mix_phase = self._pilot_mix_phase + w0 * n
-            mix_phase_wrapped = np.mod(mix_phase, 2.0 * np.pi)
-            residual_in = pilot_complex * np.exp(-1j * mix_phase_wrapped)
-            residual_phase = self.pilot_pll.process(
-                np.asarray(residual_in, dtype=np.complex64)
-            ).astype(np.float64, copy=False)
-            pilot_phase = residual_phase + mix_phase
-            self._pilot_mix_phase = float(
-                np.mod(self._pilot_mix_phase + w0 * pilot_complex.size, 2.0 * np.pi)
-            )
-            if pilot_phase.size:
-                if self._pilot_phase_last is None:
-                    pilot_phase = np.unwrap(pilot_phase)
-                else:
-                    pilot_phase = np.unwrap(
-                        np.concatenate(([self._pilot_phase_last], pilot_phase))
-                    )[1:]
-                self._pilot_phase_last = float(pilot_phase[-1])
-            return pilot_phase
-
-        raw_phase = np.angle(
-            np.asarray(pilot_complex, dtype=np.complex64)
+        """Estimate pilot phase from analytic pilot signal (residual mode)."""
+        n = np.arange(pilot_complex.size, dtype=np.float64)
+        w0 = 2.0 * np.pi * self.pilot_residual_center_hz / self.composite_rate
+        mix_phase = self._pilot_mix_phase + w0 * n
+        mix_phase_wrapped = np.mod(mix_phase, 2.0 * np.pi)
+        residual_in = pilot_complex * np.exp(-1j * mix_phase_wrapped)
+        residual_phase = self.pilot_pll.process(
+            np.asarray(residual_in, dtype=np.complex64)
         ).astype(np.float64, copy=False)
-        if raw_phase.size == 0:
-            return raw_phase
-        if self._pilot_phase_last is None:
-            pilot_phase = np.unwrap(raw_phase)
-        else:
-            pilot_phase = np.unwrap(np.concatenate(([self._pilot_phase_last], raw_phase)))[1:]
-        self._pilot_phase_last = float(pilot_phase[-1])
+        pilot_phase = residual_phase + mix_phase
+        self._pilot_mix_phase = float(
+            np.mod(self._pilot_mix_phase + w0 * pilot_complex.size, 2.0 * np.pi)
+        )
+        if pilot_phase.size:
+            if self._pilot_phase_last is None:
+                pilot_phase = np.unwrap(pilot_phase)
+            else:
+                pilot_phase = np.unwrap(
+                    np.concatenate(([self._pilot_phase_last], pilot_phase))
+                )[1:]
+            self._pilot_phase_last = float(pilot_phase[-1])
         return pilot_phase
 
     def _apply_mono_delay(self, mono: np.ndarray) -> np.ndarray:
@@ -368,10 +344,6 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         jitter_ref = max(STEREO_BLEND_PILOT_JITTER_REF_DB, 1e-6)
         stability = np.clip(1.0 - (self.pilot_jitter_ema / jitter_ref), 0.0, 1.0)
         stability_min_factor = STEREO_BLEND_STABILITY_MIN_FACTOR
-        if self.pilot_phase_mode == "residual":
-            stability_min_factor = max(
-                stability_min_factor, STEREO_BLEND_STABILITY_MIN_FACTOR_RESIDUAL,
-            )
         stability_factor = (
             stability_min_factor
             + (1.0 - stability_min_factor) * stability
@@ -537,7 +509,7 @@ class BaseFMDemodulator(FMDemodulatorInterface):
                     "StereoDiag snr=%.2fdB blend=%.3f pilotP=%.6g noiseP=%.6g "
                     "phJit=%.6g lrBandRMS=%.6g lrBaseRMS=%.6g phaseIQ=%.3fdeg "
                     "monoLRAlign=%.3fdeg coh=%.3f side=%.3f align=%s iqCorr=%s legacyLR=%s highGate=%s "
-                    "gateAssist=%.3f gateFloor=%.3f pilotMode=%s "
+                    "gateAssist=%.3f gateFloor=%.3f "
                     "monoDelay=%d scOff=%.1fdeg sideCap=%.3f",
                     snr_db, self.blend_factor, pilot_power, noise_power,
                     phase_jitter,
@@ -553,7 +525,6 @@ class BaseFMDemodulator(FMDemodulatorInterface):
                     "on" if self.high_gate_enabled else "off",
                     gate_assist,
                     gate_floor,
-                    self.pilot_phase_mode,
                     self.mono_delay_samples,
                     float(np.rad2deg(self.subcarrier_phase_offset_rad)),
                     self.lr_side_cap_gain,

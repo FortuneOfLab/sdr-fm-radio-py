@@ -74,7 +74,6 @@ PILOT_NOISE_BAND1_LOW = 16000.0     # Pilot SNR noise band 1 lower edge (Hz)
 PILOT_NOISE_BAND1_HIGH = 17500.0    # Pilot SNR noise band 1 upper edge (Hz)
 PILOT_NOISE_BAND2_LOW = 20500.0     # Pilot SNR noise band 2 lower edge (Hz)
 PILOT_NOISE_BAND2_HIGH = 22000.0    # Pilot SNR noise band 2 upper edge (Hz)
-STEREO_PILOT_PHASE_MODE = "residual"  # classic | residual | hilbert
 STEREO_PILOT_RESIDUAL_CENTER_HZ = 19000.0  # Center frequency used by residual pilot tracking
 STEREO_SUBCARRIER_PHASE_OFFSET_DEG = 300.0  # Fixed phase offset for 38k subcarrier generation
 STEREO_MONO_DELAY_SAMPLES = 18      # Delay mono path to match LR path group delay (at COMPOSITE_RATE)
@@ -135,8 +134,7 @@ STEREO_BLEND_PILOT_SNR_DB_LO = 7.0         # Pilot SNR below this -> full mono
 STEREO_BLEND_PILOT_SNR_EMA_ALPHA = 0.10    # EMA alpha for pilot SNR tracking
 STEREO_BLEND_PILOT_JITTER_EMA_ALPHA = 0.12  # EMA alpha for pilot SNR jitter tracking
 STEREO_BLEND_PILOT_JITTER_REF_DB = 2.5     # Jitter reference in dB (higher -> less sensitive)
-STEREO_BLEND_STABILITY_MIN_FACTOR = 0.60   # Minimum stereo factor when pilot is unstable
-STEREO_BLEND_STABILITY_MIN_FACTOR_RESIDUAL = 0.85  # Higher minimum factor for residual mode
+STEREO_BLEND_STABILITY_MIN_FACTOR = 0.85   # Minimum stereo factor when pilot is unstable
 STEREO_BLEND_SMOOTHING = 0.08              # EMA smoothing for blend factor (0-1)
 
 # --------------------------------------------------

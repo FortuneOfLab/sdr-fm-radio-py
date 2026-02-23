@@ -213,7 +213,6 @@ def _run_demod_from_iq(
     disable_phase_align: bool = False,
     disable_iq_phase_correction: bool = False,
     disable_high_gate: bool = False,
-    pilot_mode: str | None = None,
     mono_delay_samples: int | None = None,
     subcarrier_phase_offset_deg: float | None = None,
     demod_diag: bool = False,
@@ -228,8 +227,6 @@ def _run_demod_from_iq(
         demod.iq_phase_correction_enabled = False
     if disable_high_gate:
         demod.high_gate_enabled = False
-    if pilot_mode:
-        demod.pilot_phase_mode = str(pilot_mode).strip().lower()
     if mono_delay_samples is not None and int(mono_delay_samples) >= 0:
         demod.mono_delay_samples = int(mono_delay_samples)
         demod._mono_delay_state = np.zeros(demod.mono_delay_samples, dtype=np.float32)
@@ -270,7 +267,6 @@ def _run_demod_from_composite(
     disable_phase_align: bool = False,
     disable_iq_phase_correction: bool = False,
     disable_high_gate: bool = False,
-    pilot_mode: str | None = None,
     mono_delay_samples: int | None = None,
     subcarrier_phase_offset_deg: float | None = None,
     demod_diag: bool = False,
@@ -285,8 +281,6 @@ def _run_demod_from_composite(
         demod.iq_phase_correction_enabled = False
     if disable_high_gate:
         demod.high_gate_enabled = False
-    if pilot_mode:
-        demod.pilot_phase_mode = str(pilot_mode).strip().lower()
     if mono_delay_samples is not None and int(mono_delay_samples) >= 0:
         demod.mono_delay_samples = int(mono_delay_samples)
         demod._mono_delay_state = np.zeros(demod.mono_delay_samples, dtype=np.float32)
@@ -431,7 +425,6 @@ def evaluate_quality(
     disable_phase_align: bool = False,
     disable_iq_phase_correction: bool = False,
     disable_high_gate: bool = False,
-    pilot_mode: str | None = None,
     mono_delay_samples: int | None = None,
     subcarrier_phase_offset_deg: float | None = None,
     demod_diag: bool = False,
@@ -459,7 +452,7 @@ def evaluate_quality(
             mpx, fixed_blend=fixed_blend, disable_phase_align=disable_phase_align,
             disable_iq_phase_correction=disable_iq_phase_correction,
             disable_high_gate=disable_high_gate,
-            pilot_mode=pilot_mode, mono_delay_samples=mono_delay_samples,
+            mono_delay_samples=mono_delay_samples,
             subcarrier_phase_offset_deg=subcarrier_phase_offset_deg,
             demod_diag=demod_diag, demod_diag_interval=demod_diag_interval,
         )
@@ -469,7 +462,7 @@ def evaluate_quality(
             iq, fixed_blend=fixed_blend, disable_phase_align=disable_phase_align,
             disable_iq_phase_correction=disable_iq_phase_correction,
             disable_high_gate=disable_high_gate,
-            pilot_mode=pilot_mode, mono_delay_samples=mono_delay_samples,
+            mono_delay_samples=mono_delay_samples,
             subcarrier_phase_offset_deg=subcarrier_phase_offset_deg,
             demod_diag=demod_diag, demod_diag_interval=demod_diag_interval,
         )
@@ -505,7 +498,7 @@ def evaluate_quality(
             mpx_l, fixed_blend=fixed_blend, disable_phase_align=disable_phase_align,
             disable_iq_phase_correction=disable_iq_phase_correction,
             disable_high_gate=disable_high_gate,
-            pilot_mode=pilot_mode, mono_delay_samples=mono_delay_samples,
+            mono_delay_samples=mono_delay_samples,
             subcarrier_phase_offset_deg=subcarrier_phase_offset_deg,
             demod_diag=demod_diag, demod_diag_interval=demod_diag_interval,
         )
@@ -515,7 +508,7 @@ def evaluate_quality(
             iq_l, fixed_blend=fixed_blend, disable_phase_align=disable_phase_align,
             disable_iq_phase_correction=disable_iq_phase_correction,
             disable_high_gate=disable_high_gate,
-            pilot_mode=pilot_mode, mono_delay_samples=mono_delay_samples,
+            mono_delay_samples=mono_delay_samples,
             subcarrier_phase_offset_deg=subcarrier_phase_offset_deg,
             demod_diag=demod_diag, demod_diag_interval=demod_diag_interval,
         )
@@ -532,7 +525,7 @@ def evaluate_quality(
             mpx_r, fixed_blend=fixed_blend, disable_phase_align=disable_phase_align,
             disable_iq_phase_correction=disable_iq_phase_correction,
             disable_high_gate=disable_high_gate,
-            pilot_mode=pilot_mode, mono_delay_samples=mono_delay_samples,
+            mono_delay_samples=mono_delay_samples,
             subcarrier_phase_offset_deg=subcarrier_phase_offset_deg,
             demod_diag=demod_diag, demod_diag_interval=demod_diag_interval,
         )
@@ -542,7 +535,7 @@ def evaluate_quality(
             iq_r, fixed_blend=fixed_blend, disable_phase_align=disable_phase_align,
             disable_iq_phase_correction=disable_iq_phase_correction,
             disable_high_gate=disable_high_gate,
-            pilot_mode=pilot_mode, mono_delay_samples=mono_delay_samples,
+            mono_delay_samples=mono_delay_samples,
             subcarrier_phase_offset_deg=subcarrier_phase_offset_deg,
             demod_diag=demod_diag, demod_diag_interval=demod_diag_interval,
         )
@@ -610,10 +603,6 @@ def _parser() -> argparse.ArgumentParser:
         help="Disable high-band LR gate in stereo shaping",
     )
     p.add_argument(
-        "--pilot-mode", choices=("classic", "residual", "hilbert"), default="",
-        help="Pilot phase tracking mode override",
-    )
-    p.add_argument(
         "--mono-delay-samples", type=int, default=-1,
         help="Mono delay override in composite samples (-1=default)",
     )
@@ -662,7 +651,6 @@ def main() -> None:
         disable_phase_align=bool(args.disable_phase_align),
         disable_iq_phase_correction=bool(args.disable_iq_phase_correction),
         disable_high_gate=bool(args.disable_high_gate),
-        pilot_mode=(str(args.pilot_mode).strip().lower() if str(args.pilot_mode).strip() else None),
         mono_delay_samples=(None if int(args.mono_delay_samples) < 0 else int(args.mono_delay_samples)),
         subcarrier_phase_offset_deg=(
             None if np.isnan(float(args.subcarrier_phase_offset_deg))
@@ -689,7 +677,6 @@ def main() -> None:
             disable_phase_align=bool(args.disable_phase_align),
             disable_iq_phase_correction=bool(args.disable_iq_phase_correction),
             disable_high_gate=bool(args.disable_high_gate),
-            pilot_mode=(str(args.pilot_mode).strip().lower() if str(args.pilot_mode).strip() else None),
             mono_delay_samples=(None if int(args.mono_delay_samples) < 0 else int(args.mono_delay_samples)),
             subcarrier_phase_offset_deg=(
                 None if np.isnan(float(args.subcarrier_phase_offset_deg))
