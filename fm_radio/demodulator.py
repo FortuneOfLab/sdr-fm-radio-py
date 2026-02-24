@@ -66,18 +66,12 @@ from fm_radio.constants import (
     STEREO_LR_SIDE_RATIO_CAP_MIN_GAIN,
     STEREO_LR_SIDE_RATIO_CAP_ATTACK, STEREO_LR_SIDE_RATIO_CAP_RELEASE,
     STEREO_PHASE_ERR_SMOOTHING, STEREO_PHASE_ERR_LIMIT_DEG, STEREO_IQ_PHASE_CORRECTION_ENABLE,
-    STEREO_LEGACY_LR_DEMOD_ENABLE,
     PILOT_NOISE_BAND1_LOW, PILOT_NOISE_BAND1_HIGH,
     PILOT_NOISE_BAND2_LOW, PILOT_NOISE_BAND2_HIGH,
     LR_BANDPASS_ORDER, LR_BANDPASS_ORDER_LIGHT,
     LR_BANDPASS_LOW, LR_BANDPASS_HIGH,
     STEREO_LR_DEMOD_GAIN,
-    STEREO_MONO_LR_PHASE_ALIGN_COH_MIN,
-    STEREO_MONO_LR_PHASE_ALIGN_SIDE_RATIO_MIN,
-    STEREO_MONO_LR_PHASE_ALIGN_SIDE_RATIO_MAX,
-    STEREO_MONO_LR_PHASE_ALIGN_LIMIT_DEG,
-    STEREO_MONO_LR_PHASE_ALIGN_SMOOTHING, STEREO_MONO_LR_PHASE_ALIGN_DECAY,
-    STEREO_PHASE_ALIGN_ENABLE, STEREO_DIAG_ENABLE, STEREO_DIAG_LOG_INTERVAL_BLOCKS,
+    STEREO_DIAG_ENABLE, STEREO_DIAG_LOG_INTERVAL_BLOCKS,
     DEEMPHASIS_TAU, DC_OFFSET_ALPHA,
     AUDIO_OUTPUT_RATE, COMPOSITE_RATE, LIGHT_COMPOSITE_SCALE,
     STANDARD_RESAMPLE_KAISER_BETA,
@@ -133,10 +127,6 @@ class BaseFMDemodulator(FMDemodulatorInterface):
             sample_rate=self.composite_rate,
         )
         self.lp_lr_low = LowpassFilter(
-            order=mono_order, cutoff=LR_HIGH_SPLIT_CUTOFF,
-            sample_rate=self.composite_rate,
-        )
-        self.lp_mono_align = LowpassFilter(
             order=mono_order, cutoff=LR_HIGH_SPLIT_CUTOFF,
             sample_rate=self.composite_rate,
         )
@@ -206,7 +196,6 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         self.pilot_snr_ema: float | None = None
         self.pilot_jitter_ema: float = 0.0
         self.stereo_phase_err_ema: float = 0.0
-        self.mono_lr_phase_align_ema: float = 0.0
         self.lr_high_gate_gain: float = 1.0
         self.pilot_residual_center_hz: float = float(STEREO_PILOT_RESIDUAL_CENTER_HZ)
         self.subcarrier_phase_offset_rad: float = np.deg2rad(STEREO_SUBCARRIER_PHASE_OFFSET_DEG)
@@ -215,9 +204,7 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         self._pilot_phase_last: float | None = None
         self._pilot_mix_phase: float = 0.0
         self.lr_side_cap_gain: float = 1.0
-        self.phase_align_enabled: bool = STEREO_PHASE_ALIGN_ENABLE
         self.iq_phase_correction_enabled: bool = STEREO_IQ_PHASE_CORRECTION_ENABLE
-        self.legacy_lr_demod_enabled: bool = STEREO_LEGACY_LR_DEMOD_ENABLE
         self.high_gate_enabled: bool = True
         self.diag_enable: bool = STEREO_DIAG_ENABLE
         self.diag_log_interval_blocks: int = STEREO_DIAG_LOG_INTERVAL_BLOCKS
@@ -359,42 +346,35 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         subcarrier_i = np.cos(sub_phase)
         subcarrier_q = np.sin(sub_phase)
         lr_band = self.bp_lr.apply(composite)
-        if self.legacy_lr_demod_enabled:
-            lr_demod_i = lr_band * subcarrier_i * STEREO_LR_DEMOD_GAIN
-            self.stereo_phase_err_ema = 0.0
-            lr_base_full = self.lp_lr_base.apply(lr_demod_i)
-            lr_base_low = self.lp_lr_low.apply(lr_demod_i)
-            lr_base_mid = self.lp_lr_mid.apply(lr_demod_i)
+        lr_demod_i = lr_band * subcarrier_i * STEREO_LR_DEMOD_GAIN
+        lr_demod_q = lr_band * subcarrier_q * STEREO_LR_DEMOD_GAIN
+        lr_base_full_i = self.lp_lr_base.apply(lr_demod_i)
+        lr_base_full_q = self.lp_lr_base_q.apply(lr_demod_q)
+        cov_iq = float(np.mean(lr_base_full_i * lr_base_full_q))
+        var_i = float(np.mean(lr_base_full_i ** 2))
+        var_q = float(np.mean(lr_base_full_q ** 2))
+        if self.iq_phase_correction_enabled:
+            phase_err_raw = 0.5 * np.arctan2(2.0 * cov_iq, var_i - var_q + 1e-12)
+            phase_lim = np.deg2rad(STEREO_PHASE_ERR_LIMIT_DEG)
+            phase_err_raw = float(np.clip(phase_err_raw, -phase_lim, phase_lim))
+            phase_alpha = STEREO_PHASE_ERR_SMOOTHING
+            self.stereo_phase_err_ema = (
+                phase_alpha * phase_err_raw + (1.0 - phase_alpha) * self.stereo_phase_err_ema
+            )
+            cph = np.cos(self.stereo_phase_err_ema)
+            sph = np.sin(self.stereo_phase_err_ema)
         else:
-            lr_demod_i = lr_band * subcarrier_i * STEREO_LR_DEMOD_GAIN
-            lr_demod_q = lr_band * subcarrier_q * STEREO_LR_DEMOD_GAIN
-            lr_base_full_i = self.lp_lr_base.apply(lr_demod_i)
-            lr_base_full_q = self.lp_lr_base_q.apply(lr_demod_q)
-            cov_iq = float(np.mean(lr_base_full_i * lr_base_full_q))
-            var_i = float(np.mean(lr_base_full_i ** 2))
-            var_q = float(np.mean(lr_base_full_q ** 2))
-            if self.iq_phase_correction_enabled:
-                phase_err_raw = 0.5 * np.arctan2(2.0 * cov_iq, var_i - var_q + 1e-12)
-                phase_lim = np.deg2rad(STEREO_PHASE_ERR_LIMIT_DEG)
-                phase_err_raw = float(np.clip(phase_err_raw, -phase_lim, phase_lim))
-                phase_alpha = STEREO_PHASE_ERR_SMOOTHING
-                self.stereo_phase_err_ema = (
-                    phase_alpha * phase_err_raw + (1.0 - phase_alpha) * self.stereo_phase_err_ema
-                )
-                cph = np.cos(self.stereo_phase_err_ema)
-                sph = np.sin(self.stereo_phase_err_ema)
-            else:
-                self.stereo_phase_err_ema = 0.0
-                cph = 1.0
-                sph = 0.0
-            lr_base_full = lr_base_full_i * cph + lr_base_full_q * sph
+            self.stereo_phase_err_ema = 0.0
+            cph = 1.0
+            sph = 0.0
+        lr_base_full = lr_base_full_i * cph + lr_base_full_q * sph
 
-            lr_base_low_i = self.lp_lr_low.apply(lr_demod_i)
-            lr_base_low_q = self.lp_lr_low_q.apply(lr_demod_q)
-            lr_base_low = lr_base_low_i * cph + lr_base_low_q * sph
-            lr_base_mid_i = self.lp_lr_mid.apply(lr_demod_i)
-            lr_base_mid_q = self.lp_lr_mid_q.apply(lr_demod_q)
-            lr_base_mid = lr_base_mid_i * cph + lr_base_mid_q * sph
+        lr_base_low_i = self.lp_lr_low.apply(lr_demod_i)
+        lr_base_low_q = self.lp_lr_low_q.apply(lr_demod_q)
+        lr_base_low = lr_base_low_i * cph + lr_base_low_q * sph
+        lr_base_mid_i = self.lp_lr_mid.apply(lr_demod_i)
+        lr_base_mid_q = self.lp_lr_mid_q.apply(lr_demod_q)
+        lr_base_mid = lr_base_mid_i * cph + lr_base_mid_q * sph
         lr_base_midhigh = lr_base_mid - lr_base_low
         lr_base_super = lr_base_full - lr_base_mid
 
@@ -445,38 +425,6 @@ class BaseFMDemodulator(FMDemodulatorInterface):
             + (super_gain * self.lr_high_gate_gain) * lr_base_super
         )
 
-        # Align LR phase to mono when coherence is high (helps separation).
-        mono_align = self.lp_mono_align.apply(mono)
-        mono_a = signal.hilbert(mono_align.astype(np.float32))
-        lr_a = signal.hilbert(lr_base_low.astype(np.float32))
-        cross = np.mean(lr_a * np.conj(mono_a))
-        p_mono = float(np.mean(np.abs(mono_a) ** 2))
-        p_lr = float(np.mean(np.abs(lr_a) ** 2))
-        coh = abs(cross) / (np.sqrt(p_mono * p_lr) + 1e-12)
-        side_ratio_align = float(np.sqrt(p_lr + 1e-12) / np.sqrt(p_mono + 1e-12))
-        align_trusted = (
-            coh >= STEREO_MONO_LR_PHASE_ALIGN_COH_MIN
-            and side_ratio_align >= STEREO_MONO_LR_PHASE_ALIGN_SIDE_RATIO_MIN
-            and side_ratio_align <= STEREO_MONO_LR_PHASE_ALIGN_SIDE_RATIO_MAX
-        )
-        if self.phase_align_enabled:
-            if align_trusted:
-                align_raw = float(np.angle(cross))
-                align_lim = np.deg2rad(STEREO_MONO_LR_PHASE_ALIGN_LIMIT_DEG)
-                align_raw = float(np.clip(align_raw, -align_lim, align_lim))
-                align_alpha = STEREO_MONO_LR_PHASE_ALIGN_SMOOTHING
-                self.mono_lr_phase_align_ema = (
-                    align_alpha * align_raw
-                    + (1.0 - align_alpha) * self.mono_lr_phase_align_ema
-                )
-            else:
-                decay = np.clip(STEREO_MONO_LR_PHASE_ALIGN_DECAY, 0.0, 1.0)
-                self.mono_lr_phase_align_ema *= (1.0 - decay)
-            lr_shaped_a = signal.hilbert(lr_shaped.astype(np.float32))
-            lr_shaped = np.real(
-                lr_shaped_a * np.exp(-1j * self.mono_lr_phase_align_ema)
-            ).astype(np.float64, copy=False)
-
         lr_baseband = lr_shaped * self.blend_factor
         side_ratio_now = float(
             np.sqrt(np.mean(lr_baseband ** 2) + 1e-12) / np.sqrt(np.mean(mono ** 2) + 1e-12)
@@ -508,7 +456,7 @@ class BaseFMDemodulator(FMDemodulatorInterface):
                 self.logger.info(
                     "StereoDiag snr=%.2fdB blend=%.3f pilotP=%.6g noiseP=%.6g "
                     "phJit=%.6g lrBandRMS=%.6g lrBaseRMS=%.6g phaseIQ=%.3fdeg "
-                    "monoLRAlign=%.3fdeg coh=%.3f side=%.3f align=%s iqCorr=%s legacyLR=%s highGate=%s "
+                    "iqCorr=%s highGate=%s "
                     "gateAssist=%.3f gateFloor=%.3f "
                     "monoDelay=%d scOff=%.1fdeg sideCap=%.3f",
                     snr_db, self.blend_factor, pilot_power, noise_power,
@@ -516,12 +464,7 @@ class BaseFMDemodulator(FMDemodulatorInterface):
                     float(np.sqrt(np.mean(lr_band ** 2) + 1e-12)),
                     float(np.sqrt(np.mean(lr_baseband ** 2) + 1e-12)),
                     float(np.rad2deg(self.stereo_phase_err_ema)),
-                    float(np.rad2deg(self.mono_lr_phase_align_ema)),
-                    float(coh),
-                    float(side_ratio_align),
-                    "on" if self.phase_align_enabled else "off",
                     "on" if self.iq_phase_correction_enabled else "off",
-                    "on" if self.legacy_lr_demod_enabled else "off",
                     "on" if self.high_gate_enabled else "off",
                     gate_assist,
                     gate_floor,
@@ -580,7 +523,6 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         self.pilot_snr_ema = None
         self.pilot_jitter_ema = 0.0
         self.stereo_phase_err_ema = 0.0
-        self.mono_lr_phase_align_ema = 0.0
         self.lr_high_gate_gain = 1.0
         self.lr_side_cap_gain = 1.0
         if self.mono_delay_samples > 0:

@@ -85,20 +85,12 @@ STEREO_LR_SIDE_RATIO_CAP_RELEASE = 0.45    # Gain release speed when limiting di
 STEREO_PHASE_ERR_SMOOTHING = 0.15   # EMA smoothing for LR demod phase correction
 STEREO_PHASE_ERR_LIMIT_DEG = 45.0   # Clamp limit for LR demod phase correction (deg)
 STEREO_IQ_PHASE_CORRECTION_ENABLE = True   # Enable I/Q rotation correction in LR demod
-STEREO_LEGACY_LR_DEMOD_ENABLE = False      # Use legacy cos-only LR synchronous demod path
 
 LR_BANDPASS_ORDER = 15              # L-R bandpass filter order (standard)
 LR_BANDPASS_ORDER_LIGHT = 1         # L-R bandpass filter order (light)
 LR_BANDPASS_LOW = 23000.0           # L-R bandpass lower edge (Hz)
 LR_BANDPASS_HIGH = 53000.0          # L-R bandpass upper edge (Hz)
 STEREO_LR_DEMOD_GAIN = 2.0          # Gain compensation for DSB-SC synchronous demod
-STEREO_MONO_LR_PHASE_ALIGN_COH_MIN = 0.25   # Minimum mono/LR coherence to update phase align
-STEREO_MONO_LR_PHASE_ALIGN_SIDE_RATIO_MIN = 0.01  # Minimum |L-R|/|L+R| ratio to trust align update
-STEREO_MONO_LR_PHASE_ALIGN_SIDE_RATIO_MAX = 0.40  # Maximum |L-R|/|L+R| ratio to trust align update
-STEREO_MONO_LR_PHASE_ALIGN_LIMIT_DEG = 30.0  # Clamp limit for mono/LR phase alignment (deg)
-STEREO_MONO_LR_PHASE_ALIGN_SMOOTHING = 0.12  # EMA smoothing for mono/LR phase alignment
-STEREO_MONO_LR_PHASE_ALIGN_DECAY = 0.05      # Decay-to-zero rate when align update is not trusted
-STEREO_PHASE_ALIGN_ENABLE = True            # Enable mono/LR phase alignment correction
 STEREO_DIAG_ENABLE = False                  # Enable stereo demod diagnostics logging
 STEREO_DIAG_LOG_INTERVAL_BLOCKS = 120       # Log interval (composite blocks) for diagnostics
 
