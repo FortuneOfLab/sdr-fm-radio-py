@@ -43,7 +43,10 @@ import scipy.signal as signal
 
 from fm_radio.interfaces import FMDemodulatorInterface
 from fm_radio.exceptions import DemodulationError
-from fm_radio.filters import LowpassFilter, BandpassFilter, NotchFilter, DeemphasisIIRFilter
+from fm_radio.filters import (
+    LowpassFilter, BandpassFilter, NotchFilter, DeemphasisIIRFilter,
+    StatefulResampler,
+)
 from fm_radio.pll import PLL
 from fm_radio.constants import (
     SDR_SAMPLE_RATE, SDR_SAMPLE_RATE_LIGHT,
@@ -578,6 +581,10 @@ class FMDemodulator(BaseFMDemodulator):
         self.iq_b, self.iq_a = signal.butter(
             IQ_LOWPASS_ORDER, IQ_LOWPASS_CUTOFF / nyquist, btype="low",
         )
+        self._iq_resampler = StatefulResampler(
+            self.up, self.down,
+            window=("kaiser", STANDARD_RESAMPLE_KAISER_BETA),
+        )
 
     def process_iq_samples(self, iq_samples: np.ndarray) -> np.ndarray:
         """Apply DC offset correction, lowpass filtering, PLL demodulation,
@@ -598,10 +605,7 @@ class FMDemodulator(BaseFMDemodulator):
             iq_processed = np.asarray(iq_processed, dtype=np.complex64, copy=False)
             iq_filtered = signal.lfilter(self.iq_b, self.iq_a, iq_processed)
             main_output = self.main_pll.process(iq_filtered)
-            composite = signal.resample_poly(
-                main_output, up=self.up, down=self.down,
-                window=("kaiser", STANDARD_RESAMPLE_KAISER_BETA),
-            )
+            composite = self._iq_resampler.process(main_output)
             return composite.astype(np.float32, copy=False)
         except (ValueError, TypeError) as e:
             self.logger.error(f"Error processing IQ samples: {e}", exc_info=True)
@@ -610,6 +614,7 @@ class FMDemodulator(BaseFMDemodulator):
     def _reset_subclass(self) -> None:
         """Reset main PLL state."""
         self.main_pll.reset()
+        self._iq_resampler.reset()
 
 
 class FMDemodulatorLight(BaseFMDemodulator):
@@ -645,6 +650,7 @@ class FMDemodulatorLight(BaseFMDemodulator):
 
         # --- Light-only: phase tracking for differentiation ---
         self.last_phase: float | None = None
+        self._iq_resampler = StatefulResampler(self.up, self.down)
 
     def process_iq_samples(self, iq_samples: np.ndarray) -> np.ndarray:
         """Apply DC offset correction, phase extraction/differentiation,
@@ -670,8 +676,7 @@ class FMDemodulatorLight(BaseFMDemodulator):
             fm_demod = np.diff(phase, prepend=phase[0])
             self.last_phase = phase[-1]
             composite = (
-                signal.resample_poly(fm_demod, up=self.up, down=self.down)
-                * LIGHT_COMPOSITE_SCALE
+                self._iq_resampler.process(fm_demod) * LIGHT_COMPOSITE_SCALE
             )
             return np.asarray(composite, dtype=np.float32, copy=False)
         except (ValueError, TypeError) as e:
@@ -681,3 +686,4 @@ class FMDemodulatorLight(BaseFMDemodulator):
     def _reset_subclass(self) -> None:
         """Reset phase tracking state."""
         self.last_phase = None
+        self._iq_resampler.reset()

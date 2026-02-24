@@ -134,3 +134,51 @@ class NotchFilter:
         """Apply the notch filter to streaming chunk, preserving state."""
         y, self.zi = signal.sosfilt(self.sos, data, zi=self.zi)
         return y
+
+
+# --------------------------------------------------
+# Stateful polyphase resampler (overlap-save)
+# --------------------------------------------------
+class StatefulResampler:
+    """Overlap-save wrapper for ``scipy.signal.resample_poly``.
+
+    ``resample_poly`` is stateless: each call zero-pads the block edges,
+    producing boundary transients that manifest as impulse noise in
+    downstream stereo L-R processing.  This class keeps the tail of the
+    previous input block and prepends it to the current block so that
+    the polyphase filter sees a continuous stream.
+    """
+
+    def __init__(self, up: int, down: int, window: object = None) -> None:
+        self.up: int = int(up)
+        self.down: int = int(down)
+        self.window: object = window
+        # Half-length of the internal polyphase FIR (scipy default)
+        half_len: int = 10 * max(self.up, self.down)
+        self._overlap: int = half_len * 2
+        self._prev_tail: np.ndarray | None = None
+
+    # ----- public API -----
+
+    def process(self, x: np.ndarray) -> np.ndarray:
+        """Resample *x* while maintaining block-to-block continuity."""
+        if self._prev_tail is None:
+            self._prev_tail = x[-self._overlap:].copy()
+            return self._resample(x)
+
+        extended = np.concatenate([self._prev_tail, x])
+        self._prev_tail = x[-self._overlap:].copy()
+        y_ext = self._resample(extended)
+        overlap_out = int(np.round(self._overlap * self.up / self.down))
+        return y_ext[overlap_out:]
+
+    def reset(self) -> None:
+        """Discard saved tail so the next call starts fresh."""
+        self._prev_tail = None
+
+    # ----- internal -----
+
+    def _resample(self, x: np.ndarray) -> np.ndarray:
+        if self.window is not None:
+            return signal.resample_poly(x, self.up, self.down, window=self.window)
+        return signal.resample_poly(x, self.up, self.down)
