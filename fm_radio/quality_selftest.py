@@ -619,6 +619,14 @@ def _parser() -> argparse.ArgumentParser:
         "--sweep-candidates", type=str, default="0,90,180,270",
         help="Comma-separated DSB phase candidates in degrees for sweep mode",
     )
+    p.add_argument(
+        "--play", action="store_true",
+        help="Play demodulated audio via default audio device (IQ WAV mode)",
+    )
+    p.add_argument(
+        "--out-wav", type=str, default="",
+        help="Save demodulated audio to WAV file (IQ WAV mode)",
+    )
     return p
 
 
@@ -698,6 +706,24 @@ def main() -> None:
         else:
             print("Blend avg/min/max: nan / nan / nan")
         print("Reference metrics (THD+N/SNR/separation) require synthetic or source-wav mode.")
+
+        if args.out_wav or args.play:
+            import scipy.io.wavfile as wavfile
+            stereo = np.stack([left, right], axis=-1)
+            peak = float(np.max(np.abs(stereo))) + 1e-10
+            stereo_16 = (stereo / peak * 0.9 * 32767).astype(np.int16)
+
+            import os, subprocess
+            play_path = args.out_wav if args.out_wav else os.path.join(os.getcwd(), "_selftest_play.wav")
+            wavfile.write(play_path, int(AUDIO_OUTPUT_RATE), stereo_16)
+            print(f"Saved: {play_path}")
+
+            if args.play:
+                print(f"Playing {n/AUDIO_OUTPUT_RATE:.1f}s audio ...")
+                subprocess.run(
+                    ["cmd", "/c", "start", "", play_path],
+                    check=False,
+                )
         return
 
     if args.sweep_dsb_phase:
