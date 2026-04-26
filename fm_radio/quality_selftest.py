@@ -258,6 +258,125 @@ def _run_demod_from_iq(
     )
 
 
+def _run_demod_diag_iq(
+    iq: np.ndarray,
+    fixed_blend: float | None = None,
+    disable_iq_phase_correction: bool = False,
+    disable_high_gate: bool = False,
+    mono_delay_samples: int | None = None,
+    subcarrier_phase_offset_deg: float | None = None,
+    lr_high_max_gain: float | None = None,
+    lr_super_high_max_gain: float | None = None,
+) -> dict[str, np.ndarray]:
+    """Run the demodulator and capture per-block diagnostics.
+
+    Returns a dict with keys ``left``, ``right``, ``blend``, ``pilot_snr_db``
+    where blend / pilot_snr_db are one entry per processed block.
+    """
+    demod = FMDemodulator(stereo=True)
+    if fixed_blend is not None:
+        demod.force_blend_factor = float(np.clip(fixed_blend, 0.0, 1.0))
+    if disable_iq_phase_correction:
+        demod.iq_phase_correction_enabled = False
+    if disable_high_gate:
+        demod.high_gate_enabled = False
+    if mono_delay_samples is not None and int(mono_delay_samples) >= 0:
+        demod.mono_delay_samples = int(mono_delay_samples)
+        demod._mono_delay_state = np.zeros(demod.mono_delay_samples, dtype=np.float32)
+    if subcarrier_phase_offset_deg is not None:
+        demod.subcarrier_phase_offset_rad = np.deg2rad(float(subcarrier_phase_offset_deg))
+    if lr_high_max_gain is not None:
+        demod.lr_high_max_gain = float(lr_high_max_gain)
+    if lr_super_high_max_gain is not None:
+        demod.lr_super_high_max_gain = float(lr_super_high_max_gain)
+
+    left_chunks: list[np.ndarray] = []
+    right_chunks: list[np.ndarray] = []
+    blend_hist: list[float] = []
+    snr_hist: list[float] = []
+    for i in range(0, iq.size, SDR_BLOCK_SIZE):
+        chunk = iq[i:i + SDR_BLOCK_SIZE]
+        if chunk.size < 8:
+            break
+        composite = demod.process_iq_samples(chunk)
+        left, right = demod.demodulate(composite)
+        left_chunks.append(left.astype(np.float32))
+        right_chunks.append(right.astype(np.float32))
+        blend_hist.append(float(demod.blend_factor))
+        snr = demod.pilot_snr_ema
+        snr_hist.append(float(snr) if snr is not None else float("nan"))
+    if not left_chunks:
+        empty_f = np.zeros(0, dtype=np.float32)
+        return {
+            "left": empty_f, "right": empty_f,
+            "blend": empty_f, "pilot_snr_db": empty_f,
+        }
+    return {
+        "left": np.concatenate(left_chunks),
+        "right": np.concatenate(right_chunks),
+        "blend": np.asarray(blend_hist, dtype=np.float32),
+        "pilot_snr_db": np.asarray(snr_hist, dtype=np.float32),
+    }
+
+
+def _band_rms_percentiles(
+    x: np.ndarray, fs: int, lo_hz: float, hi_hz: float,
+    win_ms: float = 50.0,
+) -> tuple[float, float, float]:
+    """Short-time band-RMS percentiles (p10/p50/p90) of *x* in [lo,hi] Hz.
+
+    Used as a noise-floor estimator: the p10 of a high-frequency band is
+    dominated by noise (program content's HF energy is sparse).
+    """
+    x = np.asarray(x, dtype=np.float64)
+    if x.size == 0:
+        return float("nan"), float("nan"), float("nan")
+    nyq = fs / 2.0
+    lo = max(1e-6, min(lo_hz, nyq - 1.0)) / nyq
+    hi = max(lo + 1e-6, min(hi_hz, nyq - 1.0)) / nyq
+    sos = signal.butter(4, [lo, hi], btype="band", output="sos")
+    y = signal.sosfilt(sos, x)
+    win = max(1, int(win_ms * 1e-3 * fs))
+    nb = y.size // win
+    if nb < 4:
+        rms = np.sqrt(np.mean(y ** 2) + EPS)
+        return float(rms), float(rms), float(rms)
+    blocks = y[: nb * win].reshape(nb, win)
+    rms = np.sqrt(np.mean(blocks ** 2, axis=1) + EPS)
+    p10 = float(np.percentile(rms, 10))
+    p50 = float(np.percentile(rms, 50))
+    p90 = float(np.percentile(rms, 90))
+    return p10, p50, p90
+
+
+def _db(x: float) -> float:
+    return 20.0 * np.log10(max(x, 1e-12))
+
+
+def _noise_metrics(left: np.ndarray, right: np.ndarray, fs: int,
+                    hf_lo_hz: float = 10000.0, hf_hi_hz: float = 14500.0,
+                    ) -> dict[str, float]:
+    """Audio-side noise metrics used to compare demod configurations."""
+    n = min(left.size, right.size)
+    if n <= 0:
+        return {}
+    left = left[:n]
+    right = right[:n]
+    mid = 0.5 * (left + right)
+    side = 0.5 * (left - right)
+    p10_mid, p50_mid, p90_mid = _band_rms_percentiles(mid, fs, hf_lo_hz, hf_hi_hz)
+    p10_side, p50_side, p90_side = _band_rms_percentiles(side, fs, hf_lo_hz, hf_hi_hz)
+    return {
+        "mid_hf_p10_db": _db(p10_mid),
+        "mid_hf_p50_db": _db(p50_mid),
+        "side_hf_p10_db": _db(p10_side),
+        "side_hf_p50_db": _db(p50_side),
+        "side_hf_p90_db": _db(p90_side),
+        "side_hf_p10_lin": p10_side,
+        "mid_hf_p10_lin": p10_mid,
+    }
+
+
 def _run_demod_from_composite(
     composite: np.ndarray,
     fixed_blend: float | None = None,
@@ -627,6 +746,41 @@ def _parser() -> argparse.ArgumentParser:
         "--out-wav", type=str, default="",
         help="Save demodulated audio to WAV file (IQ WAV mode)",
     )
+    p.add_argument(
+        "--noise-diag", dest="noise_diag", action="store_true", default=True,
+        help="(IQ WAV mode) Run stereo + forced-mono demod, report excess "
+             "stereo noise (default: on)",
+    )
+    p.add_argument(
+        "--no-noise-diag", dest="noise_diag", action="store_false",
+        help="Disable noise diagnostics (skips the second forced-mono pass)",
+    )
+    p.add_argument(
+        "--noise-hf-lo-hz", type=float, default=10000.0,
+        help="Lower edge of HF noise-floor band for stereo noise diagnostics",
+    )
+    p.add_argument(
+        "--noise-hf-hi-hz", type=float, default=14500.0,
+        help="Upper edge of HF noise-floor band for stereo noise diagnostics",
+    )
+    p.add_argument(
+        "--noise-csv", type=str, default="",
+        help="Append a CSV summary row of noise diagnostics to this file",
+    )
+    p.add_argument(
+        "--noise-tag", type=str, default="",
+        help="Free-form tag emitted in the CSV row (identifies the run)",
+    )
+    p.add_argument(
+        "--lr-high-max-gain", type=float, default=float("nan"),
+        help="Override LR_HIGH_MAX_GAIN ceiling for 7-12 kHz L-R "
+             "(NaN=use constant). Lower values reduce HF stereo noise.",
+    )
+    p.add_argument(
+        "--lr-super-high-max-gain", type=float, default=float("nan"),
+        help="Override LR_SUPER_HIGH_MAX_GAIN ceiling for 12-15 kHz L-R "
+             "(NaN=use constant). Lower values reduce HF stereo noise.",
+    )
     return p
 
 
@@ -667,32 +821,44 @@ def main() -> None:
                 format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
             )
         iq = _load_iq_wav(args.iq_wav, int(SDR_SAMPLE_RATE), float(args.duration))
-        left, right, blend = _run_demod_from_iq(
-            iq,
-            fixed_blend=fixed_blend,
+        common_overrides = dict(
             disable_iq_phase_correction=bool(args.disable_iq_phase_correction),
             disable_high_gate=bool(args.disable_high_gate),
-            mono_delay_samples=(None if int(args.mono_delay_samples) < 0 else int(args.mono_delay_samples)),
+            mono_delay_samples=(
+                None if int(args.mono_delay_samples) < 0 else int(args.mono_delay_samples)
+            ),
             subcarrier_phase_offset_deg=(
                 None if np.isnan(float(args.subcarrier_phase_offset_deg))
                 else float(args.subcarrier_phase_offset_deg)
             ),
-            demod_diag=bool(args.demod_diag),
-            demod_diag_interval=(
-                None if int(args.demod_diag_interval) <= 0 else int(args.demod_diag_interval)
+            lr_high_max_gain=(
+                None if np.isnan(float(args.lr_high_max_gain))
+                else float(args.lr_high_max_gain)
+            ),
+            lr_super_high_max_gain=(
+                None if np.isnan(float(args.lr_super_high_max_gain))
+                else float(args.lr_super_high_max_gain)
             ),
         )
+        stereo_diag = _run_demod_diag_iq(
+            iq, fixed_blend=fixed_blend, **common_overrides,
+        )
+        left = stereo_diag["left"]
+        right = stereo_diag["right"]
+        blend = stereo_diag["blend"]
+        snr_hist = stereo_diag["pilot_snr_db"]
+
         s = int(max(0.0, float(args.warmup_s)) * AUDIO_OUTPUT_RATE)
-        left = left[s:]
-        right = right[s:]
-        n = min(left.size, right.size)
-        left = left[:n]
-        right = right[:n]
-        corr = float(np.corrcoef(left, right)[0, 1]) if n > 8 else float("nan")
-        rms_l = _rms(left)
-        rms_r = _rms(right)
-        side = _rms(left - right)
-        mono = _rms(left + right)
+        left_s = left[s:]
+        right_s = right[s:]
+        n = min(left_s.size, right_s.size)
+        left_s = left_s[:n]
+        right_s = right_s[:n]
+        corr = float(np.corrcoef(left_s, right_s)[0, 1]) if n > 8 else float("nan")
+        rms_l = _rms(left_s)
+        rms_r = _rms(right_s)
+        side = _rms(left_s - right_s)
+        mono = _rms(left_s + right_s)
         print("FM Quality Self-Test (Measured IQ Diagnostics)")
         print(f"Samples(out): {n}")
         print(f"RMS L/R: {rms_l:.6f} / {rms_r:.6f}")
@@ -705,7 +871,78 @@ def main() -> None:
             )
         else:
             print("Blend avg/min/max: nan / nan / nan")
+        finite_snr = snr_hist[np.isfinite(snr_hist)] if snr_hist.size else snr_hist
+        if finite_snr.size:
+            print(
+                f"Pilot SNR p10/p50/avg/max [dB]: "
+                f"{float(np.percentile(finite_snr, 10)):.2f} / "
+                f"{float(np.median(finite_snr)):.2f} / "
+                f"{float(np.mean(finite_snr)):.2f} / "
+                f"{float(np.max(finite_snr)):.2f}"
+            )
+        else:
+            print("Pilot SNR p10/p50/avg/max [dB]: nan / nan / nan / nan")
+
+        # --- Audio-side stereo noise diagnostics ---
+        side_hf_p10_db = float("nan")
+        mid_hf_p10_db = float("nan")
+        listen_penalty_db = float("nan")
+        if args.noise_diag and n > 0:
+            stereo_metrics = _noise_metrics(
+                left_s, right_s, AUDIO_OUTPUT_RATE,
+                hf_lo_hz=float(args.noise_hf_lo_hz),
+                hf_hi_hz=float(args.noise_hf_hi_hz),
+            )
+            mid_hf_p10_db = stereo_metrics.get("mid_hf_p10_db", float("nan"))
+            side_hf_p10_db = stereo_metrics.get("side_hf_p10_db", float("nan"))
+            mid_lin = stereo_metrics.get("mid_hf_p10_lin", float("nan"))
+            side_lin = stereo_metrics.get("side_hf_p10_lin", float("nan"))
+            # HF noise penalty when listening in stereo vs mono.
+            # Mono listening hears mid HF only; stereo listening hears
+            # mid+/-side, so per-speaker HF power is mid^2 + side^2
+            # (assuming side noise is uncorrelated with mid).
+            if (np.isfinite(mid_lin) and np.isfinite(side_lin)
+                    and mid_lin > 1e-12):
+                ratio = (side_lin ** 2) / (mid_lin ** 2)
+                listen_penalty_db = 10.0 * np.log10(1.0 + ratio)
+            print(
+                "Audio HF noise floor [dB] (band "
+                f"{args.noise_hf_lo_hz/1e3:.1f}-{args.noise_hf_hi_hz/1e3:.1f}kHz, p10):"
+            )
+            print(
+                f"  mid  (L+R)/2 = {mid_hf_p10_db:.2f}   "
+                f"side (L-R)/2 = {side_hf_p10_db:.2f}   "
+                f"(side - mid = {side_hf_p10_db - mid_hf_p10_db:+.2f} dB)"
+            )
+            print(
+                f"Stereo listening HF penalty vs mono: "
+                f"{listen_penalty_db:+.2f} dB"
+            )
         print("Reference metrics (THD+N/SNR/separation) require synthetic or source-wav mode.")
+
+        if args.noise_csv:
+            import os as _os
+            tag = args.noise_tag if args.noise_tag else _os.path.basename(args.iq_wav)
+            header = (
+                "tag,duration_s,blend_avg,pilot_snr_p10_db,pilot_snr_med_db,"
+                "side_lr_ratio,mid_hf_p10_db,side_hf_p10_db,listen_penalty_db\n"
+            )
+            row = (
+                f"{tag},{float(args.duration):.2f},"
+                f"{(float(np.mean(blend)) if blend.size else float('nan')):.3f},"
+                f"{(float(np.percentile(finite_snr,10)) if finite_snr.size else float('nan')):.2f},"
+                f"{(float(np.median(finite_snr)) if finite_snr.size else float('nan')):.2f},"
+                f"{side/(mono+EPS):.4f},"
+                f"{mid_hf_p10_db:.2f},{side_hf_p10_db:.2f},{listen_penalty_db:.2f}\n"
+            )
+            need_header = (not _os.path.exists(args.noise_csv)) or (
+                _os.path.getsize(args.noise_csv) == 0
+            )
+            with open(args.noise_csv, "a", encoding="utf-8") as f:
+                if need_header:
+                    f.write(header)
+                f.write(row)
+            print(f"CSV: appended row to {args.noise_csv}")
 
         if args.out_wav or args.play:
             import scipy.io.wavfile as wavfile

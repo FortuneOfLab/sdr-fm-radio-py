@@ -54,7 +54,8 @@ from fm_radio.constants import (
     IQ_LOWPASS_ORDER, IQ_LOWPASS_CUTOFF,
     MONO_LOWPASS_ORDER, MONO_LOWPASS_ORDER_LIGHT, MONO_LOWPASS_CUTOFF,
     LR_BASE_LOWPASS_CUTOFF, LR_HIGH_SPLIT_CUTOFF, LR_HIGH_SUPER_SPLIT_CUTOFF,
-    LR_HIGH_MIN_GAIN, LR_SUPER_HIGH_MIN_GAIN,
+    LR_HIGH_MIN_GAIN, LR_HIGH_MAX_GAIN,
+    LR_SUPER_HIGH_MIN_GAIN, LR_SUPER_HIGH_MAX_GAIN,
     LR_HIGH_GATE_THRESHOLD, LR_HIGH_GATE_KNEE_MULT,
     LR_HIGH_GATE_MIN_GAIN, LR_HIGH_GATE_SMOOTHING,
     STEREO_HIGH_GATE_SNR_ASSIST_ENABLE,
@@ -84,6 +85,7 @@ from fm_radio.constants import (
     STEREO_BLEND_PILOT_JITTER_REF_DB,
     STEREO_BLEND_STABILITY_MIN_FACTOR,
     STEREO_BLEND_SMOOTHING,
+    STEREO_HF_BLEND_PILOT_SNR_DB_HI, STEREO_HF_BLEND_PILOT_SNR_DB_LO,
     PILOT_NOTCH_FREQ, PILOT_NOTCH_Q,
 )
 
@@ -209,6 +211,10 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         self.lr_side_cap_gain: float = 1.0
         self.iq_phase_correction_enabled: bool = STEREO_IQ_PHASE_CORRECTION_ENABLE
         self.high_gate_enabled: bool = True
+        # HF L-R band gain ceilings (apply additional damping at full blend
+        # to trade stereo width above 7 kHz for HF noise reduction).
+        self.lr_high_max_gain: float = float(LR_HIGH_MAX_GAIN)
+        self.lr_super_high_max_gain: float = float(LR_SUPER_HIGH_MAX_GAIN)
         self.diag_enable: bool = STEREO_DIAG_ENABLE
         self.diag_log_interval_blocks: int = STEREO_DIAG_LOG_INTERVAL_BLOCKS
         self._diag_counter: int = 0
@@ -420,8 +426,25 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         else:
             self.lr_high_gate_gain = 1.0
 
-        midhigh_gain = LR_HIGH_MIN_GAIN + (1.0 - LR_HIGH_MIN_GAIN) * self.blend_factor
-        super_gain = LR_SUPER_HIGH_MIN_GAIN + (1.0 - LR_SUPER_HIGH_MIN_GAIN) * self.blend_factor
+        # Adaptive HF blend: ramp the configured MAX_GAIN ceilings up to 1.0
+        # as pilot SNR improves, so HF stereo width is preserved on strong
+        # signals. snr_open in [0, 1].
+        s_lo_hf = STEREO_HF_BLEND_PILOT_SNR_DB_LO
+        s_hi_hf = max(STEREO_HF_BLEND_PILOT_SNR_DB_HI, s_lo_hf + 1e-6)
+        if self.pilot_snr_ema is None:
+            snr_open_hf = 0.0
+        elif self.pilot_snr_ema >= s_hi_hf:
+            snr_open_hf = 1.0
+        elif self.pilot_snr_ema <= s_lo_hf:
+            snr_open_hf = 0.0
+        else:
+            snr_open_hf = (self.pilot_snr_ema - s_lo_hf) / (s_hi_hf - s_lo_hf)
+        midhigh_max_cfg = max(LR_HIGH_MIN_GAIN, float(self.lr_high_max_gain))
+        super_max_cfg = max(LR_SUPER_HIGH_MIN_GAIN, float(self.lr_super_high_max_gain))
+        midhigh_max = midhigh_max_cfg + (1.0 - midhigh_max_cfg) * snr_open_hf
+        super_max = super_max_cfg + (1.0 - super_max_cfg) * snr_open_hf
+        midhigh_gain = LR_HIGH_MIN_GAIN + (midhigh_max - LR_HIGH_MIN_GAIN) * self.blend_factor
+        super_gain = LR_SUPER_HIGH_MIN_GAIN + (super_max - LR_SUPER_HIGH_MIN_GAIN) * self.blend_factor
         lr_shaped = (
             lr_base_low
             + midhigh_gain * lr_base_midhigh

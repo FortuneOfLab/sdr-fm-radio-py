@@ -54,8 +54,10 @@ MONO_LOWPASS_CUTOFF = 15000.0       # Mono/baseband lowpass cutoff (Hz)
 LR_BASE_LOWPASS_CUTOFF = 15000.0    # L-R baseband lowpass cutoff (Hz)
 LR_HIGH_SPLIT_CUTOFF = 7000.0       # L-R split frequency for high-band damping (Hz)
 LR_HIGH_SUPER_SPLIT_CUTOFF = 12000.0  # L-R split frequency between mid-high and super-high (Hz)
-LR_HIGH_MIN_GAIN = 0.40             # Minimum mid-high gain at low stereo blend
-LR_SUPER_HIGH_MIN_GAIN = 0.20       # Minimum super-high gain at low stereo blend
+LR_HIGH_MIN_GAIN = 0.40             # Minimum mid-high (7-12k) gain at low stereo blend
+LR_HIGH_MAX_GAIN = 0.85             # Maximum mid-high gain at low pilot SNR (1.0 at HF_BLEND HI threshold)
+LR_SUPER_HIGH_MIN_GAIN = 0.20       # Minimum super-high (12-15k) gain at low stereo blend
+LR_SUPER_HIGH_MAX_GAIN = 0.50       # Maximum super-high gain at low pilot SNR (1.0 at HF_BLEND HI threshold)
 LR_HIGH_GATE_THRESHOLD = 0.0028     # RMS threshold for opening L-R high-band gate
 LR_HIGH_GATE_KNEE_MULT = 2.2        # Full-open level as multiple of threshold
 LR_HIGH_GATE_MIN_GAIN = 0.75        # Minimum gate gain when below threshold
@@ -128,6 +130,16 @@ STEREO_BLEND_PILOT_JITTER_EMA_ALPHA = 0.12  # EMA alpha for pilot SNR jitter tra
 STEREO_BLEND_PILOT_JITTER_REF_DB = 2.5     # Jitter reference in dB (higher -> less sensitive)
 STEREO_BLEND_STABILITY_MIN_FACTOR = 0.85   # Minimum stereo factor when pilot is unstable
 STEREO_BLEND_SMOOTHING = 0.08              # EMA smoothing for blend factor (0-1)
+
+# --------------------------------------------------
+# Adaptive HF stereo blend (frequency-axis blend, pilot SNR based)
+# --------------------------------------------------
+# Independently shapes the LR_*_MAX_GAIN ceilings as a function of pilot SNR:
+# above HI -> ceilings ramp to 1.0 (no HF damping);
+# below LO -> ceilings stay at LR_*_MAX_GAIN (aggressive HF damping).
+# When LR_*_MAX_GAIN are 1.0, this has no effect.
+STEREO_HF_BLEND_PILOT_SNR_DB_HI = 35.0     # Above this -> full HF stereo width
+STEREO_HF_BLEND_PILOT_SNR_DB_LO = 15.0     # Below this -> configured MAX_GAIN damping
 
 # --------------------------------------------------
 # Pilot tone notch filter (19 kHz removal)
