@@ -7,6 +7,7 @@ strength.
 
 from __future__ import annotations
 
+import queue
 import threading
 import time
 import logging
@@ -22,10 +23,15 @@ from fm_radio.constants import (
     AGC_CLIP_COUNT,
     AGC_WEAK_COUNT,
     AGC_HOLDOFF_BLOCKS,
+    AGC_WARMUP_SEC,
 )
 
 if TYPE_CHECKING:
     from fm_radio.sdr_receiver import SDRReceiver
+
+
+# Sentinel placed in the gain-request queue to signal worker shutdown.
+_GAIN_WORKER_SHUTDOWN = object()
 
 
 class AutoGainController:
@@ -36,8 +42,13 @@ class AutoGainController:
     several consecutive blocks, gain is stepped down.  When the signal
     is weak for an extended period, gain is stepped up.
 
-    Thread safety: a Lock protects all mutable state.  The actual
-    ``sdr_receiver.set_gain()`` call is made outside the lock.
+    Thread safety: a Lock protects all mutable state.  Hardware
+    ``sdr_receiver.set_gain()`` calls triggered from ``update()`` are
+    dispatched to a dedicated worker thread; the synchronous USB
+    control transfer (~40-200 ms per call) therefore never blocks the
+    processing thread.  Calls from the CLI/controller thread
+    (``enable``, ``disable``, ``reset_counters``, ``set_gain_manual``)
+    remain synchronous since they are not on a real-time path.
     """
 
     def __init__(self, sdr_receiver: SDRReceiver) -> None:
@@ -51,10 +62,82 @@ class AutoGainController:
         self._clip_counter: int = 0
         self._weak_counter: int = 0
         self._holdoff: int = 0
+        # Suppress AGC during the warmup window (Numba JIT compile and
+        # filter settling can otherwise produce spurious fast firings).
+        self._start_time: float = time.perf_counter()
+
+        # Async gain-change worker: own all USB control transfers
+        # triggered from the real-time processing thread.
+        self._gain_q: queue.Queue[object] = queue.Queue(maxsize=4)
+        self._gain_worker_stop: threading.Event = threading.Event()
+        self._gain_worker: threading.Thread = threading.Thread(
+            target=self._gain_worker_loop,
+            name='AutoGainWorker',
+            daemon=True,
+        )
+        self._gain_worker.start()
 
         # Apply initial gain: switch to manual gain mode
         self._sdr.set_manual_gain_mode(True)
         self._sdr.set_gain(AGC_GAIN_TABLE[self._gain_index] / 10.0)
+
+    # ------------------------------------------------------------------
+    # Async USB worker (avoids blocking the processing thread)
+    # ------------------------------------------------------------------
+
+    def _submit_async_gain(self, gain_db: float) -> None:
+        """Enqueue a gain-change request for the worker thread.
+
+        Coalesces by draining stale pending requests so that only the
+        most recent gain decision survives.  This way a burst of AGC
+        firings collapses to whatever the final desired level is.
+        """
+        try:
+            while True:
+                self._gain_q.get_nowait()
+        except queue.Empty:
+            pass
+        try:
+            self._gain_q.put_nowait(float(gain_db))
+        except queue.Full:
+            self.logger.debug("Gain request queue full (should not happen)")
+
+    def _gain_worker_loop(self) -> None:
+        """Worker thread loop: applies pending gain requests via USB."""
+        while not self._gain_worker_stop.is_set():
+            try:
+                item = self._gain_q.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            if item is _GAIN_WORKER_SHUTDOWN:
+                break
+            gain_db = float(item)
+            t0 = time.perf_counter()
+            try:
+                self._sdr.set_gain(gain_db)
+            except Exception as e:
+                self.logger.error(
+                    f"Failed to apply gain {gain_db:.1f} dB: {e}",
+                    exc_info=True,
+                )
+                continue
+            dt_ms = (time.perf_counter() - t0) * 1000.0
+            level = logging.WARNING if dt_ms >= 50.0 else logging.INFO
+            self.logger.log(
+                level,
+                "Auto gain applied %.1f dB (USB blocked %.1fms, async)",
+                gain_db, dt_ms,
+            )
+
+    def stop(self) -> None:
+        """Stop the async gain worker thread (called from cleanup)."""
+        self._gain_worker_stop.set()
+        try:
+            self._gain_q.put_nowait(_GAIN_WORKER_SHUTDOWN)
+        except queue.Full:
+            pass
+        if self._gain_worker.is_alive():
+            self._gain_worker.join(timeout=1.0)
 
     # ------------------------------------------------------------------
     # Public API (called from CLI / controller thread)
@@ -143,15 +226,23 @@ class AutoGainController:
         """Monitor IQ peak amplitude and adjust gain if needed.
 
         Called once per IQ block from the processing thread, before
-        demodulation.
+        demodulation.  Gain change USB calls are dispatched to the
+        async worker; this method itself is real-time safe.
 
         Args:
             iq_samples: Raw complex64 IQ samples from SDR.
         """
         apply_gain: float | None = None
+        applied_step: int = 0
 
         with self._lock:
             if not self._enabled:
+                return
+
+            # Suppress AGC during startup warmup so Numba JIT compile
+            # transients and filter settling don't trigger spurious
+            # gain steps.
+            if (time.perf_counter() - self._start_time) < AGC_WARMUP_SEC:
                 return
 
             if self._holdoff > 0:
@@ -168,6 +259,7 @@ class AutoGainController:
                     self._clip_counter = 0
                     self._holdoff = AGC_HOLDOFF_BLOCKS
                     apply_gain = AGC_GAIN_TABLE[self._gain_index] / 10.0
+                    applied_step = self._gain_index
             elif peak < AGC_WEAK_THRESHOLD:
                 self._weak_counter += 1
                 self._clip_counter = 0
@@ -177,28 +269,16 @@ class AutoGainController:
                     self._weak_counter = 0
                     self._holdoff = AGC_HOLDOFF_BLOCKS
                     apply_gain = AGC_GAIN_TABLE[self._gain_index] / 10.0
+                    applied_step = self._gain_index
             else:
                 self._clip_counter = 0
                 self._weak_counter = 0
 
-        # Apply gain change outside the lock.
-        # The RTL-SDR set_gain() is a synchronous USB control transfer
-        # which can block 50-200 ms; this blocking happens on the
-        # processing thread so we instrument it to identify whether it
-        # is the cause of audio dropouts.
+        # Dispatch the USB control transfer to the async worker thread
+        # so the processing thread never blocks on hardware.
         if apply_gain is not None:
-            t0 = time.perf_counter()
-            self._sdr.set_gain(apply_gain)
-            dt_ms = (time.perf_counter() - t0) * 1000.0
-            level = (
-                logging.WARNING if dt_ms >= 20.0 else logging.INFO
-            )
-            self.logger.log(
-                level,
-                "Auto gain adjusted to %.1f dB (step %d/%d) "
-                "set_gain_blocked=%.1fms",
-                apply_gain,
-                self._gain_index,
-                len(AGC_GAIN_TABLE) - 1,
-                dt_ms,
+            self._submit_async_gain(apply_gain)
+            self.logger.info(
+                "Auto gain requested %.1f dB (step %d/%d, async)",
+                apply_gain, applied_step, len(AGC_GAIN_TABLE) - 1,
             )

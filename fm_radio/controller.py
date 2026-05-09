@@ -398,6 +398,7 @@ class FMReceiverController:
             self.logger.info("Cleaning up FM Receiver Controller")
             self.sdr_receiver.stop()
             self.audio_output.cleanup()
+            self.auto_gain.stop()
             self.logger.info("FM Receiver cleanup completed")
             print("Exiting FM Receiver.")
         except Exception as e:

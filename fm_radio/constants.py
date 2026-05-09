@@ -178,3 +178,5 @@ AGC_WEAK_THRESHOLD = 0.3            # Peak |IQ| below this -> weak signal
 AGC_CLIP_COUNT = 3                  # Consecutive clipping blocks to step down
 AGC_WEAK_COUNT = 15                 # Consecutive weak blocks to step up
 AGC_HOLDOFF_BLOCKS = 10             # Blocks to skip after a gain change
+AGC_WARMUP_SEC = 2.0                # Suppress AGC for this long after startup
+                                    # (Numba JIT compile + filter settling)
