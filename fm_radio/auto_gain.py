@@ -8,6 +8,7 @@ strength.
 from __future__ import annotations
 
 import threading
+import time
 import logging
 from typing import TYPE_CHECKING
 
@@ -180,10 +181,24 @@ class AutoGainController:
                 self._clip_counter = 0
                 self._weak_counter = 0
 
-        # Apply gain change outside the lock
+        # Apply gain change outside the lock.
+        # The RTL-SDR set_gain() is a synchronous USB control transfer
+        # which can block 50-200 ms; this blocking happens on the
+        # processing thread so we instrument it to identify whether it
+        # is the cause of audio dropouts.
         if apply_gain is not None:
+            t0 = time.perf_counter()
             self._sdr.set_gain(apply_gain)
-            self.logger.info(
-                f"Auto gain adjusted to {apply_gain:.1f} dB "
-                f"(step {self._gain_index}/{len(AGC_GAIN_TABLE) - 1})"
+            dt_ms = (time.perf_counter() - t0) * 1000.0
+            level = (
+                logging.WARNING if dt_ms >= 20.0 else logging.INFO
+            )
+            self.logger.log(
+                level,
+                "Auto gain adjusted to %.1f dB (step %d/%d) "
+                "set_gain_blocked=%.1fms",
+                apply_gain,
+                self._gain_index,
+                len(AGC_GAIN_TABLE) - 1,
+                dt_ms,
             )

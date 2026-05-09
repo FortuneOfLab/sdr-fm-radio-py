@@ -63,10 +63,49 @@ Command Examples (during execution):
 from __future__ import annotations
 
 import sys
+import gc
+import time
 import logging
 
 from fm_radio.logging_config import setup_logging, logger
 from fm_radio.controller import FMReceiverController
+
+
+def _install_gc_monitor() -> None:
+    """Install a GC callback that logs Gen2 collections.
+
+    Generation-2 collections can pause the interpreter for tens of
+    milliseconds, long enough to back up the SDR data_queue and cause
+    audio dropouts.  Logging the timing of Gen2 events lets us
+    correlate them with observed audio glitches.
+    """
+    state: dict[str, float] = {
+        "last_t": time.perf_counter(),
+        "gc_start": 0.0,
+    }
+    gc_logger = logging.getLogger("fm_receiver.GCMonitor")
+
+    def _gc_cb(phase: str, info: dict) -> None:
+        gen = info.get("generation", 0)
+        if gen < 2:
+            return
+        if phase == "start":
+            state["gc_start"] = time.perf_counter()
+            return
+        if phase != "stop":
+            return
+        now = time.perf_counter()
+        gc_dt_ms = (now - state["gc_start"]) * 1000.0
+        elapsed_since = now - state["last_t"]
+        gc_logger.warning(
+            "GC Gen%d: pause=%.1fms collected=%d uncollectable=%d "
+            "since_last_gen2=%.1fs",
+            gen, gc_dt_ms, info.get("collected", -1),
+            info.get("uncollectable", -1), elapsed_since,
+        )
+        state["last_t"] = now
+
+    gc.callbacks.append(_gc_cb)
 
 
 def main() -> None:
@@ -95,6 +134,9 @@ def main() -> None:
         logger.info("=" * 60)
         logger.info("FM Receiver System Starting")
         logger.info("=" * 60)
+        # Install GC monitor for diagnostics (audio-dropout investigation).
+        _install_gc_monitor()
+        logger.info("GC monitor installed (Gen2 collections will be logged)")
     else:
         # Disable all logging by setting to CRITICAL+1
         logging.disable(logging.CRITICAL)

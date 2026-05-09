@@ -46,6 +46,79 @@ from fm_radio.constants import (
 )
 
 
+# Per-block timing budget. SDR delivers a 16384-sample block every
+# ~16 ms (at 1.024 Msps) so any block taking longer than that risks
+# backing up the SDR data_queue.
+_BLOCK_BUDGET_SEC: float = 0.016
+# Slow-block log threshold: log immediately if a block exceeds this.
+_SLOW_BLOCK_THRESHOLD_SEC: float = 0.020
+# Periodic summary interval (real time, seconds).
+_PROFILE_SUMMARY_INTERVAL_SEC: float = 60.0
+
+
+class _BlockProfiler:
+    """Lightweight per-block timing profiler for the processing loop.
+
+    Tracks per-block processing time and SDR queue depth.  Logs a
+    summary every ``_PROFILE_SUMMARY_INTERVAL_SEC`` and warns
+    immediately on any block exceeding ``_SLOW_BLOCK_THRESHOLD_SEC``.
+    """
+
+    def __init__(self, logger: logging.Logger, q_max_capacity: int) -> None:
+        self._log = logger
+        self._q_capacity = q_max_capacity
+        self._t0_session = time.perf_counter()
+        self._t_last_summary = self._t0_session
+        # Window stats (reset every summary)
+        self._win_blocks = 0
+        self._win_sum_dt = 0.0
+        self._win_max_dt = 0.0
+        self._win_slow_blocks = 0
+        self._win_q_max = 0
+        # Cumulative
+        self._tot_blocks = 0
+        self._tot_slow_blocks = 0
+
+    def record(self, dt_sec: float, q_depth: int) -> None:
+        self._win_blocks += 1
+        self._tot_blocks += 1
+        self._win_sum_dt += dt_sec
+        if dt_sec > self._win_max_dt:
+            self._win_max_dt = dt_sec
+        if q_depth > self._win_q_max:
+            self._win_q_max = q_depth
+        if dt_sec >= _SLOW_BLOCK_THRESHOLD_SEC:
+            self._win_slow_blocks += 1
+            self._tot_slow_blocks += 1
+            elapsed = time.perf_counter() - self._t0_session
+            self._log.warning(
+                "BlockProfile: SLOW BLOCK dt=%.1fms q_depth=%d/%d "
+                "session_t=%.1fs (%.2fmin) total_slow=%d",
+                dt_sec * 1000.0, q_depth, self._q_capacity,
+                elapsed, elapsed / 60.0, self._tot_slow_blocks,
+            )
+
+        now = time.perf_counter()
+        if now - self._t_last_summary >= _PROFILE_SUMMARY_INTERVAL_SEC:
+            blocks = max(self._win_blocks, 1)
+            avg_ms = self._win_sum_dt * 1000.0 / blocks
+            elapsed = now - self._t0_session
+            self._log.info(
+                "BlockProfile: t=%.0fs (%.1fmin) blocks=%d avg=%.2fms "
+                "max=%.1fms slow_in_window=%d q_max=%d/%d total_slow=%d",
+                elapsed, elapsed / 60.0,
+                self._win_blocks, avg_ms, self._win_max_dt * 1000.0,
+                self._win_slow_blocks, self._win_q_max, self._q_capacity,
+                self._tot_slow_blocks,
+            )
+            self._t_last_summary = now
+            self._win_blocks = 0
+            self._win_sum_dt = 0.0
+            self._win_max_dt = 0.0
+            self._win_slow_blocks = 0
+            self._win_q_max = 0
+
+
 class FMReceiverController:
     """
     FM Receiver Controller
@@ -230,6 +303,9 @@ class FMReceiverController:
         then add the resulting audio data to the output queue via AudioOutput.
         """
         self.logger.info("Processing thread started")
+        profiler = _BlockProfiler(
+            self.logger, self.sdr_receiver.data_queue.maxsize,
+        )
         try:
             while not self.quit_event.is_set():
                 try:
@@ -239,6 +315,10 @@ class FMReceiverController:
                 except Exception as e:
                     self.logger.error(f"Error getting IQ samples from queue: {e}")
                     continue
+
+                # Snapshot queue depth at the moment we pulled this block.
+                q_depth_after_get = self.sdr_receiver.data_queue.qsize()
+                t_block_start = time.perf_counter()
 
                 try:
                     # Auto gain adjustment (before demodulation)
@@ -262,6 +342,11 @@ class FMReceiverController:
                     self.logger.error(f"Error in processing thread: {e}", exc_info=True)
                     # Continue processing even if one block fails
                     continue
+                finally:
+                    profiler.record(
+                        time.perf_counter() - t_block_start,
+                        q_depth_after_get,
+                    )
         except Exception as e:
             self.logger.critical(f"Fatal error in processing thread: {e}", exc_info=True)
         finally:
