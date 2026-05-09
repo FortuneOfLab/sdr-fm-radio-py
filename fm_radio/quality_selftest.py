@@ -267,6 +267,9 @@ def _run_demod_diag_iq(
     subcarrier_phase_offset_deg: float | None = None,
     lr_high_max_gain: float | None = None,
     lr_super_high_max_gain: float | None = None,
+    side_nr_enable: bool | None = None,
+    side_nr_alpha_floor: float | None = None,
+    side_nr_beta: float | None = None,
 ) -> dict[str, np.ndarray]:
     """Run the demodulator and capture per-block diagnostics.
 
@@ -289,6 +292,12 @@ def _run_demod_diag_iq(
         demod.lr_high_max_gain = float(lr_high_max_gain)
     if lr_super_high_max_gain is not None:
         demod.lr_super_high_max_gain = float(lr_super_high_max_gain)
+    if side_nr_enable is not None:
+        demod.side_nr_enabled = bool(side_nr_enable)
+    if side_nr_alpha_floor is not None:
+        demod.side_nr.alpha_floor = float(side_nr_alpha_floor)
+    if side_nr_beta is not None:
+        demod.side_nr.beta = float(side_nr_beta)
 
     left_chunks: list[np.ndarray] = []
     right_chunks: list[np.ndarray] = []
@@ -781,6 +790,24 @@ def _parser() -> argparse.ArgumentParser:
         help="Override LR_SUPER_HIGH_MAX_GAIN ceiling for 12-15 kHz L-R "
              "(NaN=use constant). Lower values reduce HF stereo noise.",
     )
+    p.add_argument(
+        "--side-nr", dest="side_nr", action="store_true", default=None,
+        help="Enable side-channel STFT noise reducer (overrides constant)",
+    )
+    p.add_argument(
+        "--no-side-nr", dest="side_nr", action="store_false",
+        help="Disable side-channel STFT noise reducer",
+    )
+    p.add_argument(
+        "--side-nr-alpha-floor", type=float, default=float("nan"),
+        help="Side NR minimum Wiener gain in linear units "
+             "(0.15≈-16dB max attenuation). Higher = gentler.",
+    )
+    p.add_argument(
+        "--side-nr-beta", type=float, default=float("nan"),
+        help="Side NR over-subtraction factor (1.0=pure Wiener, "
+             ">1=more aggressive)",
+    )
     return p
 
 
@@ -838,6 +865,15 @@ def main() -> None:
             lr_super_high_max_gain=(
                 None if np.isnan(float(args.lr_super_high_max_gain))
                 else float(args.lr_super_high_max_gain)
+            ),
+            side_nr_enable=args.side_nr,
+            side_nr_alpha_floor=(
+                None if np.isnan(float(args.side_nr_alpha_floor))
+                else float(args.side_nr_alpha_floor)
+            ),
+            side_nr_beta=(
+                None if np.isnan(float(args.side_nr_beta))
+                else float(args.side_nr_beta)
             ),
         )
         stereo_diag = _run_demod_diag_iq(

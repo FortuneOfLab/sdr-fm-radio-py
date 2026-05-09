@@ -45,7 +45,7 @@ from fm_radio.interfaces import FMDemodulatorInterface
 from fm_radio.exceptions import DemodulationError
 from fm_radio.filters import (
     LowpassFilter, BandpassFilter, NotchFilter, DeemphasisIIRFilter,
-    StatefulResampler,
+    StatefulResampler, SideNoiseReducer, StreamAligner,
 )
 from fm_radio.pll import PLL
 from fm_radio.constants import (
@@ -87,6 +87,10 @@ from fm_radio.constants import (
     STEREO_BLEND_SMOOTHING,
     STEREO_HF_BLEND_PILOT_SNR_DB_HI, STEREO_HF_BLEND_PILOT_SNR_DB_LO,
     PILOT_NOTCH_FREQ, PILOT_NOTCH_Q,
+    SIDE_NR_ENABLE, SIDE_NR_FRAME, SIDE_NR_HOP,
+    SIDE_NR_ALPHA_FLOOR, SIDE_NR_BETA,
+    SIDE_NR_NOISE_DECAY_DB_PER_SEC,
+    SIDE_NR_LO_HZ, SIDE_NR_HI_HZ,
 )
 
 
@@ -215,6 +219,20 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         # to trade stereo width above 7 kHz for HF noise reduction).
         self.lr_high_max_gain: float = float(LR_HIGH_MAX_GAIN)
         self.lr_super_high_max_gain: float = float(LR_SUPER_HIGH_MAX_GAIN)
+
+        # --- Side-channel STFT noise reduction (post de-emphasis) ---
+        self.side_nr_enabled: bool = bool(SIDE_NR_ENABLE)
+        self.side_nr = SideNoiseReducer(
+            sample_rate=self.final_audio_rate,
+            frame=int(SIDE_NR_FRAME),
+            hop=int(SIDE_NR_HOP),
+            alpha_floor=float(SIDE_NR_ALPHA_FLOOR),
+            beta=float(SIDE_NR_BETA),
+            noise_decay_db_per_sec=float(SIDE_NR_NOISE_DECAY_DB_PER_SEC),
+            lo_hz=float(SIDE_NR_LO_HZ),
+            hi_hz=float(SIDE_NR_HI_HZ),
+        )
+        self.side_nr_mid_aligner = StreamAligner()
         self.diag_enable: bool = STEREO_DIAG_ENABLE
         self.diag_log_interval_blocks: int = STEREO_DIAG_LOG_INTERVAL_BLOCKS
         self._diag_counter: int = 0
@@ -516,6 +534,19 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         )
         left_48 = self.deemph_left.process(left_48)
         right_48 = self.deemph_right.process(right_48)
+
+        if self.side_nr_enabled:
+            mid = (0.5 * (left_48 + right_48)).astype(np.float32)
+            side = (0.5 * (left_48 - right_48)).astype(np.float32)
+            side_clean = self.side_nr.process(side)
+            mid_aligned = self.side_nr_mid_aligner.feed_and_take(
+                mid, side_clean.size,
+            )
+            n = min(mid_aligned.size, side_clean.size)
+            mid_aligned = mid_aligned[:n]
+            side_clean = side_clean[:n]
+            left_48 = (mid_aligned + side_clean).astype(np.float32)
+            right_48 = (mid_aligned - side_clean).astype(np.float32)
         return left_48, right_48
 
     def _demodulate_mono(self, composite: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -556,6 +587,8 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         self._pilot_mix_phase = 0.0
         self._pilot_phase_last = None
         self._diag_counter = 0
+        self.side_nr.reset()
+        self.side_nr_mid_aligner.reset()
         self._reset_subclass()
 
     @abstractmethod

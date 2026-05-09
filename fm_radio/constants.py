@@ -142,6 +142,22 @@ STEREO_HF_BLEND_PILOT_SNR_DB_HI = 35.0     # Above this -> full HF stereo width
 STEREO_HF_BLEND_PILOT_SNR_DB_LO = 15.0     # Below this -> configured MAX_GAIN damping
 
 # --------------------------------------------------
+# Side-channel STFT noise reducer (mid/side spectral suppression)
+# --------------------------------------------------
+# Operates on the (L-R)/2 path at the audio rate (post de-emphasis), leaving
+# the mid (L+R)/2 path untouched. Estimates the noise floor per FFT bin via
+# running minimum with leakage and applies a Wiener gain bounded by
+# SIDE_NR_ALPHA_FLOOR to limit musical-noise artefacts.
+SIDE_NR_ENABLE = True
+SIDE_NR_FRAME = 1024            # STFT frame size (samples at AUDIO_OUTPUT_RATE)
+SIDE_NR_HOP = 256               # STFT hop size (75% overlap)
+SIDE_NR_ALPHA_FLOOR = 0.30      # Minimum Wiener gain (linear). 0.30 ≈ -10 dB max attenuation
+SIDE_NR_BETA = 1.0              # Over-subtraction factor (1.0 = pure Wiener)
+SIDE_NR_NOISE_DECAY_DB_PER_SEC = 6.0  # Noise floor leakage rate (dB/sec)
+SIDE_NR_LO_HZ = 1500.0          # Lower edge of NR band (preserve low-frequency stereo)
+SIDE_NR_HI_HZ = 15000.0         # Upper edge of NR band
+
+# --------------------------------------------------
 # Pilot tone notch filter (19 kHz removal)
 # --------------------------------------------------
 PILOT_NOTCH_FREQ = 19000.0          # Notch centre frequency (Hz)
