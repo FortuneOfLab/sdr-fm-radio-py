@@ -28,6 +28,7 @@
 from __future__ import annotations
 
 import queue
+import time
 import wave
 import threading
 import logging
@@ -42,7 +43,12 @@ from fm_radio.constants import (
     AUDIO_OUTPUT_RATE, AUDIO_FRAMES_PER_BUFFER, AUDIO_QUEUE_MAXSIZE,
     AUDIO_CHANNELS, AUDIO_ENQUEUE_TIMEOUT,
     RECORD_SAMPLE_WIDTH, RECORD_MAX_INT16,
+    RECORD_QUEUE_MAXSIZE,
 )
+
+
+# Sentinel placed in the recording queue to wake the worker for shutdown.
+_RECORD_WORKER_SHUTDOWN = object()
 
 
 class AudioOutput(AudioOutputInterface):
@@ -67,6 +73,24 @@ class AudioOutput(AudioOutputInterface):
         self.record_lock: threading.Lock = threading.Lock()
         self._buffer_deque: deque[np.ndarray] = deque()
         self._buffer_len: int = 0
+
+        # Asynchronous recording worker: keeps the realtime processing
+        # thread off disk I/O.  WAV writes are buffered through Python's
+        # io stack and the OS page cache, both of which can stall for
+        # 100-1000 ms (Defender scans, dirty-page flush, sync apps);
+        # those stalls happen here in the worker rather than in
+        # FMReceiverController.processing_thread.
+        self._record_q: queue.Queue[object] = queue.Queue(
+            maxsize=RECORD_QUEUE_MAXSIZE,
+        )
+        self._record_worker_stop: threading.Event = threading.Event()
+        self._record_drop_count: int = 0
+        self._record_worker: threading.Thread = threading.Thread(
+            target=self._record_worker_loop,
+            name='AudioRecordWorker',
+            daemon=True,
+        )
+        self._record_worker.start()
 
         try:
             self.pyaudio_instance = pyaudio.PyAudio()
@@ -144,7 +168,7 @@ class AudioOutput(AudioOutputInterface):
             self.logger.error(f"Error enqueueing audio: {e}", exc_info=True)
 
     def start_recording(self, filename: str, channels: int = 2) -> None:
-        """Start recording audio.
+        """Start recording audio (asynchronous via worker thread).
 
         Args:
             filename: Filename to save the WAV file.
@@ -154,6 +178,10 @@ class AudioOutput(AudioOutputInterface):
             if self.recording:
                 self.logger.warning("Already recording")
                 return
+            # Drop any stale items left in the queue from a previous
+            # session so the new recording starts clean.
+            self._drain_record_queue()
+            self._record_drop_count = 0
             try:
                 wf = wave.open(filename, 'wb')
                 wf.setnchannels(channels)
@@ -167,35 +195,97 @@ class AudioOutput(AudioOutputInterface):
                 raise RecordingError(f"Recording start failed: {e}") from e
 
     def stop_recording(self) -> None:
-        """Stop recording and close the file."""
+        """Stop recording, drain pending writes, and close the file."""
         with self.record_lock:
-            if self.recording and self.record_wave is not None:
+            if not self.recording:
+                self.logger.debug("stop_recording called but not currently recording")
+                return
+            # Stop further enqueues from the realtime path immediately.
+            self.recording = False
+
+        # Wait (up to 5 s) for the worker to flush any backlog before
+        # closing the file.  The worker checks the queue every 0.2 s.
+        deadline = time.perf_counter() + 5.0
+        while time.perf_counter() < deadline:
+            if self._record_q.empty():
+                break
+            time.sleep(0.02)
+
+        with self.record_lock:
+            if self.record_wave is not None:
                 try:
                     self.record_wave.close()
-                    self.logger.info("Recording stopped")
+                    self.logger.info(
+                        "Recording stopped (drops during session: %d)",
+                        self._record_drop_count,
+                    )
                 except (OSError, wave.Error) as e:
-                    self.logger.error(f"Error closing recording file: {e}", exc_info=True)
+                    self.logger.error(
+                        f"Error closing recording file: {e}", exc_info=True,
+                    )
                 finally:
                     self.record_wave = None
-                    self.recording = False
-            else:
-                self.logger.debug("stop_recording called but not currently recording")
 
     def record(self, stereo_audio: np.ndarray) -> None:
-        """Write audio data to file if recording.
+        """Hand stereo audio to the recording worker.
+
+        Non-blocking from the realtime processing thread's point of view:
+        the queue is bounded, and the slow disk-write happens in the
+        worker thread.  When the queue is full (sustained disk stall
+        longer than RECORD_QUEUE_MAXSIZE chunks) the chunk is dropped
+        and a warning is logged.
 
         Args:
             stereo_audio: Stereo audio data.
         """
-        with self.record_lock:
-            if self.recording and self.record_wave is not None:
+        if not self.recording:
+            return
+        try:
+            self._record_q.put_nowait(stereo_audio)
+        except queue.Full:
+            self._record_drop_count += 1
+            self.logger.warning(
+                "Record queue full, dropping chunk (drops=%d, qsize=%d/%d) "
+                "— disk write fell behind realtime",
+                self._record_drop_count,
+                self._record_q.qsize(),
+                self._record_q.maxsize,
+            )
+
+    # ------------------------------------------------------------------
+    # Recording worker (runs disk writes off the realtime thread)
+    # ------------------------------------------------------------------
+
+    def _drain_record_queue(self) -> None:
+        """Drop everything currently sitting in the record queue."""
+        try:
+            while True:
+                self._record_q.get_nowait()
+        except queue.Empty:
+            pass
+
+    def _record_worker_loop(self) -> None:
+        while not self._record_worker_stop.is_set():
+            try:
+                item = self._record_q.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            if item is _RECORD_WORKER_SHUTDOWN:
+                break
+            stereo_audio = item
+            with self.record_lock:
+                if not self.recording or self.record_wave is None:
+                    # Recording was stopped after this chunk was queued;
+                    # discard rather than write to a closed file.
+                    continue
                 try:
-                    # Clip to [-1,1] before converting to int16 to avoid overflow/distortion
                     clipped = np.clip(stereo_audio, -1.0, 1.0)
                     int16_audio = np.int16(clipped * RECORD_MAX_INT16)
                     self.record_wave.writeframes(int16_audio.tobytes())
                 except (OSError, wave.Error) as e:
-                    self.logger.error(f"Error writing audio to file: {e}", exc_info=True)
+                    self.logger.error(
+                        f"Error writing audio to file: {e}", exc_info=True,
+                    )
 
     def cleanup(self) -> None:
         """Stop audio stream and terminate PyAudio instance."""
@@ -204,6 +294,15 @@ class AudioOutput(AudioOutputInterface):
             if self.recording:
                 self.logger.info("Stopping active recording during cleanup")
                 self.stop_recording()
+
+            # Tell the recording worker to exit.
+            self._record_worker_stop.set()
+            try:
+                self._record_q.put_nowait(_RECORD_WORKER_SHUTDOWN)
+            except queue.Full:
+                pass
+            if self._record_worker.is_alive():
+                self._record_worker.join(timeout=1.0)
 
             self.stream.stop_stream()
             self.stream.close()

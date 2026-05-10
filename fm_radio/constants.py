@@ -115,6 +115,10 @@ AUDIO_ENQUEUE_TIMEOUT = 0.01       # Timeout for audio queue put (seconds)
 # --------------------------------------------------
 RECORD_SAMPLE_WIDTH = 2             # 16-bit PCM sample width (bytes)
 RECORD_MAX_INT16 = 32767            # Max value for int16 conversion
+RECORD_QUEUE_MAXSIZE = 200          # Max queued recording chunks (~3.2 s at
+                                    # 48 kHz / 768-sample chunks); absorbs
+                                    # disk-write stalls so the realtime path
+                                    # is not blocked by file I/O
 
 # --------------------------------------------------
 # Demodulator
