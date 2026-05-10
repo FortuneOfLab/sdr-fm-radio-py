@@ -23,13 +23,32 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 #
-"""
-FM Receiver System - Entry point wrapper.
+"""Logging configuration for the FM receiver system."""
 
-See fm_radio/__main__.py for full documentation and usage examples.
-"""
+from __future__ import annotations
 
-from fm_radio.__main__ import main
+import logging
 
-if __name__ == '__main__':
-    main()
+
+def setup_logging(log_level: int = logging.INFO, log_file: str | None = None) -> None:
+    """Setup logging configuration for the FM receiver system.
+
+    Args:
+        log_level: Logging level (default: INFO).
+        log_file: Optional log file path. If None, logs to console only.
+    """
+    log_format: str = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+
+    if log_file:
+        handlers.append(logging.FileHandler(log_file))
+
+    logging.basicConfig(
+        level=log_level,
+        format=log_format,
+        handlers=handlers,
+    )
+
+
+# Initialize logger
+logger: logging.Logger = logging.getLogger('fm_receiver')
