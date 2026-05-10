@@ -27,6 +27,7 @@
 
 from __future__ import annotations
 
+import os
 import queue
 import time
 import wave
@@ -43,7 +44,7 @@ from fm_radio.constants import (
     AUDIO_OUTPUT_RATE, AUDIO_FRAMES_PER_BUFFER, AUDIO_QUEUE_MAXSIZE,
     AUDIO_CHANNELS, AUDIO_ENQUEUE_TIMEOUT,
     RECORD_SAMPLE_WIDTH, RECORD_MAX_INT16,
-    RECORD_QUEUE_MAXSIZE,
+    RECORD_QUEUE_MAXSIZE, AUDIO_RECORD_ROTATE_THRESHOLD_BYTES,
 )
 
 
@@ -99,6 +100,14 @@ class AudioOutput(AudioOutputInterface):
         self._flush_event: threading.Event = threading.Event()
         self._record_worker_stop: threading.Event = threading.Event()
         self._record_drop_count: int = 0
+        # State for 4-GiB WAV rotation (set in start_recording, used
+        # by the worker).  At 48 kHz / 16-bit / 2 ch this only matters
+        # for ~6+ hour recordings, but the underlying wave.writeframes
+        # crash mode is identical to the IQ recording path.
+        self._record_base_path: str | None = None
+        self._record_part_index: int = 0
+        self._record_bytes_written: int = 0
+        self._record_channels: int = AUDIO_CHANNELS
         self._record_worker: threading.Thread = threading.Thread(
             target=self._record_worker_loop,
             name='AudioRecordWorker',
@@ -226,6 +235,10 @@ class AudioOutput(AudioOutputInterface):
             self._record_drop_count = 0
             with self.record_lock:
                 self.record_wave = wf
+                self._record_base_path = filename
+                self._record_part_index = 0
+                self._record_bytes_written = 0
+                self._record_channels = channels
             self.recording = True
         self.logger.info(f"Recording started: {filename}")
 
@@ -265,12 +278,14 @@ class AudioOutput(AudioOutputInterface):
                 )
 
         with self.record_lock:
+            parts_count = self._record_part_index + 1
             if self.record_wave is not None:
                 try:
                     self.record_wave.close()
                     self.logger.info(
-                        "Recording stopped (drops during session: %d)",
-                        self._record_drop_count,
+                        "Recording stopped (drops during session: %d, "
+                        "parts: %d)",
+                        self._record_drop_count, parts_count,
                     )
                 except (OSError, wave.Error) as e:
                     self.logger.error(
@@ -320,6 +335,67 @@ class AudioOutput(AudioOutputInterface):
         except queue.Empty:
             pass
 
+    @staticmethod
+    def _make_rotated_record_path(base_path: str, part_index: int) -> str:
+        """Build the rotated-file path ``foo.partNNN.wav`` from ``foo.wav``."""
+        root, ext = os.path.splitext(base_path)
+        return f"{root}.part{part_index:03d}{ext}"
+
+    def _rotate_record(self, current_bytes: int) -> bool:
+        """Close current audio WAV and open the next part file.
+
+        Caller must hold ``self.record_lock``.  Mirror of
+        ``SDRReceiver._rotate_iq_recording`` — same crash mode (wave's
+        4-GiB header limit), same fix.
+
+        Returns:
+            True if rotation succeeded, False otherwise.
+        """
+        prev_wave = self.record_wave
+        prev_path = (
+            self._make_rotated_record_path(
+                self._record_base_path, self._record_part_index,
+            ) if self._record_part_index > 0
+            else self._record_base_path
+        )
+        try:
+            if prev_wave is not None:
+                prev_wave.close()
+        except (OSError, wave.Error) as e:
+            self.logger.error(
+                "Error closing audio part file %s during rotation: %s",
+                prev_path, e, exc_info=True,
+            )
+        self._record_part_index += 1
+        next_path = self._make_rotated_record_path(
+            self._record_base_path, self._record_part_index,
+        )
+        try:
+            wf = wave.open(next_path, 'wb')
+            # Channel count was set on the first file (typically 2);
+            # preserve by querying the previous file's channel count
+            # via the base path.  We capture it from the first wave_open
+            # at start time to avoid re-reading the closed file.
+            wf.setnchannels(self._record_channels)
+            wf.setsampwidth(RECORD_SAMPLE_WIDTH)
+            wf.setframerate(int(self.output_rate))
+        except (OSError, wave.Error) as e:
+            self.logger.error(
+                "Failed to open rotated audio part file %s: %s — recording "
+                "will stop accepting new chunks", next_path, e, exc_info=True,
+            )
+            self.record_wave = None
+            return False
+        self.record_wave = wf
+        self._record_bytes_written = 0
+        self.logger.info(
+            "Audio recording rotated to part %d: %s "
+            "(previous part wrote ~%.2f GB)",
+            self._record_part_index, next_path,
+            current_bytes / 1e9,
+        )
+        return True
+
     def _record_worker_loop(self) -> None:
         while not self._record_worker_stop.is_set():
             try:
@@ -336,19 +412,36 @@ class AudioOutput(AudioOutputInterface):
                 self._flush_event.set()
                 continue
             stereo_audio = item
-            with self.record_lock:
-                if self.record_wave is None:
-                    # Wave file already closed (e.g. after a flush
-                    # sentinel) — drop the chunk.
-                    continue
-                try:
+            # Catch any exception so the worker thread does not die
+            # mid-recording (e.g. the historical struct.error from the
+            # wave module's 4-GiB header limit).  Rotation below
+            # prevents that root cause but the broad catch is kept as
+            # a safety net.
+            try:
+                # int16 PCM size: each sample is 2 bytes regardless of
+                # interleaving; ``stereo_audio`` already encodes both
+                # channels per sample slot in flat float32 form.
+                chunk_bytes = int(stereo_audio.size) * 2
+                with self.record_lock:
+                    if self.record_wave is None:
+                        # Wave file already closed (e.g. after a flush
+                        # sentinel) — drop the chunk.
+                        continue
+                    if (self._record_bytes_written + chunk_bytes
+                            > AUDIO_RECORD_ROTATE_THRESHOLD_BYTES):
+                        if not self._rotate_record(
+                            self._record_bytes_written,
+                        ):
+                            continue
                     clipped = np.clip(stereo_audio, -1.0, 1.0)
                     int16_audio = np.int16(clipped * RECORD_MAX_INT16)
                     self.record_wave.writeframes(int16_audio.tobytes())
-                except (OSError, wave.Error) as e:
-                    self.logger.error(
-                        f"Error writing audio to file: {e}", exc_info=True,
-                    )
+                    self._record_bytes_written += chunk_bytes
+            except Exception as e:
+                self.logger.error(
+                    "Unexpected error writing audio to file: %s", e,
+                    exc_info=True,
+                )
 
     def cleanup(self) -> None:
         """Stop audio stream and terminate PyAudio instance."""

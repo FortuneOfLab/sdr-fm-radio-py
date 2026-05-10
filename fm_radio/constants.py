@@ -119,6 +119,14 @@ RECORD_QUEUE_MAXSIZE = 200          # Max queued recording chunks (~3.2 s at
                                     # 48 kHz / 768-sample chunks); absorbs
                                     # disk-write stalls so the realtime path
                                     # is not blocked by file I/O
+AUDIO_RECORD_ROTATE_THRESHOLD_BYTES = 4_000_000_000
+                                    # Same WAV 4-GiB limit as the IQ path
+                                    # (see IQ_RECORD_ROTATE_THRESHOLD_BYTES
+                                    # below).  At 48 kHz / 16-bit / 2 ch =
+                                    # 192 KB/s a single file fills in ~6.2
+                                    # hours; rotate to a new file before
+                                    # ``wave.writeframes`` overflows its
+                                    # 32-bit data-size header field.
 IQ_RECORD_QUEUE_MAXSIZE = 200       # Max queued IQ blocks for async IQ-WAV
                                     # recording (~3.2 s at 1.024 Msps /
                                     # 16384-sample blocks).  Each entry is a
