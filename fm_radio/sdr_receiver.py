@@ -27,6 +27,7 @@
 
 from __future__ import annotations
 
+import os
 import queue
 import logging
 import time
@@ -41,7 +42,7 @@ from fm_radio.exceptions import SDRDeviceError, RecordingError
 from fm_radio.constants import (
     SDR_SAMPLE_RATE, SDR_CENTER_FREQ_DEFAULT,
     SDR_BLOCK_SIZE, SDR_QUEUE_MAXSIZE,
-    IQ_RECORD_QUEUE_MAXSIZE,
+    IQ_RECORD_QUEUE_MAXSIZE, IQ_RECORD_ROTATE_THRESHOLD_BYTES,
 )
 
 
@@ -90,6 +91,15 @@ class SDRReceiver(SDRReceiverInterface):
         )
         self._iq_flush_event: threading.Event = threading.Event()
         self._iq_record_drop_count: int = 0
+        # State for 4-GiB WAV rotation (set in start_iq_recording, used
+        # by the worker).  ``_iq_record_base_path`` is the path the
+        # caller supplied; ``_iq_record_part_index`` is 0 for the first
+        # file, 1+ for rotated continuations; ``_iq_record_bytes_written``
+        # tracks the data chunk size of the current file so we can
+        # rotate before crossing the 2^32-byte WAV header limit.
+        self._iq_record_base_path: str | None = None
+        self._iq_record_part_index: int = 0
+        self._iq_record_bytes_written: int = 0
         self._iq_record_worker_stop: threading.Event = threading.Event()
         self._iq_record_worker: threading.Thread = threading.Thread(
             target=self._iq_record_worker_loop,
@@ -252,6 +262,9 @@ class SDRReceiver(SDRReceiverInterface):
             self._iq_record_drop_count = 0
             with self.iq_record_lock:
                 self.iq_record_wave = wf
+                self._iq_record_base_path = filename
+                self._iq_record_part_index = 0
+                self._iq_record_bytes_written = 0
             self.iq_recording = True
         self.logger.info(f"IQ recording started: {filename}")
 
@@ -291,12 +304,14 @@ class SDRReceiver(SDRReceiverInterface):
                 )
 
         with self.iq_record_lock:
+            parts_count = self._iq_record_part_index + 1
             if self.iq_record_wave is not None:
                 try:
                     self.iq_record_wave.close()
                     self.logger.info(
-                        "IQ recording stopped (drops during session: %d)",
-                        self._iq_record_drop_count,
+                        "IQ recording stopped (drops during session: %d, "
+                        "parts: %d)",
+                        self._iq_record_drop_count, parts_count,
                     )
                 except (OSError, wave.Error) as e:
                     self.logger.error(
@@ -317,6 +332,67 @@ class SDRReceiver(SDRReceiverInterface):
         except queue.Empty:
             pass
 
+    @staticmethod
+    def _make_rotated_iq_path(base_path: str, part_index: int) -> str:
+        """Build the rotated-file path ``foo.partNNN.wav`` from ``foo.wav``."""
+        root, ext = os.path.splitext(base_path)
+        return f"{root}.part{part_index:03d}{ext}"
+
+    def _rotate_iq_recording(self, current_bytes: int) -> bool:
+        """Close the current IQ-WAV and open the next part file.
+
+        Caller must hold ``self.iq_record_lock``.  On success, swaps
+        ``self.iq_record_wave`` to the new file and resets the byte
+        counter.  On any failure leaves ``self.iq_record_wave = None``
+        so subsequent worker iterations drop chunks rather than crash;
+        the user's ``stop_iq_recording`` will still close cleanly.
+
+        Returns:
+            True if rotation succeeded, False otherwise.
+        """
+        prev_wave = self.iq_record_wave
+        prev_path = (
+            self._make_rotated_iq_path(
+                self._iq_record_base_path, self._iq_record_part_index,
+            ) if self._iq_record_part_index > 0
+            else self._iq_record_base_path
+        )
+        try:
+            if prev_wave is not None:
+                prev_wave.close()
+        except (OSError, wave.Error) as e:
+            self.logger.error(
+                "Error closing IQ part file %s during rotation: %s",
+                prev_path, e, exc_info=True,
+            )
+        # Bump part index and open the next file.
+        self._iq_record_part_index += 1
+        next_path = self._make_rotated_iq_path(
+            self._iq_record_base_path, self._iq_record_part_index,
+        )
+        try:
+            wf = wave.open(next_path, 'wb')
+            wf.setnchannels(2)
+            wf.setsampwidth(2)
+            wf.setframerate(int(self.sample_rate))
+        except (OSError, wave.Error) as e:
+            self.logger.error(
+                "Failed to open rotated IQ part file %s: %s — recording "
+                "will stop accepting new blocks", next_path, e,
+                exc_info=True,
+            )
+            self.iq_record_wave = None
+            return False
+        self.iq_record_wave = wf
+        self._iq_record_bytes_written = 0
+        self.logger.info(
+            "IQ recording rotated to part %d: %s "
+            "(previous part wrote ~%.2f GB)",
+            self._iq_record_part_index, next_path,
+            current_bytes / 1e9,
+        )
+        return True
+
     def _iq_record_worker_loop(self) -> None:
         while not self._iq_record_worker_stop.is_set():
             try:
@@ -331,21 +407,41 @@ class SDRReceiver(SDRReceiverInterface):
                 self._iq_flush_event.set()
                 continue
             iq = item
-            with self.iq_record_lock:
-                if self.iq_record_wave is None:
-                    # File already closed; drop the block.
-                    continue
-                try:
+            # Catch *any* exception so the worker thread does not die
+            # mid-recording — historically struct.error from the wave
+            # module's 4-GiB header limit killed this thread, leaving
+            # subsequent IQ blocks silently dropped.  Rotation below
+            # prevents that root cause but the broad catch is kept as
+            # a safety net for unforeseen corner cases.
+            try:
+                # Each IQ block becomes ``size * 2 channels * 2 bytes``.
+                chunk_bytes = int(iq.size) * 2 * 2
+                with self.iq_record_lock:
+                    if self.iq_record_wave is None:
+                        # File already closed; drop the block.
+                        continue
+                    # Rotate before writing if this chunk would push
+                    # the current file past the WAV 4-GiB limit.
+                    if (self._iq_record_bytes_written + chunk_bytes
+                            > IQ_RECORD_ROTATE_THRESHOLD_BYTES):
+                        if not self._rotate_iq_recording(
+                            self._iq_record_bytes_written,
+                        ):
+                            continue
                     clipped_i = np.clip(iq.real, -1.0, 1.0)
                     clipped_q = np.clip(iq.imag, -1.0, 1.0)
                     iq_interleaved = np.empty(iq.size * 2, dtype=np.int16)
                     iq_interleaved[0::2] = np.int16(clipped_i * 32767.0)
                     iq_interleaved[1::2] = np.int16(clipped_q * 32767.0)
                     self.iq_record_wave.writeframes(iq_interleaved.tobytes())
-                except (OSError, wave.Error) as e:
-                    self.logger.error(
-                        f"Error writing IQ to file: {e}", exc_info=True,
-                    )
+                    self._iq_record_bytes_written += chunk_bytes
+            except Exception as e:
+                self.logger.error(
+                    "Unexpected error writing IQ to file: %s", e,
+                    exc_info=True,
+                )
+                # Drop the failed block and keep the worker alive; the
+                # CLI can still call stop_iq_recording later.
 
     def start(self) -> None:
         """Start asynchronous sample retrieval."""

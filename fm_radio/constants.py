@@ -124,6 +124,17 @@ IQ_RECORD_QUEUE_MAXSIZE = 200       # Max queued IQ blocks for async IQ-WAV
                                     # 16384-sample blocks).  Each entry is a
                                     # complex64 array (~128 kB) so the cap
                                     # bounds peak memory at ~26 MB.
+IQ_RECORD_ROTATE_THRESHOLD_BYTES = 4_000_000_000
+                                    # WAV format caps the data chunk at
+                                    # 2^32 - 1 bytes (4 GiB) and Python's
+                                    # wave module raises struct.error past
+                                    # that. At 1.024 Msps / 16-bit IQ the
+                                    # rate is ~4 MB/s so a single file fills
+                                    # in ~16 min; rotate to a new file once
+                                    # the next chunk would push us above
+                                    # this threshold.  Leaves ~290 MB of
+                                    # headroom under the hard limit for
+                                    # the header patch.
 
 # --------------------------------------------------
 # Demodulator
