@@ -27,6 +27,7 @@
 
 from __future__ import annotations
 
+import os
 import queue
 import time
 import wave
@@ -43,7 +44,7 @@ from fm_radio.constants import (
     AUDIO_OUTPUT_RATE, AUDIO_FRAMES_PER_BUFFER, AUDIO_QUEUE_MAXSIZE,
     AUDIO_CHANNELS, AUDIO_ENQUEUE_TIMEOUT,
     RECORD_SAMPLE_WIDTH, RECORD_MAX_INT16,
-    RECORD_QUEUE_MAXSIZE,
+    RECORD_QUEUE_MAXSIZE, AUDIO_RECORD_ROTATE_THRESHOLD_BYTES,
 )
 
 
@@ -93,12 +94,25 @@ class AudioOutput(AudioOutputInterface):
         # queue.put_nowait); the worker does NOT take this lock so
         # disk-write stalls in the worker do not propagate here.
         self._enqueue_lock: threading.Lock = threading.Lock()
+        # Serialises concurrent ``start_recording`` calls so only one
+        # thread reaches ``wave.open`` per session.  Distinct from
+        # ``_enqueue_lock`` so the realtime path (``record()``) is
+        # never blocked during the slow file open.
+        self._start_lock: threading.Lock = threading.Lock()
         # Set by the worker when it reaches the flush sentinel so
         # stop_recording() can close the wave file only after every
         # queued chunk has actually been written.
         self._flush_event: threading.Event = threading.Event()
         self._record_worker_stop: threading.Event = threading.Event()
         self._record_drop_count: int = 0
+        # State for 4-GiB WAV rotation (set in start_recording, used
+        # by the worker).  At 48 kHz / 16-bit / 2 ch this only matters
+        # for ~6+ hour recordings, but the underlying wave.writeframes
+        # crash mode is identical to the IQ recording path.
+        self._record_base_path: str | None = None
+        self._record_part_index: int = 0
+        self._record_bytes_written: int = 0
+        self._record_channels: int = AUDIO_CHANNELS
         self._record_worker: threading.Thread = threading.Thread(
             target=self._record_worker_loop,
             name='AudioRecordWorker',
@@ -184,50 +198,56 @@ class AudioOutput(AudioOutputInterface):
     def start_recording(self, filename: str, channels: int = 2) -> None:
         """Start recording audio (asynchronous via worker thread).
 
-        ``wave.open()`` is performed *outside* ``_enqueue_lock``: that
-        lock is also taken by the realtime ``record()`` path for every
-        audio block, so holding it during a (potentially slow) file
-        open would propagate the open's disk-I/O cost back into the
-        realtime thread — exactly the stall the worker-thread design
-        is meant to eliminate.  The lock is then taken only briefly
-        to flip ``self.recording`` and install the wave handle.
+        Thread safety design:
+          - ``_start_lock`` serialises concurrent ``start_recording``
+            callers, so only the winner reaches ``wave.open`` and
+            losers see ``self.recording = True`` and return without
+            touching their target path.  The realtime ``record()``
+            path does not take this lock, so the slow ``wave.open``
+            call inside it does not block audio writes.
+          - ``_enqueue_lock`` is taken only briefly inside that, to
+            atomically drain stale queue items, install the wave
+            handle and flip ``self.recording``.
 
         Args:
             filename: Filename to save the WAV file.
             channels: Number of channels.
         """
-        # Open the wave file before touching any realtime-path lock.
-        try:
-            wf = wave.open(filename, 'wb')
-            wf.setnchannels(channels)
-            wf.setsampwidth(RECORD_SAMPLE_WIDTH)
-            wf.setframerate(int(self.output_rate))
-        except (OSError, wave.Error) as e:
-            self.logger.error(f"Recording start failed: {e}", exc_info=True)
-            raise RecordingError(f"Recording start failed: {e}") from e
-
-        # Atomic state transition: claim the recording slot, drop any
-        # stale items in the queue, install the wave handle, flip the
-        # flag.  No disk I/O happens under this lock.
-        with self._enqueue_lock:
+        # Serialise all start callers — the wave.open below is the
+        # only place that can truncate the target file, and we want
+        # exactly one caller per session to reach it.
+        with self._start_lock:
             if self.recording:
-                # Lost a race to another start_recording call.
                 self.logger.warning(
-                    "Already recording; closing the file we just "
-                    "opened (%s)", filename,
+                    "Already recording; ignoring duplicate "
+                    "start_recording for %s", filename,
                 )
-                try:
-                    wf.close()
-                except (OSError, wave.Error):
-                    pass
                 return
-            self._drain_record_queue()
-            self._flush_event.clear()
-            self._record_drop_count = 0
-            with self.record_lock:
-                self.record_wave = wf
-            self.recording = True
-        self.logger.info(f"Recording started: {filename}")
+
+            try:
+                wf = wave.open(filename, 'wb')
+                wf.setnchannels(channels)
+                wf.setsampwidth(RECORD_SAMPLE_WIDTH)
+                wf.setframerate(int(self.output_rate))
+            except (OSError, wave.Error) as e:
+                self.logger.error(
+                    f"Recording start failed: {e}", exc_info=True,
+                )
+                raise RecordingError(f"Recording start failed: {e}") from e
+
+            # Atomic install w.r.t. the realtime ``record()`` path.
+            with self._enqueue_lock:
+                self._drain_record_queue()
+                self._flush_event.clear()
+                self._record_drop_count = 0
+                with self.record_lock:
+                    self.record_wave = wf
+                    self._record_base_path = filename
+                    self._record_part_index = 0
+                    self._record_bytes_written = 0
+                    self._record_channels = channels
+                self.recording = True
+            self.logger.info(f"Recording started: {filename}")
 
     def stop_recording(self) -> None:
         """Stop recording, flush pending writes, and close the file.
@@ -265,12 +285,14 @@ class AudioOutput(AudioOutputInterface):
                 )
 
         with self.record_lock:
+            parts_count = self._record_part_index + 1
             if self.record_wave is not None:
                 try:
                     self.record_wave.close()
                     self.logger.info(
-                        "Recording stopped (drops during session: %d)",
-                        self._record_drop_count,
+                        "Recording stopped (drops during session: %d, "
+                        "parts: %d)",
+                        self._record_drop_count, parts_count,
                     )
                 except (OSError, wave.Error) as e:
                     self.logger.error(
@@ -320,6 +342,67 @@ class AudioOutput(AudioOutputInterface):
         except queue.Empty:
             pass
 
+    @staticmethod
+    def _make_rotated_record_path(base_path: str, part_index: int) -> str:
+        """Build the rotated-file path ``foo.partNNN.wav`` from ``foo.wav``."""
+        root, ext = os.path.splitext(base_path)
+        return f"{root}.part{part_index:03d}{ext}"
+
+    def _rotate_record(self, current_bytes: int) -> bool:
+        """Close current audio WAV and open the next part file.
+
+        Caller must hold ``self.record_lock``.  Mirror of
+        ``SDRReceiver._rotate_iq_recording`` — same crash mode (wave's
+        4-GiB header limit), same fix.
+
+        Returns:
+            True if rotation succeeded, False otherwise.
+        """
+        prev_wave = self.record_wave
+        prev_path = (
+            self._make_rotated_record_path(
+                self._record_base_path, self._record_part_index,
+            ) if self._record_part_index > 0
+            else self._record_base_path
+        )
+        try:
+            if prev_wave is not None:
+                prev_wave.close()
+        except (OSError, wave.Error) as e:
+            self.logger.error(
+                "Error closing audio part file %s during rotation: %s",
+                prev_path, e, exc_info=True,
+            )
+        self._record_part_index += 1
+        next_path = self._make_rotated_record_path(
+            self._record_base_path, self._record_part_index,
+        )
+        try:
+            wf = wave.open(next_path, 'wb')
+            # Channel count was set on the first file (typically 2);
+            # preserve by querying the previous file's channel count
+            # via the base path.  We capture it from the first wave_open
+            # at start time to avoid re-reading the closed file.
+            wf.setnchannels(self._record_channels)
+            wf.setsampwidth(RECORD_SAMPLE_WIDTH)
+            wf.setframerate(int(self.output_rate))
+        except (OSError, wave.Error) as e:
+            self.logger.error(
+                "Failed to open rotated audio part file %s: %s — recording "
+                "will stop accepting new chunks", next_path, e, exc_info=True,
+            )
+            self.record_wave = None
+            return False
+        self.record_wave = wf
+        self._record_bytes_written = 0
+        self.logger.info(
+            "Audio recording rotated to part %d: %s "
+            "(previous part wrote ~%.2f GB)",
+            self._record_part_index, next_path,
+            current_bytes / 1e9,
+        )
+        return True
+
     def _record_worker_loop(self) -> None:
         while not self._record_worker_stop.is_set():
             try:
@@ -336,19 +419,36 @@ class AudioOutput(AudioOutputInterface):
                 self._flush_event.set()
                 continue
             stereo_audio = item
-            with self.record_lock:
-                if self.record_wave is None:
-                    # Wave file already closed (e.g. after a flush
-                    # sentinel) — drop the chunk.
-                    continue
-                try:
+            # Catch any exception so the worker thread does not die
+            # mid-recording (e.g. the historical struct.error from the
+            # wave module's 4-GiB header limit).  Rotation below
+            # prevents that root cause but the broad catch is kept as
+            # a safety net.
+            try:
+                # int16 PCM size: each sample is 2 bytes regardless of
+                # interleaving; ``stereo_audio`` already encodes both
+                # channels per sample slot in flat float32 form.
+                chunk_bytes = int(stereo_audio.size) * 2
+                with self.record_lock:
+                    if self.record_wave is None:
+                        # Wave file already closed (e.g. after a flush
+                        # sentinel) — drop the chunk.
+                        continue
+                    if (self._record_bytes_written + chunk_bytes
+                            > AUDIO_RECORD_ROTATE_THRESHOLD_BYTES):
+                        if not self._rotate_record(
+                            self._record_bytes_written,
+                        ):
+                            continue
                     clipped = np.clip(stereo_audio, -1.0, 1.0)
                     int16_audio = np.int16(clipped * RECORD_MAX_INT16)
                     self.record_wave.writeframes(int16_audio.tobytes())
-                except (OSError, wave.Error) as e:
-                    self.logger.error(
-                        f"Error writing audio to file: {e}", exc_info=True,
-                    )
+                    self._record_bytes_written += chunk_bytes
+            except Exception as e:
+                self.logger.error(
+                    "Unexpected error writing audio to file: %s", e,
+                    exc_info=True,
+                )
 
     def cleanup(self) -> None:
         """Stop audio stream and terminate PyAudio instance."""

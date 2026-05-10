@@ -119,11 +119,30 @@ RECORD_QUEUE_MAXSIZE = 200          # Max queued recording chunks (~3.2 s at
                                     # 48 kHz / 768-sample chunks); absorbs
                                     # disk-write stalls so the realtime path
                                     # is not blocked by file I/O
+AUDIO_RECORD_ROTATE_THRESHOLD_BYTES = 4_000_000_000
+                                    # Same WAV 4-GiB limit as the IQ path
+                                    # (see IQ_RECORD_ROTATE_THRESHOLD_BYTES
+                                    # below).  At 48 kHz / 16-bit / 2 ch =
+                                    # 192 KB/s a single file fills in ~6.2
+                                    # hours; rotate to a new file before
+                                    # ``wave.writeframes`` overflows its
+                                    # 32-bit data-size header field.
 IQ_RECORD_QUEUE_MAXSIZE = 200       # Max queued IQ blocks for async IQ-WAV
                                     # recording (~3.2 s at 1.024 Msps /
                                     # 16384-sample blocks).  Each entry is a
                                     # complex64 array (~128 kB) so the cap
                                     # bounds peak memory at ~26 MB.
+IQ_RECORD_ROTATE_THRESHOLD_BYTES = 4_000_000_000
+                                    # WAV format caps the data chunk at
+                                    # 2^32 - 1 bytes (4 GiB) and Python's
+                                    # wave module raises struct.error past
+                                    # that. At 1.024 Msps / 16-bit IQ the
+                                    # rate is ~4 MB/s so a single file fills
+                                    # in ~16 min; rotate to a new file once
+                                    # the next chunk would push us above
+                                    # this threshold.  Leaves ~290 MB of
+                                    # headroom under the hard limit for
+                                    # the header patch.
 
 # --------------------------------------------------
 # Demodulator
