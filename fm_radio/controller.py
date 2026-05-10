@@ -354,11 +354,14 @@ class FMReceiverController:
                     self.audio_output.enqueue_audio(left, right)
                     t_enq = time.perf_counter()
 
-                    # Check recording status with lock
-                    with self.audio_output.record_lock:
-                        is_recording = self.audio_output.recording
-
-                    if is_recording:
+                    # Check recording status without acquiring record_lock:
+                    # the worker thread holds record_lock for the duration
+                    # of each writeframes() (which is exactly the disk
+                    # stall we are trying to keep off this thread).  A
+                    # bool read is atomic in CPython, and audio_output.
+                    # record() re-validates self.recording internally
+                    # before any further work.
+                    if self.audio_output.recording:
                         stereo = np.empty((len(left) * 2,), dtype=np.float32)
                         stereo[0::2] = left
                         stereo[1::2] = right
