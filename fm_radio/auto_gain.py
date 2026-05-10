@@ -150,14 +150,22 @@ class AutoGainController:
             return self._enabled
 
     def enable(self) -> None:
-        """Enable auto gain control (replaces hardware AGC)."""
+        """Enable auto gain control (replaces hardware AGC).
+
+        The desired gain is routed through ``_submit_async_gain`` so it
+        cannot race against any USB transfer that might still be in
+        flight in the worker.
+        """
         with self._lock:
             self._enabled = True
             self._clip_counter = 0
             self._weak_counter = 0
             self._holdoff = 0
+        # set_manual_gain_mode is only ever called on enable/disable
+        # transitions (not on the realtime path) so a synchronous USB
+        # call here is acceptable.
         self._sdr.set_manual_gain_mode(True)
-        self._sdr.set_gain(AGC_GAIN_TABLE[self._gain_index] / 10.0)
+        self._submit_async_gain(AGC_GAIN_TABLE[self._gain_index] / 10.0)
         self.logger.info("Auto gain control enabled")
 
     def disable(self, manual_gain_db: float | None = None) -> None:
@@ -173,7 +181,11 @@ class AutoGainController:
             self._weak_counter = 0
             self._holdoff = 0
         if manual_gain_db is not None:
-            self._sdr.set_gain(manual_gain_db)
+            # Route through the worker so this manual setting wins
+            # against any AGC-issued request that has not yet been
+            # applied (the queue is coalesced to keep only the latest
+            # submission).
+            self._submit_async_gain(manual_gain_db)
         self.logger.info("Auto gain control disabled")
 
     def set_gain_manual(self, gain_db: float) -> None:
@@ -198,7 +210,7 @@ class AutoGainController:
                     best_dist = d
                     best_idx = i
             self._gain_index = best_idx
-        self._sdr.set_gain(gain_db)
+        self._submit_async_gain(gain_db)
 
     def reset_counters(self) -> None:
         """Reset gain to default and clear counters (e.g., after tuning).
@@ -215,7 +227,7 @@ class AutoGainController:
                 self._gain_index = AGC_DEFAULT_GAIN_INDEX
                 apply_gain = AGC_GAIN_TABLE[self._gain_index] / 10.0
         if apply_gain is not None:
-            self._sdr.set_gain(apply_gain)
+            self._submit_async_gain(apply_gain)
             self.logger.info(f"Gain reset to default {apply_gain:.1f} dB for new station")
 
     # ------------------------------------------------------------------

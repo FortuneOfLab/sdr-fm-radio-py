@@ -815,6 +815,16 @@ def main() -> None:
     args = _parser().parse_args()
     cnr_db = None if args.cnr_db < 0 else float(args.cnr_db)
     fixed_blend = None if args.fixed_blend < 0.0 else float(args.fixed_blend)
+
+    # Reject configurations that would produce zero post-warmup samples.
+    # ``evaluate_quality`` and the IQ-WAV diagnostics path otherwise emit
+    # NaN metrics and an empty WAV without surfacing the problem.
+    if float(args.duration) <= float(args.warmup_s):
+        raise SystemExit(
+            f"--duration ({args.duration:.3f} s) must be greater than "
+            f"--warmup-s ({args.warmup_s:.3f} s); the warmup window "
+            f"would consume the entire test."
+        )
     eval_kwargs = dict(
         duration_s=float(args.duration),
         tone_hz=float(args.tone_hz),

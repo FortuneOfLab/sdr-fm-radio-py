@@ -573,7 +573,13 @@ class BaseFMDemodulator(FMDemodulatorInterface):
     # ------------------------------------------------------------------
 
     def reset(self) -> None:
-        """Reset shared state and delegate to subclass."""
+        """Reset shared state and delegate to subclass.
+
+        Clears all streaming-filter state (SOS lowpass / bandpass / notch
+        and the de-emphasis IIR) so that a re-tune does not leak the
+        previous station's audio into the first composite block of the
+        new one.
+        """
         self.pilot_pll.reset()
         self.dc_offset = 0.0
         self.blend_factor = 1.0
@@ -587,6 +593,21 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         self._pilot_mix_phase = 0.0
         self._pilot_phase_last = None
         self._diag_counter = 0
+        # Clear streaming-filter states so the first block after a
+        # re-tune starts from zero initial conditions.
+        for filt in (
+            self.lp_mono,
+            self.lp_lr_base, self.lp_lr_base_q,
+            self.lp_lr_low, self.lp_lr_low_q,
+            self.lp_lr_mid, self.lp_lr_mid_q,
+            self.bp_pilot,
+            self.bp_pilot_noise_1, self.bp_pilot_noise_2,
+            self.bp_lr,
+            self.notch_pilot_l, self.notch_pilot_l2,
+            self.notch_pilot_r, self.notch_pilot_r2,
+            self.deemph_left, self.deemph_right,
+        ):
+            filt.reset()
         self.side_nr.reset()
         self.side_nr_mid_aligner.reset()
         self._reset_subclass()

@@ -85,6 +85,14 @@ class DeemphasisIIRFilter:
         y, self.prev_output = deemphasis_iir_process_numba(x, self.alpha, self.prev_output)
         return y
 
+    def reset(self) -> None:
+        """Clear the filter's running state.
+
+        Called by ``BaseFMDemodulator.reset()`` so a re-tune does not
+        leak the previous station's audio into the new one.
+        """
+        self.prev_output = 0.0
+
 
 # --------------------------------------------------
 # Filter Classes (LowpassFilter & BandpassFilter)
@@ -104,6 +112,10 @@ class LowpassFilter:
         y, self.zi = signal.sosfilt(self.sos, data, zi=self.zi)
         return y
 
+    def reset(self) -> None:
+        """Clear the filter's running state."""
+        self.zi = signal.sosfilt_zi(self.sos) * 0.0
+
 
 class BandpassFilter:
     """Butterworth bandpass filter (streaming using lfilter with state)."""
@@ -121,6 +133,10 @@ class BandpassFilter:
         y, self.zi = signal.sosfilt(self.sos, data, zi=self.zi)
         return y
 
+    def reset(self) -> None:
+        """Clear the filter's running state."""
+        self.zi = signal.sosfilt_zi(self.sos) * 0.0
+
 
 class NotchFilter:
     """IIR notch (band-reject) filter (streaming using lfilter with state)."""
@@ -134,6 +150,10 @@ class NotchFilter:
         """Apply the notch filter to streaming chunk, preserving state."""
         y, self.zi = signal.sosfilt(self.sos, data, zi=self.zi)
         return y
+
+    def reset(self) -> None:
+        """Clear the filter's running state."""
+        self.zi = signal.sosfilt_zi(self.sos) * 0.0
 
 
 # --------------------------------------------------

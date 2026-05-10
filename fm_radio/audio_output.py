@@ -273,10 +273,16 @@ class AudioOutput(AudioOutputInterface):
             if item is _RECORD_WORKER_SHUTDOWN:
                 break
             stereo_audio = item
+            # Gate writes on the wave file's open/closed state, NOT on
+            # self.recording.  stop_recording() flips self.recording to
+            # False *before* draining the queue so the realtime path
+            # stops enqueueing; if the worker also stopped writing on
+            # that flag, queued tail chunks would be discarded instead
+            # of flushed.  The wave file remains open until close() is
+            # called after the drain completes, which is the right
+            # gate.
             with self.record_lock:
-                if not self.recording or self.record_wave is None:
-                    # Recording was stopped after this chunk was queued;
-                    # discard rather than write to a closed file.
+                if self.record_wave is None:
                     continue
                 try:
                     clipped = np.clip(stereo_audio, -1.0, 1.0)
