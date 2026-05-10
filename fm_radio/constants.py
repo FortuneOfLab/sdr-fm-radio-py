@@ -119,6 +119,11 @@ RECORD_QUEUE_MAXSIZE = 200          # Max queued recording chunks (~3.2 s at
                                     # 48 kHz / 768-sample chunks); absorbs
                                     # disk-write stalls so the realtime path
                                     # is not blocked by file I/O
+IQ_RECORD_QUEUE_MAXSIZE = 200       # Max queued IQ blocks for async IQ-WAV
+                                    # recording (~3.2 s at 1.024 Msps /
+                                    # 16384-sample blocks).  Each entry is a
+                                    # complex64 array (~128 kB) so the cap
+                                    # bounds peak memory at ~26 MB.
 
 # --------------------------------------------------
 # Demodulator
