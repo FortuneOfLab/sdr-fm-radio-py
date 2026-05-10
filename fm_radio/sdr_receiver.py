@@ -228,9 +228,23 @@ class SDRReceiver(SDRReceiverInterface):
         because that lock is also taken by the SDR callback for every
         IQ block; holding it during a (slow, disk-bound) file open
         would re-introduce the very stall this fix is meant to remove.
-        The lock is then taken only briefly to flip the recording flag
-        and install the wave-file handle.
+        However, ``wave.open(..., 'wb')`` truncates the target file at
+        open time, so we must pre-check whether recording is already
+        active **before** opening — otherwise a duplicate start would
+        destroy the user's file even though the call itself is a
+        no-op.  The fast-path bool read is atomic in CPython; the
+        lock-protected re-check below catches a rare concurrent start
+        and is the only path that can truncate.
         """
+        # Fast pre-check before any disk I/O: if recording is already
+        # active, don't touch the target file at all.
+        if self.iq_recording:
+            self.logger.warning(
+                "IQ recording already active; ignoring duplicate "
+                "start_iq_recording for %s", filename,
+            )
+            return
+
         # Open the wave file before touching any realtime-path lock.
         try:
             wf = wave.open(filename, 'wb')
@@ -246,11 +260,10 @@ class SDRReceiver(SDRReceiverInterface):
         # flip the flag.  No disk I/O happens under this lock.
         with self._iq_enqueue_lock:
             if self.iq_recording:
-                # Lost a race to another start_iq_recording: discard
-                # the file we just opened.
+                # Lost a race to another concurrent start_iq_recording.
                 self.logger.warning(
-                    "IQ recording already active; closing the file we "
-                    "just opened (%s)", filename,
+                    "IQ recording already active (race); closing the file "
+                    "we just opened (%s)", filename,
                 )
                 try:
                     wf.close()

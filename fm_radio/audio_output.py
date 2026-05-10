@@ -197,14 +197,27 @@ class AudioOutput(AudioOutputInterface):
         lock is also taken by the realtime ``record()`` path for every
         audio block, so holding it during a (potentially slow) file
         open would propagate the open's disk-I/O cost back into the
-        realtime thread — exactly the stall the worker-thread design
-        is meant to eliminate.  The lock is then taken only briefly
-        to flip ``self.recording`` and install the wave handle.
+        realtime thread.  However, ``wave.open(..., 'wb')`` truncates
+        the target file at open time, so we must pre-check whether
+        recording is already active **before** opening — otherwise a
+        duplicate start would destroy the user's file even though the
+        call itself is a no-op.  The fast-path bool read is atomic in
+        CPython; the lock-protected re-check below catches a rare
+        concurrent start and is the only path that can truncate.
 
         Args:
             filename: Filename to save the WAV file.
             channels: Number of channels.
         """
+        # Fast pre-check before any disk I/O: if recording is already
+        # active, don't touch the target file at all.
+        if self.recording:
+            self.logger.warning(
+                "Already recording; ignoring duplicate start_recording "
+                "for %s", filename,
+            )
+            return
+
         # Open the wave file before touching any realtime-path lock.
         try:
             wf = wave.open(filename, 'wb')
@@ -220,9 +233,9 @@ class AudioOutput(AudioOutputInterface):
         # flag.  No disk I/O happens under this lock.
         with self._enqueue_lock:
             if self.recording:
-                # Lost a race to another start_recording call.
+                # Lost a race to another concurrent start_recording.
                 self.logger.warning(
-                    "Already recording; closing the file we just "
+                    "Already recording (race); closing the file we just "
                     "opened (%s)", filename,
                 )
                 try:
