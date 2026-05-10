@@ -49,6 +49,10 @@ from fm_radio.constants import (
 
 # Sentinel placed in the recording queue to wake the worker for shutdown.
 _RECORD_WORKER_SHUTDOWN = object()
+# Sentinel placed in the recording queue to mark the end of a session.
+# When the worker reaches it, every preceding chunk has been written;
+# stop_recording() can then safely close the wave file.
+_RECORD_FLUSH_SENTINEL = object()
 
 
 class AudioOutput(AudioOutputInterface):
@@ -83,6 +87,16 @@ class AudioOutput(AudioOutputInterface):
         self._record_q: queue.Queue[object] = queue.Queue(
             maxsize=RECORD_QUEUE_MAXSIZE,
         )
+        # Serialises record() / start_recording / stop_recording with
+        # respect to the ``recording`` flag and the queue.put for the
+        # flush sentinel.  Held only for fast operations (flag check +
+        # queue.put_nowait); the worker does NOT take this lock so
+        # disk-write stalls in the worker do not propagate here.
+        self._enqueue_lock: threading.Lock = threading.Lock()
+        # Set by the worker when it reaches the flush sentinel so
+        # stop_recording() can close the wave file only after every
+        # queued chunk has actually been written.
+        self._flush_event: threading.Event = threading.Event()
         self._record_worker_stop: threading.Event = threading.Event()
         self._record_drop_count: int = 0
         self._record_worker: threading.Thread = threading.Thread(
@@ -174,42 +188,65 @@ class AudioOutput(AudioOutputInterface):
             filename: Filename to save the WAV file.
             channels: Number of channels.
         """
-        with self.record_lock:
+        # Hold both locks: _enqueue_lock so no realtime record() races
+        # with the flag flip, record_lock so no in-flight worker write
+        # races with the wave-file assignment.
+        with self._enqueue_lock:
             if self.recording:
                 self.logger.warning("Already recording")
                 return
-            # Drop any stale items left in the queue from a previous
-            # session so the new recording starts clean.
+            # Drop any stale items (including a leftover flush sentinel
+            # from a previous session) so the new recording starts clean.
             self._drain_record_queue()
+            self._flush_event.clear()
             self._record_drop_count = 0
             try:
                 wf = wave.open(filename, 'wb')
                 wf.setnchannels(channels)
                 wf.setsampwidth(RECORD_SAMPLE_WIDTH)
                 wf.setframerate(int(self.output_rate))
-                self.record_wave = wf
-                self.recording = True
-                self.logger.info(f"Recording started: {filename}")
             except (OSError, wave.Error) as e:
                 self.logger.error(f"Recording start failed: {e}", exc_info=True)
                 raise RecordingError(f"Recording start failed: {e}") from e
+            with self.record_lock:
+                self.record_wave = wf
+            self.recording = True
+            self.logger.info(f"Recording started: {filename}")
 
     def stop_recording(self) -> None:
-        """Stop recording, drain pending writes, and close the file."""
-        with self.record_lock:
+        """Stop recording, flush pending writes, and close the file.
+
+        The wave file is closed only after the worker has actually
+        written every chunk that was queued before stop_recording was
+        called: a flush sentinel is pushed through the queue and the
+        worker sets ``_flush_event`` once it pops the sentinel, by
+        which point all preceding chunks have been processed under
+        ``record_lock``.
+        """
+        with self._enqueue_lock:
             if not self.recording:
                 self.logger.debug("stop_recording called but not currently recording")
                 return
-            # Stop further enqueues from the realtime path immediately.
+            # Stop further enqueues from the realtime path.  Because we
+            # hold _enqueue_lock, any record() that has already passed
+            # its flag check has also completed its put before us.
             self.recording = False
 
-        # Wait (up to 5 s) for the worker to flush any backlog before
-        # closing the file.  The worker checks the queue every 0.2 s.
-        deadline = time.perf_counter() + 5.0
-        while time.perf_counter() < deadline:
-            if self._record_q.empty():
-                break
-            time.sleep(0.02)
+        # Push a flush sentinel.  The worker writes every chunk before
+        # the sentinel and then sets _flush_event.
+        self._flush_event.clear()
+        try:
+            self._record_q.put(_RECORD_FLUSH_SENTINEL, timeout=5.0)
+        except queue.Full:
+            self.logger.warning(
+                "Could not enqueue flush sentinel; tail chunks may be lost",
+            )
+        else:
+            if not self._flush_event.wait(timeout=10.0):
+                self.logger.warning(
+                    "Recording flush did not complete within 10 s; "
+                    "closing anyway",
+                )
 
         with self.record_lock:
             if self.record_wave is not None:
@@ -230,27 +267,30 @@ class AudioOutput(AudioOutputInterface):
         """Hand stereo audio to the recording worker.
 
         Non-blocking from the realtime processing thread's point of view:
-        the queue is bounded, and the slow disk-write happens in the
-        worker thread.  When the queue is full (sustained disk stall
-        longer than RECORD_QUEUE_MAXSIZE chunks) the chunk is dropped
-        and a warning is logged.
+        ``_enqueue_lock`` is taken only briefly to atomically pair the
+        ``self.recording`` check with the queue.put_nowait, and the
+        worker does not take this lock.  The slow disk-write happens
+        in the worker thread.  When the queue is full (sustained disk
+        stall longer than RECORD_QUEUE_MAXSIZE chunks) the chunk is
+        dropped and a warning is logged.
 
         Args:
             stereo_audio: Stereo audio data.
         """
-        if not self.recording:
-            return
-        try:
-            self._record_q.put_nowait(stereo_audio)
-        except queue.Full:
-            self._record_drop_count += 1
-            self.logger.warning(
-                "Record queue full, dropping chunk (drops=%d, qsize=%d/%d) "
-                "— disk write fell behind realtime",
-                self._record_drop_count,
-                self._record_q.qsize(),
-                self._record_q.maxsize,
-            )
+        with self._enqueue_lock:
+            if not self.recording:
+                return
+            try:
+                self._record_q.put_nowait(stereo_audio)
+            except queue.Full:
+                self._record_drop_count += 1
+                self.logger.warning(
+                    "Record queue full, dropping chunk (drops=%d, qsize=%d/%d) "
+                    "— disk write fell behind realtime",
+                    self._record_drop_count,
+                    self._record_q.qsize(),
+                    self._record_q.maxsize,
+                )
 
     # ------------------------------------------------------------------
     # Recording worker (runs disk writes off the realtime thread)
@@ -272,17 +312,18 @@ class AudioOutput(AudioOutputInterface):
                 continue
             if item is _RECORD_WORKER_SHUTDOWN:
                 break
+            if item is _RECORD_FLUSH_SENTINEL:
+                # Every chunk queued before this sentinel has now been
+                # written (queue is FIFO and the writeframes path above
+                # is on this same thread), so stop_recording() may
+                # safely close the file.
+                self._flush_event.set()
+                continue
             stereo_audio = item
-            # Gate writes on the wave file's open/closed state, NOT on
-            # self.recording.  stop_recording() flips self.recording to
-            # False *before* draining the queue so the realtime path
-            # stops enqueueing; if the worker also stopped writing on
-            # that flag, queued tail chunks would be discarded instead
-            # of flushed.  The wave file remains open until close() is
-            # called after the drain completes, which is the right
-            # gate.
             with self.record_lock:
                 if self.record_wave is None:
+                    # Wave file already closed (e.g. after a flush
+                    # sentinel) — drop the chunk.
                     continue
                 try:
                     clipped = np.clip(stereo_audio, -1.0, 1.0)

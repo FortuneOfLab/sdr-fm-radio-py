@@ -70,6 +70,11 @@ class AutoGainController:
         # triggered from the real-time processing thread.
         self._gain_q: queue.Queue[object] = queue.Queue(maxsize=4)
         self._gain_worker_stop: threading.Event = threading.Event()
+        # Last value successfully applied to the SDR (in dB).  Updated
+        # by the worker after each set_gain call and read by disable()
+        # to pin the gain at "current" rather than letting an in-flight
+        # AGC request continue to land afterwards.
+        self._last_applied_gain: float = AGC_GAIN_TABLE[self._gain_index] / 10.0
         self._gain_worker: threading.Thread = threading.Thread(
             target=self._gain_worker_loop,
             name='AutoGainWorker',
@@ -79,7 +84,7 @@ class AutoGainController:
 
         # Apply initial gain: switch to manual gain mode
         self._sdr.set_manual_gain_mode(True)
-        self._sdr.set_gain(AGC_GAIN_TABLE[self._gain_index] / 10.0)
+        self._sdr.set_gain(self._last_applied_gain)
 
     # ------------------------------------------------------------------
     # Async USB worker (avoids blocking the processing thread)
@@ -121,6 +126,8 @@ class AutoGainController:
                     exc_info=True,
                 )
                 continue
+            with self._lock:
+                self._last_applied_gain = gain_db
             dt_ms = (time.perf_counter() - t0) * 1000.0
             level = logging.WARNING if dt_ms >= 50.0 else logging.INFO
             self.logger.log(
@@ -156,37 +163,53 @@ class AutoGainController:
         cannot race against any USB transfer that might still be in
         flight in the worker.
         """
+        # set_manual_gain_mode is only ever called on enable/disable
+        # transitions (not on the realtime path) so a synchronous USB
+        # call here is acceptable.
+        self._sdr.set_manual_gain_mode(True)
         with self._lock:
             self._enabled = True
             self._clip_counter = 0
             self._weak_counter = 0
             self._holdoff = 0
-        # set_manual_gain_mode is only ever called on enable/disable
-        # transitions (not on the realtime path) so a synchronous USB
-        # call here is acceptable.
-        self._sdr.set_manual_gain_mode(True)
-        self._submit_async_gain(AGC_GAIN_TABLE[self._gain_index] / 10.0)
+            # Submit inside the lock for serialisation with update()
+            # and disable() — see notes there.
+            self._submit_async_gain(AGC_GAIN_TABLE[self._gain_index] / 10.0)
         self.logger.info("Auto gain control enabled")
 
     def disable(self, manual_gain_db: float | None = None) -> None:
         """Disable auto gain, optionally setting a fixed gain.
 
+        After this call returns the device gain is pinned: any AGC
+        request still in flight or queued by the worker is overridden.
+        When ``manual_gain_db`` is None the gain is pinned at the
+        last value the worker successfully applied to the SDR — this
+        is what ``agc off`` from the CLI expects, so the gain does
+        not silently change after the user disables AGC.
+
         Args:
             manual_gain_db: If provided, set this as the fixed manual
-                gain (in dB).  If ``None``, keep current gain level.
+                gain (in dB).  If ``None``, pin to the last applied
+                gain.
         """
         with self._lock:
             self._enabled = False
             self._clip_counter = 0
             self._weak_counter = 0
             self._holdoff = 0
-        if manual_gain_db is not None:
-            # Route through the worker so this manual setting wins
-            # against any AGC-issued request that has not yet been
-            # applied (the queue is coalesced to keep only the latest
-            # submission).
-            self._submit_async_gain(manual_gain_db)
-        self.logger.info("Auto gain control disabled")
+            final_gain = (
+                float(manual_gain_db) if manual_gain_db is not None
+                else float(self._last_applied_gain)
+            )
+            # Submit while still holding the lock so this request is
+            # ordered after any AGC submission from update() that ran
+            # earlier (update() also submits inside the same lock) —
+            # the worker will therefore drain the AGC value and end
+            # at final_gain.
+            self._submit_async_gain(final_gain)
+        self.logger.info(
+            "Auto gain control disabled, gain pinned at %.1f dB", final_gain,
+        )
 
     def set_gain_manual(self, gain_db: float) -> None:
         """Set gain explicitly (for CLI ``gain <value>`` command).
@@ -210,7 +233,8 @@ class AutoGainController:
                     best_dist = d
                     best_idx = i
             self._gain_index = best_idx
-        self._submit_async_gain(gain_db)
+            # Submit inside the lock to serialise with update() etc.
+            self._submit_async_gain(gain_db)
 
     def reset_counters(self) -> None:
         """Reset gain to default and clear counters (e.g., after tuning).
@@ -226,8 +250,10 @@ class AutoGainController:
             if self._enabled and self._gain_index != AGC_DEFAULT_GAIN_INDEX:
                 self._gain_index = AGC_DEFAULT_GAIN_INDEX
                 apply_gain = AGC_GAIN_TABLE[self._gain_index] / 10.0
+                # Submit inside the lock for serialisation with
+                # update()/disable()/set_gain_manual()/enable().
+                self._submit_async_gain(apply_gain)
         if apply_gain is not None:
-            self._submit_async_gain(apply_gain)
             self.logger.info(f"Gain reset to default {apply_gain:.1f} dB for new station")
 
     # ------------------------------------------------------------------
@@ -286,10 +312,18 @@ class AutoGainController:
                 self._clip_counter = 0
                 self._weak_counter = 0
 
-        # Dispatch the USB control transfer to the async worker thread
-        # so the processing thread never blocks on hardware.
+            # Submit *inside* the lock so AGC's request is serialised
+            # with disable()/set_gain_manual()/reset_counters(), all of
+            # which also submit while holding self._lock.  Without this,
+            # an AGC request decided just before disable() could land
+            # in the worker queue *after* disable()'s pin and silently
+            # change the gain post-disable.
+            if apply_gain is not None:
+                self._submit_async_gain(apply_gain)
+
+        # Logging is outside the lock to avoid pulling logging-handler
+        # latency under the realtime path.
         if apply_gain is not None:
-            self._submit_async_gain(apply_gain)
             self.logger.info(
                 "Auto gain requested %.1f dB (step %d/%d, async)",
                 apply_gain, applied_step, len(AGC_GAIN_TABLE) - 1,
