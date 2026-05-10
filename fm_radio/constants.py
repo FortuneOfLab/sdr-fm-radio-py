@@ -32,7 +32,9 @@ SDR_SAMPLE_RATE = 1.024e6           # Standard mode sample rate (Hz)
 SDR_SAMPLE_RATE_LIGHT = 0.25e6      # Light mode sample rate (Hz)
 SDR_CENTER_FREQ_DEFAULT = 80e6      # Default center frequency (Hz)
 SDR_BLOCK_SIZE = 16384              # Samples per SDR read
-SDR_QUEUE_MAXSIZE = 20              # Max queued SDR sample blocks
+SDR_QUEUE_MAXSIZE = 80              # Max queued SDR sample blocks (~1.28 sec
+                                    # of headroom for transient processing
+                                    # stalls; samples are dropped beyond this)
 
 # --------------------------------------------------
 # PLL gains

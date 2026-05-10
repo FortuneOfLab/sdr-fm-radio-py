@@ -60,6 +60,9 @@ class SDRReceiver(SDRReceiverInterface):
         self.iq_recording: bool = False
         self.iq_record_wave: wave.Wave_write | None = None
         self.iq_record_lock: threading.Lock = threading.Lock()
+        # Cumulative count of dropped IQ blocks (queue full). Bumped from
+        # the SDR callback thread; only read for diagnostic logging.
+        self._dropped_count: int = 0
 
         try:
             self.sdr: RtlSdr = RtlSdr()
@@ -144,8 +147,17 @@ class SDRReceiver(SDRReceiverInterface):
                     iq_interleaved[1::2] = np.int16(clipped_q * 32767.0)
                     self.iq_record_wave.writeframes(iq_interleaved.tobytes())
         except queue.Full:
-            # Discard sample if queue is full.
-            self.logger.debug("SDR data queue full, dropping samples")
+            # Discard sample if queue is full.  This produces audible
+            # dropouts in the demodulated audio so we promote it to
+            # WARNING for visibility during diagnostics.
+            self._dropped_count += 1
+            self.logger.warning(
+                "SDR data queue full, dropping samples (total dropped=%d, "
+                "qsize=%d/%d)",
+                self._dropped_count,
+                self.data_queue.qsize(),
+                self.data_queue.maxsize,
+            )
         except Exception as e:
             # Drop this buffer if conversion fails to avoid crashing the SDR ctypes callback.
             self.logger.error(f"Error in SDR callback: {e}", exc_info=True)

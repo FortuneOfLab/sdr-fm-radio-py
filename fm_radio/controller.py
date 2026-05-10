@@ -79,7 +79,16 @@ class _BlockProfiler:
         self._tot_blocks = 0
         self._tot_slow_blocks = 0
 
-    def record(self, dt_sec: float, q_depth: int) -> None:
+    def record(
+        self, dt_sec: float, q_depth: int,
+        stage_times: tuple[float, float, float, float, float] | None = None,
+    ) -> None:
+        """Record one block's timing.
+
+        ``stage_times`` is ``(agc, process_iq, demodulate, enqueue, record)``
+        in seconds and is included in the SLOW BLOCK warning so the
+        offending phase can be identified post-mortem.
+        """
         self._win_blocks += 1
         self._tot_blocks += 1
         self._win_sum_dt += dt_sec
@@ -91,11 +100,20 @@ class _BlockProfiler:
             self._win_slow_blocks += 1
             self._tot_slow_blocks += 1
             elapsed = time.perf_counter() - self._t0_session
+            stages = ""
+            if stage_times is not None:
+                ag, pi, dm, eq, rc = stage_times
+                stages = (
+                    f" stages_ms=[agc:{ag*1000:.1f} "
+                    f"process_iq:{pi*1000:.1f} demod:{dm*1000:.1f} "
+                    f"enqueue:{eq*1000:.1f} record:{rc*1000:.1f}]"
+                )
             self._log.warning(
                 "BlockProfile: SLOW BLOCK dt=%.1fms q_depth=%d/%d "
-                "session_t=%.1fs (%.2fmin) total_slow=%d",
+                "session_t=%.1fs (%.2fmin) total_slow=%d%s",
                 dt_sec * 1000.0, q_depth, self._q_capacity,
                 elapsed, elapsed / 60.0, self._tot_slow_blocks,
+                stages,
             )
 
         now = time.perf_counter()
@@ -319,15 +337,22 @@ class FMReceiverController:
                 # Snapshot queue depth at the moment we pulled this block.
                 q_depth_after_get = self.sdr_receiver.data_queue.qsize()
                 t_block_start = time.perf_counter()
+                t_agc = t_proc = t_demod = t_enq = t_rec = t_block_start
 
                 try:
                     # Auto gain adjustment (before demodulation)
                     self.auto_gain.update(iq_samples)
+                    t_agc = time.perf_counter()
 
                     composite = self.fm_demodulator.process_iq_samples(iq_samples)
+                    t_proc = time.perf_counter()
+
                     left, right = self.fm_demodulator.demodulate(composite)
+                    t_demod = time.perf_counter()
+
                     # Use AudioOutput method to enqueue audio data
                     self.audio_output.enqueue_audio(left, right)
+                    t_enq = time.perf_counter()
 
                     # Check recording status with lock
                     with self.audio_output.record_lock:
@@ -338,14 +363,23 @@ class FMReceiverController:
                         stereo[0::2] = left
                         stereo[1::2] = right
                         self.audio_output.record(stereo)
+                    t_rec = time.perf_counter()
                 except Exception as e:
                     self.logger.error(f"Error in processing thread: {e}", exc_info=True)
                     # Continue processing even if one block fails
                     continue
                 finally:
+                    t_end = time.perf_counter()
                     profiler.record(
-                        time.perf_counter() - t_block_start,
+                        t_end - t_block_start,
                         q_depth_after_get,
+                        stage_times=(
+                            t_agc - t_block_start,
+                            t_proc - t_agc,
+                            t_demod - t_proc,
+                            t_enq - t_demod,
+                            t_rec - t_enq,
+                        ),
                     )
         except Exception as e:
             self.logger.critical(f"Fatal error in processing thread: {e}", exc_info=True)
