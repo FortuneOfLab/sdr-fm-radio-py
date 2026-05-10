@@ -316,6 +316,43 @@ class FMReceiverController:
             except queue.Empty:
                 break
 
+    def _prewarm_jit(self) -> None:
+        """Trigger Numba JIT compile and FFT plan caches for hot demod paths.
+
+        Without this the very first SDR block takes ~1.3 s to process
+        (Numba compiling pll_demodulate / deemphasis_iir, scipy / numpy
+        building FFT plans, scipy.signal.resample_poly designing its FIR
+        filter).  That single pause overflows the SDR data_queue and
+        loses the leading ~50 ms of audio.  We trigger the same code
+        paths here, before the SDR async thread starts, so JIT cost is
+        paid against an idle queue rather than a live RF stream.
+
+        Several iterations are performed so caches that are populated
+        on the second call (some scipy plans) are also warm by the time
+        real samples arrive.  The demodulator state is reset afterwards
+        so the first real block starts from scratch.
+        """
+        self.logger.info("JIT pre-warming demodulator paths...")
+        t0 = time.perf_counter()
+        block_size = self.sdr_receiver.block_size
+        dummy_iq = np.zeros(block_size, dtype=np.complex64)
+        try:
+            for _ in range(3):
+                composite = self.fm_demodulator.process_iq_samples(dummy_iq)
+                self.fm_demodulator.demodulate(composite)
+            self.fm_demodulator.reset()
+        except Exception as e:
+            # Pre-warm should never fail the boot — the demod will still
+            # JIT lazily on first real sample.
+            self.logger.warning(
+                f"JIT pre-warm failed (non-fatal, falling back to lazy "
+                f"compile): {e}",
+                exc_info=True,
+            )
+            return
+        dt_ms = (time.perf_counter() - t0) * 1000.0
+        self.logger.info(f"JIT pre-warming complete in {dt_ms:.1f} ms")
+
     def processing_thread(self) -> None:
         """Retrieve IQ samples from SDR, perform FM demodulation and audio conversion,
         then add the resulting audio data to the output queue via AudioOutput.
@@ -393,6 +430,11 @@ class FMReceiverController:
         """Start all threads and begin the main loop."""
         try:
             self.logger.info("Starting FM Receiver Controller")
+
+            # Pre-compile Numba / FFT paths before the SDR delivers
+            # samples so the first block does not stall the realtime
+            # path while JIT compilation runs.
+            self._prewarm_jit()
 
             sdr_thread = threading.Thread(target=self.sdr_receiver.start, daemon=True)
             sdr_thread.start()
