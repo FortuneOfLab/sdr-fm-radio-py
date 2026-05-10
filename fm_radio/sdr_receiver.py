@@ -212,28 +212,48 @@ class SDRReceiver(SDRReceiverInterface):
             self.logger.error(f"Error in SDR callback: {e}", exc_info=True)
 
     def start_iq_recording(self, filename: str) -> None:
-        """Start recording raw IQ samples to a 2-channel WAV file (async)."""
+        """Start recording raw IQ samples to a 2-channel WAV file (async).
+
+        ``wave.open()`` is performed *outside* ``_iq_enqueue_lock``
+        because that lock is also taken by the SDR callback for every
+        IQ block; holding it during a (slow, disk-bound) file open
+        would re-introduce the very stall this fix is meant to remove.
+        The lock is then taken only briefly to flip the recording flag
+        and install the wave-file handle.
+        """
+        # Open the wave file before touching any realtime-path lock.
+        try:
+            wf = wave.open(filename, 'wb')
+            wf.setnchannels(2)           # I/Q
+            wf.setsampwidth(2)           # int16
+            wf.setframerate(int(self.sample_rate))
+        except (OSError, wave.Error) as e:
+            self.logger.error(f"IQ recording start failed: {e}", exc_info=True)
+            raise RecordingError(f"IQ recording start failed: {e}") from e
+
+        # Atomic state transition: claim the recording slot, drop any
+        # stale items left in the queue, install the wave handle and
+        # flip the flag.  No disk I/O happens under this lock.
         with self._iq_enqueue_lock:
             if self.iq_recording:
-                self.logger.warning("IQ recording already active")
+                # Lost a race to another start_iq_recording: discard
+                # the file we just opened.
+                self.logger.warning(
+                    "IQ recording already active; closing the file we "
+                    "just opened (%s)", filename,
+                )
+                try:
+                    wf.close()
+                except (OSError, wave.Error):
+                    pass
                 return
-            # Drop stale items (e.g. a leftover flush sentinel from a
-            # previous session) so the new recording starts clean.
             self._drain_iq_record_queue()
             self._iq_flush_event.clear()
             self._iq_record_drop_count = 0
-            try:
-                wf = wave.open(filename, 'wb')
-                wf.setnchannels(2)           # I/Q
-                wf.setsampwidth(2)           # int16
-                wf.setframerate(int(self.sample_rate))
-            except (OSError, wave.Error) as e:
-                self.logger.error(f"IQ recording start failed: {e}", exc_info=True)
-                raise RecordingError(f"IQ recording start failed: {e}") from e
             with self.iq_record_lock:
                 self.iq_record_wave = wf
             self.iq_recording = True
-            self.logger.info(f"IQ recording started: {filename}")
+        self.logger.info(f"IQ recording started: {filename}")
 
     def stop_iq_recording(self) -> None:
         """Stop IQ recording, flush pending writes, and close the file.

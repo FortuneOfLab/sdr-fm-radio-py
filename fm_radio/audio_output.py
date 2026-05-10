@@ -184,34 +184,50 @@ class AudioOutput(AudioOutputInterface):
     def start_recording(self, filename: str, channels: int = 2) -> None:
         """Start recording audio (asynchronous via worker thread).
 
+        ``wave.open()`` is performed *outside* ``_enqueue_lock``: that
+        lock is also taken by the realtime ``record()`` path for every
+        audio block, so holding it during a (potentially slow) file
+        open would propagate the open's disk-I/O cost back into the
+        realtime thread — exactly the stall the worker-thread design
+        is meant to eliminate.  The lock is then taken only briefly
+        to flip ``self.recording`` and install the wave handle.
+
         Args:
             filename: Filename to save the WAV file.
             channels: Number of channels.
         """
-        # Hold both locks: _enqueue_lock so no realtime record() races
-        # with the flag flip, record_lock so no in-flight worker write
-        # races with the wave-file assignment.
+        # Open the wave file before touching any realtime-path lock.
+        try:
+            wf = wave.open(filename, 'wb')
+            wf.setnchannels(channels)
+            wf.setsampwidth(RECORD_SAMPLE_WIDTH)
+            wf.setframerate(int(self.output_rate))
+        except (OSError, wave.Error) as e:
+            self.logger.error(f"Recording start failed: {e}", exc_info=True)
+            raise RecordingError(f"Recording start failed: {e}") from e
+
+        # Atomic state transition: claim the recording slot, drop any
+        # stale items in the queue, install the wave handle, flip the
+        # flag.  No disk I/O happens under this lock.
         with self._enqueue_lock:
             if self.recording:
-                self.logger.warning("Already recording")
+                # Lost a race to another start_recording call.
+                self.logger.warning(
+                    "Already recording; closing the file we just "
+                    "opened (%s)", filename,
+                )
+                try:
+                    wf.close()
+                except (OSError, wave.Error):
+                    pass
                 return
-            # Drop any stale items (including a leftover flush sentinel
-            # from a previous session) so the new recording starts clean.
             self._drain_record_queue()
             self._flush_event.clear()
             self._record_drop_count = 0
-            try:
-                wf = wave.open(filename, 'wb')
-                wf.setnchannels(channels)
-                wf.setsampwidth(RECORD_SAMPLE_WIDTH)
-                wf.setframerate(int(self.output_rate))
-            except (OSError, wave.Error) as e:
-                self.logger.error(f"Recording start failed: {e}", exc_info=True)
-                raise RecordingError(f"Recording start failed: {e}") from e
             with self.record_lock:
                 self.record_wave = wf
             self.recording = True
-            self.logger.info(f"Recording started: {filename}")
+        self.logger.info(f"Recording started: {filename}")
 
     def stop_recording(self) -> None:
         """Stop recording, flush pending writes, and close the file.
