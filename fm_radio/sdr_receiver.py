@@ -79,6 +79,11 @@ class SDRReceiver(SDRReceiverInterface):
         # the realtime callback.
         self.iq_record_lock: threading.Lock = threading.Lock()
         self._iq_enqueue_lock: threading.Lock = threading.Lock()
+        # Serialises concurrent ``start_iq_recording`` callers so only
+        # one reaches ``wave.open`` (the file-truncating step).
+        # Distinct from ``_iq_enqueue_lock`` so the SDR callback is
+        # never blocked during the slow file open.
+        self._iq_start_lock: threading.Lock = threading.Lock()
         # Cumulative count of dropped IQ blocks (queue full). Bumped from
         # the SDR callback thread; only read for diagnostic logging.
         self._dropped_count: int = 0
@@ -224,62 +229,51 @@ class SDRReceiver(SDRReceiverInterface):
     def start_iq_recording(self, filename: str) -> None:
         """Start recording raw IQ samples to a 2-channel WAV file (async).
 
-        ``wave.open()`` is performed *outside* ``_iq_enqueue_lock``
-        because that lock is also taken by the SDR callback for every
-        IQ block; holding it during a (slow, disk-bound) file open
-        would re-introduce the very stall this fix is meant to remove.
-        However, ``wave.open(..., 'wb')`` truncates the target file at
-        open time, so we must pre-check whether recording is already
-        active **before** opening — otherwise a duplicate start would
-        destroy the user's file even though the call itself is a
-        no-op.  The fast-path bool read is atomic in CPython; the
-        lock-protected re-check below catches a rare concurrent start
-        and is the only path that can truncate.
+        Thread safety design:
+          - ``_iq_start_lock`` serialises concurrent
+            ``start_iq_recording`` callers, so only the winner reaches
+            ``wave.open`` and losers see ``self.iq_recording = True``
+            and return without touching their target path.  The SDR
+            callback does not take this lock, so the slow
+            ``wave.open`` call inside it does not back-pressure the
+            realtime path.
+          - ``_iq_enqueue_lock`` is taken only briefly inside that,
+            to atomically drain stale queue items, install the wave
+            handle and flip ``self.iq_recording``.
         """
-        # Fast pre-check before any disk I/O: if recording is already
-        # active, don't touch the target file at all.
-        if self.iq_recording:
-            self.logger.warning(
-                "IQ recording already active; ignoring duplicate "
-                "start_iq_recording for %s", filename,
-            )
-            return
-
-        # Open the wave file before touching any realtime-path lock.
-        try:
-            wf = wave.open(filename, 'wb')
-            wf.setnchannels(2)           # I/Q
-            wf.setsampwidth(2)           # int16
-            wf.setframerate(int(self.sample_rate))
-        except (OSError, wave.Error) as e:
-            self.logger.error(f"IQ recording start failed: {e}", exc_info=True)
-            raise RecordingError(f"IQ recording start failed: {e}") from e
-
-        # Atomic state transition: claim the recording slot, drop any
-        # stale items left in the queue, install the wave handle and
-        # flip the flag.  No disk I/O happens under this lock.
-        with self._iq_enqueue_lock:
+        with self._iq_start_lock:
             if self.iq_recording:
-                # Lost a race to another concurrent start_iq_recording.
                 self.logger.warning(
-                    "IQ recording already active (race); closing the file "
-                    "we just opened (%s)", filename,
+                    "IQ recording already active; ignoring duplicate "
+                    "start_iq_recording for %s", filename,
                 )
-                try:
-                    wf.close()
-                except (OSError, wave.Error):
-                    pass
                 return
-            self._drain_iq_record_queue()
-            self._iq_flush_event.clear()
-            self._iq_record_drop_count = 0
-            with self.iq_record_lock:
-                self.iq_record_wave = wf
-                self._iq_record_base_path = filename
-                self._iq_record_part_index = 0
-                self._iq_record_bytes_written = 0
-            self.iq_recording = True
-        self.logger.info(f"IQ recording started: {filename}")
+
+            try:
+                wf = wave.open(filename, 'wb')
+                wf.setnchannels(2)           # I/Q
+                wf.setsampwidth(2)           # int16
+                wf.setframerate(int(self.sample_rate))
+            except (OSError, wave.Error) as e:
+                self.logger.error(
+                    f"IQ recording start failed: {e}", exc_info=True,
+                )
+                raise RecordingError(
+                    f"IQ recording start failed: {e}",
+                ) from e
+
+            # Atomic install w.r.t. the SDR callback's enqueue path.
+            with self._iq_enqueue_lock:
+                self._drain_iq_record_queue()
+                self._iq_flush_event.clear()
+                self._iq_record_drop_count = 0
+                with self.iq_record_lock:
+                    self.iq_record_wave = wf
+                    self._iq_record_base_path = filename
+                    self._iq_record_part_index = 0
+                    self._iq_record_bytes_written = 0
+                self.iq_recording = True
+            self.logger.info(f"IQ recording started: {filename}")
 
     def stop_iq_recording(self) -> None:
         """Stop IQ recording, flush pending writes, and close the file.

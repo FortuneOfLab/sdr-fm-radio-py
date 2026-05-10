@@ -94,6 +94,11 @@ class AudioOutput(AudioOutputInterface):
         # queue.put_nowait); the worker does NOT take this lock so
         # disk-write stalls in the worker do not propagate here.
         self._enqueue_lock: threading.Lock = threading.Lock()
+        # Serialises concurrent ``start_recording`` calls so only one
+        # thread reaches ``wave.open`` per session.  Distinct from
+        # ``_enqueue_lock`` so the realtime path (``record()``) is
+        # never blocked during the slow file open.
+        self._start_lock: threading.Lock = threading.Lock()
         # Set by the worker when it reaches the flush sentinel so
         # stop_recording() can close the wave file only after every
         # queued chunk has actually been written.
@@ -193,67 +198,56 @@ class AudioOutput(AudioOutputInterface):
     def start_recording(self, filename: str, channels: int = 2) -> None:
         """Start recording audio (asynchronous via worker thread).
 
-        ``wave.open()`` is performed *outside* ``_enqueue_lock``: that
-        lock is also taken by the realtime ``record()`` path for every
-        audio block, so holding it during a (potentially slow) file
-        open would propagate the open's disk-I/O cost back into the
-        realtime thread.  However, ``wave.open(..., 'wb')`` truncates
-        the target file at open time, so we must pre-check whether
-        recording is already active **before** opening — otherwise a
-        duplicate start would destroy the user's file even though the
-        call itself is a no-op.  The fast-path bool read is atomic in
-        CPython; the lock-protected re-check below catches a rare
-        concurrent start and is the only path that can truncate.
+        Thread safety design:
+          - ``_start_lock`` serialises concurrent ``start_recording``
+            callers, so only the winner reaches ``wave.open`` and
+            losers see ``self.recording = True`` and return without
+            touching their target path.  The realtime ``record()``
+            path does not take this lock, so the slow ``wave.open``
+            call inside it does not block audio writes.
+          - ``_enqueue_lock`` is taken only briefly inside that, to
+            atomically drain stale queue items, install the wave
+            handle and flip ``self.recording``.
 
         Args:
             filename: Filename to save the WAV file.
             channels: Number of channels.
         """
-        # Fast pre-check before any disk I/O: if recording is already
-        # active, don't touch the target file at all.
-        if self.recording:
-            self.logger.warning(
-                "Already recording; ignoring duplicate start_recording "
-                "for %s", filename,
-            )
-            return
-
-        # Open the wave file before touching any realtime-path lock.
-        try:
-            wf = wave.open(filename, 'wb')
-            wf.setnchannels(channels)
-            wf.setsampwidth(RECORD_SAMPLE_WIDTH)
-            wf.setframerate(int(self.output_rate))
-        except (OSError, wave.Error) as e:
-            self.logger.error(f"Recording start failed: {e}", exc_info=True)
-            raise RecordingError(f"Recording start failed: {e}") from e
-
-        # Atomic state transition: claim the recording slot, drop any
-        # stale items in the queue, install the wave handle, flip the
-        # flag.  No disk I/O happens under this lock.
-        with self._enqueue_lock:
+        # Serialise all start callers — the wave.open below is the
+        # only place that can truncate the target file, and we want
+        # exactly one caller per session to reach it.
+        with self._start_lock:
             if self.recording:
-                # Lost a race to another concurrent start_recording.
                 self.logger.warning(
-                    "Already recording (race); closing the file we just "
-                    "opened (%s)", filename,
+                    "Already recording; ignoring duplicate "
+                    "start_recording for %s", filename,
                 )
-                try:
-                    wf.close()
-                except (OSError, wave.Error):
-                    pass
                 return
-            self._drain_record_queue()
-            self._flush_event.clear()
-            self._record_drop_count = 0
-            with self.record_lock:
-                self.record_wave = wf
-                self._record_base_path = filename
-                self._record_part_index = 0
-                self._record_bytes_written = 0
-                self._record_channels = channels
-            self.recording = True
-        self.logger.info(f"Recording started: {filename}")
+
+            try:
+                wf = wave.open(filename, 'wb')
+                wf.setnchannels(channels)
+                wf.setsampwidth(RECORD_SAMPLE_WIDTH)
+                wf.setframerate(int(self.output_rate))
+            except (OSError, wave.Error) as e:
+                self.logger.error(
+                    f"Recording start failed: {e}", exc_info=True,
+                )
+                raise RecordingError(f"Recording start failed: {e}") from e
+
+            # Atomic install w.r.t. the realtime ``record()`` path.
+            with self._enqueue_lock:
+                self._drain_record_queue()
+                self._flush_event.clear()
+                self._record_drop_count = 0
+                with self.record_lock:
+                    self.record_wave = wf
+                    self._record_base_path = filename
+                    self._record_part_index = 0
+                    self._record_bytes_written = 0
+                    self._record_channels = channels
+                self.recording = True
+            self.logger.info(f"Recording started: {filename}")
 
     def stop_recording(self) -> None:
         """Stop recording, flush pending writes, and close the file.
