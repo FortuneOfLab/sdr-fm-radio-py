@@ -70,9 +70,22 @@ LR_BASE_LOWPASS_CUTOFF = 15000.0    # L-R baseband lowpass cutoff (Hz)
 LR_HIGH_SPLIT_CUTOFF = 7000.0       # L-R split frequency for high-band damping (Hz)
 LR_HIGH_SUPER_SPLIT_CUTOFF = 12000.0  # L-R split frequency between mid-high and super-high (Hz)
 LR_HIGH_MIN_GAIN = 0.40             # Minimum mid-high (7-12k) gain at low stereo blend
-LR_HIGH_MAX_GAIN = 0.85             # Maximum mid-high gain at low pilot SNR (1.0 at HF_BLEND HI threshold)
+LR_HIGH_MAX_GAIN = 1.00             # Maximum mid-high gain at low pilot SNR (1.0 at
+                                    # HF_BLEND HI threshold).  1.0 = the SNR-adaptive HF
+                                    # damping ceiling is neutral.  History: 0.85 was
+                                    # chosen by listening test BEFORE the side-channel
+                                    # NR existed; with side NR covering HF side noise
+                                    # directly, ablation showed the damping cost 7.8 dB
+                                    # of separation at weak signal for 0.7 dB of SNR,
+                                    # and a fresh listening test confirmed the neutral
+                                    # setting sounds fine.  The mechanism stays in place
+                                    # (set <1.0 to re-enable damping for a noisier
+                                    # station).
 LR_SUPER_HIGH_MIN_GAIN = 0.20       # Minimum super-high (12-15k) gain at low stereo blend
-LR_SUPER_HIGH_MAX_GAIN = 0.50       # Maximum super-high gain at low pilot SNR (1.0 at HF_BLEND HI threshold)
+LR_SUPER_HIGH_MAX_GAIN = 1.00       # Maximum super-high gain at low pilot SNR (1.0 at
+                                    # HF_BLEND HI threshold).  See LR_HIGH_MAX_GAIN
+                                    # above: neutral by default since the side-channel
+                                    # NR supersedes broadband HF damping (was 0.50).
 
 PILOT_BANDPASS_ORDER = 9            # Pilot bandpass filter order (standard)
 PILOT_BANDPASS_ORDER_LIGHT = 1      # Pilot bandpass filter order (light)
