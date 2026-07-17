@@ -66,6 +66,7 @@ from fm_radio.constants import (
     PILOT_BANDPASS_LOW, PILOT_BANDPASS_HIGH,
     STEREO_PILOT_RESIDUAL_CENTER_HZ,
     STEREO_SUBCARRIER_PHASE_OFFSET_DEG,
+    STEREO_SUBCARRIER_PHASE_OFFSET_DEG_PLL,
     STEREO_SUBCARRIER_PHASE_OFFSET_DEG_LIGHT,
     STEREO_MONO_DELAY_SAMPLES,
     STEREO_LR_SIDE_RATIO_CAP_ENABLE, STEREO_LR_SIDE_RATIO_CAP_TARGET,
@@ -682,6 +683,15 @@ class FMDemodulator(BaseFMDemodulator):
             pilot_order=PILOT_BANDPASS_ORDER,
             lr_order=LR_BANDPASS_ORDER,
             logger_name='fm_receiver.FMDemodulator',
+            # The subcarrier operating point depends on the main demod:
+            # the PLL chain carries a -30.7 deg 19k/38k phase
+            # inconsistency that the discriminator does not, so each
+            # mode has its own tuned offset.
+            subcarrier_phase_offset_deg=(
+                STEREO_SUBCARRIER_PHASE_OFFSET_DEG_PLL
+                if MAIN_DEMOD_USE_PLL
+                else STEREO_SUBCARRIER_PHASE_OFFSET_DEG
+            ),
         )
 
         self.logger.info(

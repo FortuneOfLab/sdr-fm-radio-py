@@ -106,6 +106,12 @@ STEREO_SUBCARRIER_PHASE_OFFSET_DEG = 316.0  # Fixed phase offset for 38k subcarr
                                     #          (285 + 30.7 = 315.7).  Synthetic sweep
                                     #          confirms a broad optimum at 315-320 with
                                     #          separation improving to ~26/33 dB.
+STEREO_SUBCARRIER_PHASE_OFFSET_DEG_PLL = 285.0  # Operating point when the legacy PLL main
+                                    # demod is selected (MAIN_DEMOD_USE_PLL = True): the
+                                    # PLL chain includes the -30.7 deg 19k/38k phase
+                                    # inconsistency, so it keeps the pre-discriminator
+                                    # value.  FMDemodulator picks the matching offset
+                                    # automatically based on MAIN_DEMOD_USE_PLL.
 STEREO_SUBCARRIER_PHASE_OFFSET_DEG_LIGHT = 297.4  # Same operating-point preservation for
                                     # the light demodulator: its old pilot bandpass was
                                     # order 1 with only -1.31 deg phase at 19 kHz
