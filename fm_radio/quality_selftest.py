@@ -266,7 +266,6 @@ def _run_demod_from_iq(
     iq: np.ndarray,
     fixed_blend: float | None = None,
     disable_iq_phase_correction: bool = False,
-    disable_high_gate: bool = False,
     mono_delay_samples: int | None = None,
     subcarrier_phase_offset_deg: float | None = None,
     demod_diag: bool = False,
@@ -277,8 +276,6 @@ def _run_demod_from_iq(
         demod.force_blend_factor = float(np.clip(fixed_blend, 0.0, 1.0))
     if disable_iq_phase_correction:
         demod.iq_phase_correction_enabled = False
-    if disable_high_gate:
-        demod.high_gate_enabled = False
     if mono_delay_samples is not None and int(mono_delay_samples) >= 0:
         demod.mono_delay_samples = int(mono_delay_samples)
         demod._mono_delay_state = np.zeros(demod.mono_delay_samples, dtype=np.float32)
@@ -317,7 +314,6 @@ def _run_demod_diag_iq(
     iq: np.ndarray,
     fixed_blend: float | None = None,
     disable_iq_phase_correction: bool = False,
-    disable_high_gate: bool = False,
     mono_delay_samples: int | None = None,
     subcarrier_phase_offset_deg: float | None = None,
     lr_high_max_gain: float | None = None,
@@ -336,8 +332,6 @@ def _run_demod_diag_iq(
         demod.force_blend_factor = float(np.clip(fixed_blend, 0.0, 1.0))
     if disable_iq_phase_correction:
         demod.iq_phase_correction_enabled = False
-    if disable_high_gate:
-        demod.high_gate_enabled = False
     if mono_delay_samples is not None and int(mono_delay_samples) >= 0:
         demod.mono_delay_samples = int(mono_delay_samples)
         demod._mono_delay_state = np.zeros(demod.mono_delay_samples, dtype=np.float32)
@@ -445,7 +439,6 @@ def _run_demod_from_composite(
     composite: np.ndarray,
     fixed_blend: float | None = None,
     disable_iq_phase_correction: bool = False,
-    disable_high_gate: bool = False,
     mono_delay_samples: int | None = None,
     subcarrier_phase_offset_deg: float | None = None,
     demod_diag: bool = False,
@@ -456,8 +449,6 @@ def _run_demod_from_composite(
         demod.force_blend_factor = float(np.clip(fixed_blend, 0.0, 1.0))
     if disable_iq_phase_correction:
         demod.iq_phase_correction_enabled = False
-    if disable_high_gate:
-        demod.high_gate_enabled = False
     if mono_delay_samples is not None and int(mono_delay_samples) >= 0:
         demod.mono_delay_samples = int(mono_delay_samples)
         demod._mono_delay_state = np.zeros(demod.mono_delay_samples, dtype=np.float32)
@@ -655,7 +646,6 @@ def evaluate_quality(
     dsb_phase_deg: float = 0.0,
     source_lr: tuple[np.ndarray, np.ndarray] | None = None,
     disable_iq_phase_correction: bool = False,
-    disable_high_gate: bool = False,
     mono_delay_samples: int | None = None,
     subcarrier_phase_offset_deg: float | None = None,
     demod_diag: bool = False,
@@ -705,7 +695,6 @@ def evaluate_quality(
         left_out, right_out, blend_hist = _run_demod_from_composite(
             mpx, fixed_blend=fixed_blend,
             disable_iq_phase_correction=disable_iq_phase_correction,
-            disable_high_gate=disable_high_gate,
             mono_delay_samples=mono_delay_samples,
             subcarrier_phase_offset_deg=subcarrier_phase_offset_deg,
             demod_diag=demod_diag, demod_diag_interval=demod_diag_interval,
@@ -716,7 +705,6 @@ def evaluate_quality(
         left_out, right_out, blend_hist = _run_demod_from_iq(
             iq, fixed_blend=fixed_blend,
             disable_iq_phase_correction=disable_iq_phase_correction,
-            disable_high_gate=disable_high_gate,
             mono_delay_samples=mono_delay_samples,
             subcarrier_phase_offset_deg=subcarrier_phase_offset_deg,
             demod_diag=demod_diag, demod_diag_interval=demod_diag_interval,
@@ -752,7 +740,6 @@ def evaluate_quality(
         l_main, r_leak, _ = _run_demod_from_composite(
             mpx_l, fixed_blend=fixed_blend,
             disable_iq_phase_correction=disable_iq_phase_correction,
-            disable_high_gate=disable_high_gate,
             mono_delay_samples=mono_delay_samples,
             subcarrier_phase_offset_deg=subcarrier_phase_offset_deg,
             demod_diag=demod_diag, demod_diag_interval=demod_diag_interval,
@@ -763,7 +750,6 @@ def evaluate_quality(
         l_main, r_leak, _ = _run_demod_from_iq(
             iq_l, fixed_blend=fixed_blend,
             disable_iq_phase_correction=disable_iq_phase_correction,
-            disable_high_gate=disable_high_gate,
             mono_delay_samples=mono_delay_samples,
             subcarrier_phase_offset_deg=subcarrier_phase_offset_deg,
             demod_diag=demod_diag, demod_diag_interval=demod_diag_interval,
@@ -780,7 +766,6 @@ def evaluate_quality(
         l_leak, r_main, _ = _run_demod_from_composite(
             mpx_r, fixed_blend=fixed_blend,
             disable_iq_phase_correction=disable_iq_phase_correction,
-            disable_high_gate=disable_high_gate,
             mono_delay_samples=mono_delay_samples,
             subcarrier_phase_offset_deg=subcarrier_phase_offset_deg,
             demod_diag=demod_diag, demod_diag_interval=demod_diag_interval,
@@ -791,7 +776,6 @@ def evaluate_quality(
         l_leak, r_main, _ = _run_demod_from_iq(
             iq_r, fixed_blend=fixed_blend,
             disable_iq_phase_correction=disable_iq_phase_correction,
-            disable_high_gate=disable_high_gate,
             mono_delay_samples=mono_delay_samples,
             subcarrier_phase_offset_deg=subcarrier_phase_offset_deg,
             demod_diag=demod_diag, demod_diag_interval=demod_diag_interval,
@@ -880,10 +864,6 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--disable-iq-phase-correction", action="store_true",
         help="Disable I/Q phase rotation correction in LR synchronous demod",
-    )
-    p.add_argument(
-        "--disable-high-gate", action="store_true",
-        help="Disable high-band LR gate in stereo shaping",
     )
     p.add_argument(
         "--mono-delay-samples", type=int, default=-1,
@@ -1003,7 +983,6 @@ def main() -> None:
         enable_preemphasis=bool(args.preemphasis),
         preemphasis_tau_s=float(args.preemphasis_tau_us) * 1e-6,
         disable_iq_phase_correction=bool(args.disable_iq_phase_correction),
-        disable_high_gate=bool(args.disable_high_gate),
         mono_delay_samples=(None if int(args.mono_delay_samples) < 0 else int(args.mono_delay_samples)),
         subcarrier_phase_offset_deg=(
             None if np.isnan(float(args.subcarrier_phase_offset_deg))
@@ -1031,7 +1010,6 @@ def main() -> None:
         iq = _load_iq_wav(args.iq_wav, int(SDR_SAMPLE_RATE), float(args.duration))
         common_overrides = dict(
             disable_iq_phase_correction=bool(args.disable_iq_phase_correction),
-            disable_high_gate=bool(args.disable_high_gate),
             mono_delay_samples=(
                 None if int(args.mono_delay_samples) < 0 else int(args.mono_delay_samples)
             ),

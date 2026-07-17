@@ -57,11 +57,6 @@ from fm_radio.constants import (
     LR_BASE_LOWPASS_CUTOFF, LR_HIGH_SPLIT_CUTOFF, LR_HIGH_SUPER_SPLIT_CUTOFF,
     LR_HIGH_MIN_GAIN, LR_HIGH_MAX_GAIN,
     LR_SUPER_HIGH_MIN_GAIN, LR_SUPER_HIGH_MAX_GAIN,
-    LR_HIGH_GATE_THRESHOLD, LR_HIGH_GATE_KNEE_MULT,
-    LR_HIGH_GATE_MIN_GAIN, LR_HIGH_GATE_SMOOTHING,
-    STEREO_HIGH_GATE_SNR_ASSIST_ENABLE,
-    STEREO_HIGH_GATE_SNR_ASSIST_DB_LO, STEREO_HIGH_GATE_SNR_ASSIST_DB_HI,
-    STEREO_HIGH_GATE_SNR_ASSIST_MAX, STEREO_HIGH_GATE_SNR_FLOOR_BOOST_MAX,
     PILOT_BANDPASS_ORDER, PILOT_BANDPASS_ORDER_LIGHT,
     PILOT_BANDPASS_LOW, PILOT_BANDPASS_HIGH,
     STEREO_PILOT_RESIDUAL_CENTER_HZ,
@@ -226,7 +221,6 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         self.pilot_snr_ema: float | None = None
         self.pilot_jitter_ema: float = 0.0
         self.stereo_phase_err_ema: float = 0.0
-        self.lr_high_gate_gain: float = 1.0
         self.pilot_residual_center_hz: float = float(STEREO_PILOT_RESIDUAL_CENTER_HZ)
         self.subcarrier_phase_offset_rad: float = np.deg2rad(subcarrier_phase_offset_deg)
         self.mono_delay_samples: int = max(0, int(STEREO_MONO_DELAY_SAMPLES))
@@ -235,7 +229,6 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         self._pilot_mix_phase: float = 0.0
         self.lr_side_cap_gain: float = 1.0
         self.iq_phase_correction_enabled: bool = STEREO_IQ_PHASE_CORRECTION_ENABLE
-        self.high_gate_enabled: bool = True
         # HF L-R band gain ceilings (apply additional damping at full blend
         # to trade stereo width above 7 kHz for HF noise reduction).
         self.lr_high_max_gain: float = float(LR_HIGH_MAX_GAIN)
@@ -458,45 +451,6 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         lr_base_midhigh = lr_base_mid - lr_base_low
         lr_base_super = lr_base_full - lr_base_mid
 
-        gate_assist = 0.0
-        gate_floor = LR_HIGH_GATE_MIN_GAIN
-        if self.high_gate_enabled:
-            high_rms = float(np.sqrt(np.mean(lr_base_super ** 2) + 1e-12))
-            gate_thr = LR_HIGH_GATE_THRESHOLD
-            gate_knee = max(gate_thr * LR_HIGH_GATE_KNEE_MULT, gate_thr + 1e-12)
-            if high_rms <= gate_thr:
-                gate_target = LR_HIGH_GATE_MIN_GAIN
-            elif high_rms >= gate_knee:
-                gate_target = 1.0
-            else:
-                t = (high_rms - gate_thr) / (gate_knee - gate_thr)
-                gate_target = LR_HIGH_GATE_MIN_GAIN + (1.0 - LR_HIGH_GATE_MIN_GAIN) * t
-            if STEREO_HIGH_GATE_SNR_ASSIST_ENABLE and self.pilot_snr_ema is not None:
-                s_lo = STEREO_HIGH_GATE_SNR_ASSIST_DB_LO
-                s_hi = max(STEREO_HIGH_GATE_SNR_ASSIST_DB_HI, s_lo + 1e-6)
-                if self.pilot_snr_ema <= s_lo:
-                    snr_open = 0.0
-                elif self.pilot_snr_ema >= s_hi:
-                    snr_open = 1.0
-                else:
-                    snr_open = (
-                        (self.pilot_snr_ema - s_lo) / (s_hi - s_lo)
-                    )
-                gate_assist = snr_open * STEREO_HIGH_GATE_SNR_ASSIST_MAX
-                gate_assist = float(np.clip(gate_assist, 0.0, 1.0))
-                gate_floor = LR_HIGH_GATE_MIN_GAIN + (
-                    np.clip(snr_open, 0.0, 1.0) * STEREO_HIGH_GATE_SNR_FLOOR_BOOST_MAX
-                )
-                gate_floor = float(np.clip(gate_floor, LR_HIGH_GATE_MIN_GAIN, 1.0))
-                gate_target = max(gate_target, gate_floor)
-                gate_target = gate_target + gate_assist * (1.0 - gate_target)
-            gate_alpha = LR_HIGH_GATE_SMOOTHING
-            self.lr_high_gate_gain = (
-                gate_alpha * gate_target + (1.0 - gate_alpha) * self.lr_high_gate_gain
-            )
-        else:
-            self.lr_high_gate_gain = 1.0
-
         # Adaptive HF blend: ramp the configured MAX_GAIN ceilings up to 1.0
         # as pilot SNR improves, so HF stereo width is preserved on strong
         # signals. snr_open in [0, 1].
@@ -519,7 +473,7 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         lr_shaped = (
             lr_base_low
             + midhigh_gain * lr_base_midhigh
-            + (super_gain * self.lr_high_gate_gain) * lr_base_super
+            + super_gain * lr_base_super
         )
 
         lr_baseband = lr_shaped * self.blend_factor
@@ -553,8 +507,7 @@ class BaseFMDemodulator(FMDemodulatorInterface):
                 self.logger.info(
                     "StereoDiag snr=%.2fdB blend=%.3f pilotP=%.6g noiseP=%.6g "
                     "phJit=%.6g lrBandRMS=%.6g lrBaseRMS=%.6g phaseIQ=%.3fdeg "
-                    "iqCorr=%s highGate=%s "
-                    "gateAssist=%.3f gateFloor=%.3f "
+                    "iqCorr=%s "
                     "monoDelay=%d scOff=%.1fdeg sideCap=%.3f",
                     snr_db, self.blend_factor, pilot_power, noise_power,
                     phase_jitter,
@@ -562,9 +515,6 @@ class BaseFMDemodulator(FMDemodulatorInterface):
                     float(np.sqrt(np.mean(lr_baseband ** 2) + 1e-12)),
                     float(np.rad2deg(self.stereo_phase_err_ema)),
                     "on" if self.iq_phase_correction_enabled else "off",
-                    "on" if self.high_gate_enabled else "off",
-                    gate_assist,
-                    gate_floor,
                     self.mono_delay_samples,
                     float(np.rad2deg(self.subcarrier_phase_offset_rad)),
                     self.lr_side_cap_gain,
@@ -644,7 +594,6 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         self.pilot_snr_ema = None
         self.pilot_jitter_ema = 0.0
         self.stereo_phase_err_ema = 0.0
-        self.lr_high_gate_gain = 1.0
         self.lr_side_cap_gain = 1.0
         if self.mono_delay_samples > 0:
             self._mono_delay_state = np.zeros(self.mono_delay_samples, dtype=np.float32)
