@@ -73,15 +73,6 @@ LR_HIGH_MIN_GAIN = 0.40             # Minimum mid-high (7-12k) gain at low stere
 LR_HIGH_MAX_GAIN = 0.85             # Maximum mid-high gain at low pilot SNR (1.0 at HF_BLEND HI threshold)
 LR_SUPER_HIGH_MIN_GAIN = 0.20       # Minimum super-high (12-15k) gain at low stereo blend
 LR_SUPER_HIGH_MAX_GAIN = 0.50       # Maximum super-high gain at low pilot SNR (1.0 at HF_BLEND HI threshold)
-LR_HIGH_GATE_THRESHOLD = 0.0028     # RMS threshold for opening L-R high-band gate
-LR_HIGH_GATE_KNEE_MULT = 2.2        # Full-open level as multiple of threshold
-LR_HIGH_GATE_MIN_GAIN = 0.75        # Minimum gate gain when below threshold
-LR_HIGH_GATE_SMOOTHING = 0.20       # EMA smoothing for high-band gate gain
-STEREO_HIGH_GATE_SNR_ASSIST_ENABLE = True  # Boost high-gate opening only when pilot SNR is good
-STEREO_HIGH_GATE_SNR_ASSIST_DB_LO = 12.0   # Assist starts above this pilot SNR (dB)
-STEREO_HIGH_GATE_SNR_ASSIST_DB_HI = 20.0   # Assist reaches max above this pilot SNR (dB)
-STEREO_HIGH_GATE_SNR_ASSIST_MAX = 0.35     # Max pull of gate_target toward 1.0 (0-1)
-STEREO_HIGH_GATE_SNR_FLOOR_BOOST_MAX = 0.20  # Max extra floor for gate_target at high pilot SNR
 
 PILOT_BANDPASS_ORDER = 9            # Pilot bandpass filter order (standard)
 PILOT_BANDPASS_ORDER_LIGHT = 1      # Pilot bandpass filter order (light)
