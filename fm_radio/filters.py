@@ -167,34 +167,84 @@ class StatefulResampler:
     downstream stereo L-R processing.  This class keeps the tail of the
     previous input block and prepends it to the current block so that
     the polyphase filter sees a continuous stream.
+
+    Emission policy: an output sample is only released once its entire
+    FIR support lies within samples actually received, i.e. the last
+    ``half_len`` input samples' worth of outputs are held back until the
+    next block arrives.  (An earlier revision emitted them immediately,
+    computed against a zero-padded future, and never re-emitted the
+    corrected values — leaving a block-rate transient of up to ~0.17
+    absolute at the end of every block.)  The held-back tail introduces
+    a constant latency of ``half_len`` input samples (~156 us at
+    1.024 Msps) and means a continuous stream's final tail is only
+    produced once more input arrives, which is the correct behaviour
+    for an endless radio stream.
+
+    Global input/output counters make the emission window bookkeeping
+    exact when block sizes keep the polyphase grid aligned (all block
+    sizes multiples of ``down / gcd(up, down)``, as the fixed
+    SDR_BLOCK_SIZE does); for other sizes the counters still guarantee
+    the long-run output count never drifts.
     """
 
-    def __init__(self, up: int, down: int, window: object = None) -> None:
+    def __init__(self, up: int, down: int, window: object = None,
+                 emit_align: int = 1) -> None:
         self.up: int = int(up)
         self.down: int = int(down)
         self.window: object = window
+        # Emission boundaries are rounded down to a multiple of this.
+        # Downstream stages that decimate the output block-wise with a
+        # stateless polyphase filter (composite -> audio uses
+        # resample_poly(1, 4) per block) silently require every block
+        # they receive to be a multiple of their decimation factor, or
+        # their per-block output grids stop tiling the global grid and
+        # each block boundary picks up a fractional-sample phase jump.
+        self.emit_align: int = max(1, int(emit_align))
         # Half-length of the internal polyphase FIR (scipy default)
-        half_len: int = 10 * max(self.up, self.down)
-        self._overlap: int = half_len * 2
+        self._half_len: int = 10 * max(self.up, self.down)
+        self._overlap: int = self._half_len * 2
         self._prev_tail: np.ndarray | None = None
+        self._in_total: int = 0     # input samples consumed so far
+        self._out_emitted: int = 0  # output samples emitted so far
 
     # ----- public API -----
 
     def process(self, x: np.ndarray) -> np.ndarray:
         """Resample *x* while maintaining block-to-block continuity."""
         if self._prev_tail is None:
-            self._prev_tail = x[-self._overlap:].copy()
-            return self._resample(x)
+            # Zero seed: makes the first emitted outputs identical to the
+            # leading edge of a one-shot resample_poly (which zero-pads).
+            self._prev_tail = np.zeros(self._overlap, dtype=x.dtype)
 
-        extended = np.concatenate([self._prev_tail, x])
-        self._prev_tail = x[-self._overlap:].copy()
-        y_ext = self._resample(extended)
-        overlap_out = int(np.round(self._overlap * self.up / self.down))
-        return y_ext[overlap_out:]
+        ext_start = self._in_total - self._overlap
+        ext = np.concatenate([self._prev_tail, x])
+        y = self._resample(ext)
+        self._in_total += x.size
+
+        # Local output j of ``y`` corresponds to global output j + off.
+        off = (ext_start * self.up) // self.down
+        # Only emit outputs whose FIR support is fully inside received
+        # input: global outputs strictly below
+        # (in_total - half_len) * up / down, rounded down to the
+        # emission alignment.
+        out_max_global = ((self._in_total - self._half_len) * self.up) // self.down
+        out_max_global = (out_max_global // self.emit_align) * self.emit_align
+        a = max(self._out_emitted - off, 0)
+        b = min(max(out_max_global - off, a), y.size)
+        seg = y[a:b]
+        self._out_emitted += seg.size
+
+        if x.size >= self._overlap:
+            self._prev_tail = x[-self._overlap:].copy()
+        else:
+            self._prev_tail = ext[-self._overlap:].copy()
+        return seg
 
     def reset(self) -> None:
         """Discard saved tail so the next call starts fresh."""
         self._prev_tail = None
+        self._in_total = 0
+        self._out_emitted = 0
 
     # ----- internal -----
 
@@ -236,7 +286,9 @@ class SideNoiseReducer:
         self.frame: int = int(frame)
         self.hop: int = int(hop)
         self.alpha_floor: float = float(alpha_floor)
-        self.beta: float = float(beta)
+        # Over-subtraction factor; clamped non-negative because a
+        # negative beta would produce gains above 1 / sign flips.
+        self.beta: float = max(float(beta), 0.0)
         self.window: np.ndarray = signal.windows.hann(
             self.frame, sym=False,
         ).astype(np.float32)
@@ -349,7 +401,11 @@ class SideNoiseReducer:
                     self.dd_alpha * (self.prev_gain ** 2) * self.prev_gamma
                     + (1.0 - self.dd_alpha) * posterior
                 )
-            gain_w = xi / (xi + self.beta)
+            # The epsilon keeps the division defined for beta=0 (which is
+            # reachable via --side-nr-beta 0): xi=0, beta=0 would
+            # otherwise produce 0/0 = NaN and propagate silence-killing
+            # NaNs into the overlap-add output.
+            gain_w = xi / (xi + self.beta + 1e-12)
             gain = np.maximum(self.alpha_floor, gain_w)
 
             # Optional smoothing across nearby bins to break up isolated

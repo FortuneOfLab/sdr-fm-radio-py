@@ -67,7 +67,16 @@ def test_lowpass_streaming_matches_oneshot(rng):
     assert np.allclose(y_stream, y_ref, atol=1e-10)
 
 
-def _resampler_stream_vs_oneshot(rng):
+def test_stateful_resampler_matches_oneshot_exactly(rng):
+    """Streamed output must equal one-shot resample_poly sample-for-sample.
+
+    The resampler holds back the trailing half-filter-length outputs of
+    each block until their FIR support is fully received, so the
+    streamed output is a truncated prefix of the one-shot result — but
+    every emitted sample must match exactly (no block-edge transients;
+    the pre-fix version failed this with errors up to ~0.17 at every
+    block end).
+    """
     up, down = 3, 16
     r = StatefulResampler(up, down, window=("kaiser", 10.0))
     n_block = 16384
@@ -76,32 +85,40 @@ def _resampler_stream_vs_oneshot(rng):
         [r.process(x[i:i + n_block]) for i in range(0, x.size, n_block)]
     )
     y_ref = sg.resample_poly(x, up, down, window=("kaiser", 10.0))
-    n = min(y_stream.size, y_ref.size)
-    out_block = n_block * up // down  # 3072 outputs per input block
-    return y_stream[:n], y_ref[:n], out_block
+    # Held-back tail: half_len inputs => half_len*up/down = 30 outputs.
+    assert y_ref.size - y_stream.size == 30
+    assert np.allclose(y_stream, y_ref[:y_stream.size], atol=1e-9)
 
 
-def test_stateful_resampler_matches_oneshot_away_from_block_ends(rng):
-    """Interior and block-start continuity (the b1a28a4 guarantee)."""
-    y_stream, y_ref, out_block = _resampler_stream_vs_oneshot(rng)
-    mask = np.ones(y_stream.size, dtype=bool)
-    guard = 64  # trailing half-filter-length outputs of each block
-    for edge in range(out_block, y_stream.size, out_block):
-        mask[max(0, edge - guard):edge] = False
-    mask[-guard:] = False
-    assert np.allclose(y_stream[mask], y_ref[mask], atol=1e-9)
+def test_stateful_resampler_emit_align_keeps_blocks_decimatable(rng):
+    """With emit_align=N every emitted block size is a multiple of N.
+
+    The composite->audio stage decimates each block with a stateless
+    resample_poly(1, 4); non-multiple-of-4 composite blocks would shift
+    its per-block output grid and add a fractional-sample phase jump at
+    every boundary (measured as a THD+N regression from -25.6 to
+    -19.1 dB before this alignment existed).
+    """
+    up, down = 3, 16
+    r = StatefulResampler(up, down, window=("kaiser", 10.0), emit_align=4)
+    n_block = 16384
+    x = rng.standard_normal(n_block * 4)
+    segs = [r.process(x[i:i + n_block]) for i in range(0, x.size, n_block)]
+    assert all(seg.size % 4 == 0 for seg in segs)
+    # Alignment must not break exactness: still a prefix of one-shot.
+    y_stream = np.concatenate(segs)
+    y_ref = sg.resample_poly(x, up, down, window=("kaiser", 10.0))
+    assert np.allclose(y_stream, y_ref[:y_stream.size], atol=1e-9)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Known defect: the trailing half-filter-length outputs of each "
-           "block are computed against a zero-padded future and never "
-           "re-emitted, leaving a block-rate transient at every block end "
-           "(same family as the IQ-lowpass bug fixed in PR #4).",
-)
-def test_stateful_resampler_matches_oneshot_exactly(rng):
-    y_stream, y_ref, _ = _resampler_stream_vs_oneshot(rng)
-    assert np.allclose(y_stream, y_ref, atol=1e-6)
+def test_stateful_resampler_reset_gives_repeatable_stream(rng):
+    up, down = 3, 16
+    r = StatefulResampler(up, down, window=("kaiser", 10.0))
+    x = rng.standard_normal(16384)
+    y1 = r.process(x)
+    r.reset()
+    y2 = r.process(x)
+    assert np.array_equal(y1, y2)
 
 
 def test_side_nr_passthrough_is_exact(rng):
@@ -149,6 +166,23 @@ def test_side_nr_reduces_stationary_noise(rng):
         np.sqrt(np.mean(y_in[fs:] ** 2)) / np.sqrt(np.mean(x_in[fs:] ** 2))
     )
     assert red_db < -8.0, f"in-band reduction only {red_db:.1f} dB"
+
+
+def test_side_nr_beta_zero_produces_finite_output(rng):
+    # --side-nr-beta 0 is reachable from the CLI; xi=0 with beta=0 used
+    # to produce 0/0 = NaN gains that silenced the side channel.
+    nr = SideNoiseReducer(
+        sample_rate=48000, frame=1024, hop=256, alpha_floor=0.3, beta=0.0,
+    )
+    x = (rng.standard_normal(48000) * 0.05).astype(np.float32)
+    out = []
+    for i in range(0, x.size, 480):
+        y = nr.process(x[i:i + 480])
+        if y.size:
+            out.append(y)
+    y = np.concatenate(out)
+    assert np.all(np.isfinite(y))
+    assert np.sqrt(np.mean(y ** 2)) > 0  # not silenced
 
 
 def test_side_nr_reset_restores_initial_state(rng):

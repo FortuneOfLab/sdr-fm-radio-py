@@ -726,6 +726,10 @@ class FMDemodulator(BaseFMDemodulator):
         self._iq_resampler = StatefulResampler(
             self.up, self.down,
             window=("kaiser", STANDARD_RESAMPLE_KAISER_BETA),
+            # Keep every emitted composite block a multiple of the
+            # composite->audio decimation factor so the downstream
+            # per-block resample_poly stays on a consistent output grid.
+            emit_align=self._resample_down,
         )
 
     def process_iq_samples(self, iq_samples: np.ndarray) -> np.ndarray:
@@ -817,7 +821,9 @@ class FMDemodulatorLight(BaseFMDemodulator):
 
         # --- Light-only: phase tracking for differentiation ---
         self.last_phase: float | None = None
-        self._iq_resampler = StatefulResampler(self.up, self.down)
+        self._iq_resampler = StatefulResampler(
+            self.up, self.down, emit_align=self._resample_down,
+        )
 
     def process_iq_samples(self, iq_samples: np.ndarray) -> np.ndarray:
         """Apply DC offset correction, phase extraction/differentiation,
