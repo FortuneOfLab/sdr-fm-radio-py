@@ -55,14 +55,12 @@ def _fm_iq(n):
     return np.exp(1j * phase).astype(np.complex64)
 
 
-def test_composite_is_block_size_invariant_away_from_block_ends():
+def test_composite_is_block_size_invariant():
     """The IQ->composite chain must be stateful end to end.
 
-    The trailing ~64 composite samples of each block are excluded: the
-    StatefulResampler has a known end-of-block transient (documented as
-    an xfail in test_filters.py) that dominates there.  Everything else
-    — IQ lowpass state, discriminator carry-over, resampler block-start
-    continuity — must make block-wise processing match one-shot.
+    IQ lowpass state, discriminator carry-over and the resampler's
+    held-back emission window together must make block-wise processing
+    match one-shot processing sample-for-sample.
     """
     n = SDR_BLOCK_SIZE * 4
     x = _fm_iq(n)
@@ -81,14 +79,8 @@ def test_composite_is_block_size_invariant_away_from_block_ends():
         for i in range(0, n, SDR_BLOCK_SIZE)
     ])
 
-    m = min(comp_one.size, comp_blk.size)
-    out_block = 3072  # composite samples per SDR block
-    mask = np.ones(m, dtype=bool)
-    guard = 64
-    for edge in range(out_block, m, out_block):
-        mask[max(0, edge - guard):edge] = False
-    mask[-guard:] = False
-    assert np.allclose(comp_blk[:m][mask], comp_one[:m][mask], atol=1e-4)
+    assert comp_blk.size == comp_one.size
+    assert np.allclose(comp_blk, comp_one, atol=1e-5)
 
 
 def test_discriminator_is_default_and_pll_selectable(monkeypatch):
@@ -175,6 +167,17 @@ def test_reset_clears_all_streaming_state(rng):
     if left.size:
         assert np.allclose(left, 0.0, atol=1e-12)
         assert np.allclose(right, 0.0, atol=1e-12)
+
+
+def test_light_demodulator_end_to_end_is_finite(rng):
+    d = FMDemodulatorLight(stereo=True)
+    x = _random_iq(rng, 4096)
+    for _ in range(5):
+        comp = d.process_iq_samples(x)
+        left, right = d.demodulate(comp)
+    assert comp.size % 4 == 0  # emit_align invariant holds for light too
+    assert np.all(np.isfinite(comp))
+    assert np.all(np.isfinite(left))
 
 
 def test_demodulate_returns_matched_stereo_pair(rng):
