@@ -268,6 +268,20 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         # Composite rate -> final audio rate
         self._resample_up = 1
         self._resample_down = max(1, int(self.composite_rate / self.final_audio_rate))
+        # Composite -> audio decimators with carried state.  The
+        # previous per-block stateless resample_poly zero-padded both
+        # edges of every 16 ms block (last member of the block-transient
+        # bug family fixed in PR #4 / PR #9).  StatefulResampler's
+        # alignment precondition (block sizes multiple of down) is
+        # guaranteed by the IQ resampler's emit_align=_resample_down.
+        # The left instance also serves the mono path so mono<->stereo
+        # switches stay continuous on the primary channel.
+        self._audio_resampler_l = StatefulResampler(
+            self._resample_up, self._resample_down,
+        )
+        self._audio_resampler_r = StatefulResampler(
+            self._resample_up, self._resample_down,
+        )
 
     # ------------------------------------------------------------------
     # Shared demodulation pipeline
@@ -562,14 +576,12 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         right_channel = self.notch_pilot_r.apply(right_channel)
         right_channel = self.notch_pilot_r2.apply(right_channel)
 
-        # Resample composite -> final audio
-        left_48 = signal.resample_poly(
+        # Resample composite -> final audio (stateful across blocks)
+        left_48 = self._audio_resampler_l.process(
             left_channel.astype(np.float32),
-            self._resample_up, self._resample_down,
         )
-        right_48 = signal.resample_poly(
+        right_48 = self._audio_resampler_r.process(
             right_channel.astype(np.float32),
-            self._resample_up, self._resample_down,
         )
         left_48 = self.deemph_left.process(left_48)
         right_48 = self.deemph_right.process(right_48)
@@ -600,11 +612,18 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         mono = self.lp_mono.apply(composite)
         mono = self.notch_pilot_l.apply(mono)
         mono = self.notch_pilot_l2.apply(mono)
-        mono_48 = signal.resample_poly(
-            mono.astype(np.float32),
-            self._resample_up, self._resample_down,
-        )
+        mono_f32 = mono.astype(np.float32)
+        mono_48 = self._audio_resampler_l.process(mono_f32)
+        # Advance the right-channel chain in lockstep with the same
+        # input: the stereo path uses both resamplers, so if only the
+        # left one progressed during mono operation, a later
+        # mono -> stereo switch would resume with the two resamplers at
+        # different global emission positions and the first stereo
+        # block would return mismatched L/R lengths (breaking the
+        # mid/side recombination downstream).
+        right_48 = self._audio_resampler_r.process(mono_f32)
         mono_48 = self.deemph_left.process(mono_48)
+        self.deemph_right.process(right_48)
         return mono_48, mono_48
 
     # ------------------------------------------------------------------
@@ -647,6 +666,8 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         ):
             filt.reset()
         self._pilot_lp_zi = np.zeros_like(self._pilot_lp_zi)
+        self._audio_resampler_l.reset()
+        self._audio_resampler_r.reset()
         self.side_nr.reset()
         self.side_nr_mid_aligner.reset()
         self._reset_subclass()

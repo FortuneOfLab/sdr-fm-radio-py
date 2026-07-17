@@ -169,6 +169,63 @@ def test_reset_clears_all_streaming_state(rng):
         assert np.allclose(right, 0.0, atol=1e-12)
 
 
+def test_mono_audio_is_block_size_invariant():
+    """The composite->audio path must be stateful end to end (B1).
+
+    The mono path (mono lowpass -> notches -> audio decimation ->
+    de-emphasis) contains no per-call adaptive state, so block-wise
+    processing must match one-shot processing sample-for-sample.  The
+    pre-B1 stateless per-block resample_poly failed this with zero-pad
+    edge transients at every 16 ms block boundary.
+    """
+    fs = COMPOSITE_RATE
+    n_block = 3072
+    n = n_block * 8
+    t = np.arange(n) / fs
+    comp = (0.3 * np.sin(2 * np.pi * 1000.0 * t)
+            + 0.05 * np.sin(2 * np.pi * 9000.0 * t)).astype(np.float32)
+
+    d_one = FMDemodulator(stereo=False)
+    audio_one, _ = d_one.demodulate(comp)
+
+    d_blk = FMDemodulator(stereo=False)
+    audio_blk = np.concatenate([
+        d_blk.demodulate(comp[i:i + n_block])[0]
+        for i in range(0, n, n_block)
+    ])
+
+    assert audio_blk.size == audio_one.size
+    assert np.allclose(audio_blk, audio_one, atol=1e-6)
+
+
+def test_mono_to_stereo_switch_keeps_lr_aligned():
+    """Codex repro (PR #12 review): mono blocks then stereo=True.
+
+    The mono path must advance the right-channel resampler in lockstep,
+    otherwise the first stereo block after the switch emits mismatched
+    L/R lengths and the mid/side recombination raises ValueError.
+    """
+    fs = COMPOSITE_RATE
+    n_block = 3072
+    t = np.arange(n_block) / fs
+    comp = (0.3 * np.sin(2 * np.pi * 1000.0 * t)).astype(np.float32)
+
+    d = FMDemodulator(stereo=False)
+    assert d.side_nr_enabled  # the default, and the crashing config
+    for _ in range(3):
+        d.demodulate(comp)
+    d.stereo = True
+    for _ in range(4):
+        left, right = d.demodulate(comp)  # must not raise
+        assert left.shape == right.shape
+
+    # And the round trip back to mono stays healthy too.
+    d.stereo = False
+    for _ in range(2):
+        left, right = d.demodulate(comp)
+        assert left.shape == right.shape
+
+
 def test_light_demodulator_end_to_end_is_finite(rng):
     d = FMDemodulatorLight(stereo=True)
     x = _random_iq(rng, 4096)
