@@ -110,6 +110,41 @@ def test_iq_sidecar_lists_rotated_parts(sdr_receiver, tmp_path, monkeypatch):
         assert (tmp_path / name).exists()
 
 
+def test_numpy_metadata_does_not_break_recording(audio_output, tmp_path):
+    # Codex repro (PR #13 review): np.float32 in metadata raised
+    # TypeError from json.dump AFTER the WAV was opened and
+    # recording=True, leaving a half-written sidecar.
+    ao = audio_output
+    base = tmp_path / "np.wav"
+    ao.start_recording(
+        str(base), metadata={"gain_db": np.float32(20.7)},
+    )  # must not raise
+    assert ao.recording
+    meta = _load_sidecar(base)  # sidecar must be complete, valid JSON
+    assert meta["gain_db"] == pytest.approx(20.7)
+    ao.record(CHUNK.copy())
+    ao.stop_recording()
+    meta = _load_sidecar(base)
+    assert "stopped_at" in meta
+
+
+def test_unserialisable_metadata_skips_sidecar_but_records(audio_output,
+                                                          tmp_path):
+    class Hostile:
+        def __str__(self):
+            raise RuntimeError("no string for you")
+
+    ao = audio_output
+    base = tmp_path / "hostile.wav"
+    ao.start_recording(str(base), metadata={"bad": Hostile()})  # must not raise
+    assert ao.recording
+    ao.record(CHUNK.copy())
+    ao.stop_recording()  # must not raise either
+    import wave as wave_mod
+    with wave_mod.open(str(base), "rb") as r:
+        assert r.getnframes() == 768  # the recording itself survived
+
+
 def test_build_recording_path_uses_recordings_dir(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     from fm_radio.cli import build_recording_path

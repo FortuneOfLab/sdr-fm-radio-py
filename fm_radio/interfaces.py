@@ -136,12 +136,15 @@ class AudioOutputInterface(ABC):
         """
 
     @abstractmethod
-    def start_recording(self, filename: str, channels: int = 2) -> None:
+    def start_recording(self, filename: str, channels: int = 2,
+                        metadata: dict | None = None) -> None:
         """Start recording audio to a WAV file.
 
         Args:
             filename: Output WAV file path.
             channels: Number of audio channels.
+            metadata: Extra key/value pairs merged into the recording's
+                ``.json`` metadata sidecar.
         """
 
     @abstractmethod

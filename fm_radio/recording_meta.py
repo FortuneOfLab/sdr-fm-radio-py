@@ -50,6 +50,22 @@ def sidecar_path(base_wav_path: str) -> str:
     return root + ".json"
 
 
+def _json_default(obj):
+    """Best-effort conversion for non-JSON-native metadata values.
+
+    NumPy scalars (np.float32 gain values etc.) expose ``.item()``;
+    anything else falls back to ``str`` so a caller-supplied metadata
+    value can never make serialisation fail.
+    """
+    item = getattr(obj, "item", None)
+    if callable(item):
+        try:
+            return item()
+        except Exception:
+            pass
+    return str(obj)
+
+
 def write_sidecar(
     base_wav_path: str,
     meta: dict,
@@ -57,12 +73,24 @@ def write_sidecar(
 ) -> None:
     """Write (or overwrite) the sidecar for *base_wav_path*.
 
-    Never raises: a metadata write failure must not break a recording.
+    Never raises: a metadata failure must not break a recording.  The
+    JSON text is fully serialised *before* the file is opened, so a
+    serialisation error can never leave a half-written sidecar behind.
     """
     path = sidecar_path(base_wav_path)
     try:
+        text = json.dumps(
+            meta, indent=2, ensure_ascii=False, default=_json_default,
+        )
+    except Exception as e:
+        if logger is not None:
+            logger.warning(
+                "Could not serialise recording metadata for %s: %s", path, e,
+            )
+        return
+    try:
         with open(path, "w", encoding="utf-8") as f:
-            json.dump(meta, f, indent=2, ensure_ascii=False)
+            f.write(text)
             f.write("\n")
     except OSError as e:
         if logger is not None:
