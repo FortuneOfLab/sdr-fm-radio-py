@@ -50,6 +50,7 @@ from fm_radio.filters import (
 from fm_radio.pll import PLL
 from fm_radio.constants import (
     SDR_SAMPLE_RATE, SDR_SAMPLE_RATE_LIGHT,
+    MAIN_DEMOD_USE_PLL,
     MAIN_PLL_KP, MAIN_PLL_KI, PILOT_PLL_KP, PILOT_PLL_KI,
     IQ_LOWPASS_ORDER, IQ_LOWPASS_CUTOFF,
     MONO_LOWPASS_ORDER, MONO_LOWPASS_ORDER_LIGHT, MONO_LOWPASS_CUTOFF,
@@ -65,6 +66,7 @@ from fm_radio.constants import (
     PILOT_BANDPASS_LOW, PILOT_BANDPASS_HIGH,
     STEREO_PILOT_RESIDUAL_CENTER_HZ,
     STEREO_SUBCARRIER_PHASE_OFFSET_DEG,
+    STEREO_SUBCARRIER_PHASE_OFFSET_DEG_PLL,
     STEREO_SUBCARRIER_PHASE_OFFSET_DEG_LIGHT,
     STEREO_MONO_DELAY_SAMPLES,
     STEREO_LR_SIDE_RATIO_CAP_ENABLE, STEREO_LR_SIDE_RATIO_CAP_TARGET,
@@ -681,6 +683,15 @@ class FMDemodulator(BaseFMDemodulator):
             pilot_order=PILOT_BANDPASS_ORDER,
             lr_order=LR_BANDPASS_ORDER,
             logger_name='fm_receiver.FMDemodulator',
+            # The subcarrier operating point depends on the main demod:
+            # the PLL chain carries a -30.7 deg 19k/38k phase
+            # inconsistency that the discriminator does not, so each
+            # mode has its own tuned offset.
+            subcarrier_phase_offset_deg=(
+                STEREO_SUBCARRIER_PHASE_OFFSET_DEG_PLL
+                if MAIN_DEMOD_USE_PLL
+                else STEREO_SUBCARRIER_PHASE_OFFSET_DEG
+            ),
         )
 
         self.logger.info(
@@ -689,8 +700,15 @@ class FMDemodulator(BaseFMDemodulator):
             f"Stereo={'enabled' if stereo else 'disabled'}"
         )
 
-        # --- Standard-only: main PLL + IQ lowpass filter ---
+        # --- Standard-only: main FM demod + IQ lowpass filter ---
+        # Discriminator by default; the PLL is kept selectable via
+        # MAIN_DEMOD_USE_PLL for A/B comparison (see constants.py for
+        # the measured response difference).
+        self.use_pll_demod: bool = bool(MAIN_DEMOD_USE_PLL)
         self.main_pll: PLL = PLL(Kp=MAIN_PLL_KP, Ki=MAIN_PLL_KI, return_phase=False)
+        # Last filtered IQ sample carried across blocks so the
+        # discriminator's first phase difference is block-continuous.
+        self._disc_last: np.ndarray | None = None
         nyquist = self.iq_sample_rate / 2.0
         # SOS form with carried filter state.  A stateless per-block
         # lfilter here resets the IIR internal state at every 16 ms
@@ -711,8 +729,8 @@ class FMDemodulator(BaseFMDemodulator):
         )
 
     def process_iq_samples(self, iq_samples: np.ndarray) -> np.ndarray:
-        """Apply DC offset correction, lowpass filtering, PLL demodulation,
-        and resampling to generate the composite signal.
+        """Apply DC offset correction, lowpass filtering, FM demodulation
+        (discriminator or PLL), and resampling to generate the composite.
 
         Args:
             iq_samples: Input IQ samples.
@@ -731,7 +749,23 @@ class FMDemodulator(BaseFMDemodulator):
                 self.iq_sos, iq_processed, zi=self._iq_zi,
             )
             iq_filtered = iq_filtered.astype(np.complex64, copy=False)
-            main_output = self.main_pll.process(iq_filtered)
+            if self.use_pll_demod:
+                main_output = self.main_pll.process(iq_filtered)
+            else:
+                # Arctan discriminator: instantaneous frequency in
+                # rad/sample, same scale as the PLL's freq output but
+                # exactly flat over the MPX band.  The previous block's
+                # last sample seeds the first difference so the output
+                # is continuous across block boundaries.
+                if self._disc_last is None:
+                    prev = iq_filtered[:1]
+                else:
+                    prev = self._disc_last
+                ext = np.concatenate((prev, iq_filtered))
+                main_output = np.angle(
+                    ext[1:] * np.conj(ext[:-1])
+                ).astype(np.float32, copy=False)
+                self._disc_last = iq_filtered[-1:].copy()
             composite = self._iq_resampler.process(main_output)
             return composite.astype(np.float32, copy=False)
         except (ValueError, TypeError) as e:
@@ -739,10 +773,11 @@ class FMDemodulator(BaseFMDemodulator):
             raise DemodulationError(f"Error processing IQ samples: {e}") from e
 
     def _reset_subclass(self) -> None:
-        """Reset main PLL state."""
+        """Reset main demod state (PLL, discriminator, filters)."""
         self.main_pll.reset()
         self._iq_resampler.reset()
         self._iq_zi = np.zeros_like(self._iq_zi)
+        self._disc_last = None
 
 
 class FMDemodulatorLight(BaseFMDemodulator):

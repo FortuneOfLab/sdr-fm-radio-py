@@ -37,6 +37,19 @@ SDR_QUEUE_MAXSIZE = 80              # Max queued SDR sample blocks (~1.28 sec
                                     # stalls; samples are dropped beyond this)
 
 # --------------------------------------------------
+# Main FM demodulation
+# --------------------------------------------------
+# The standard demodulator can recover the composite either with a PLL
+# or with an arctan discriminator (angle(x[n]*conj(x[n-1]))).  Measured
+# closed-loop response of the PLL (Kp/Ki below) over the MPX band:
+#   +3.9 dB peaking at 19-23 kHz, -4.9 dB at 53 kHz (9 dB tilt across
+#   the L-R band) and a -31 deg phase inconsistency between 19 kHz and
+#   38 kHz.  The discriminator is exactly flat (0.00 dB) with pure-delay
+#   phase (38k - 2x19k consistency: -0.2 deg), so it is the default.
+# The PLL path is kept for A/B listening comparison.
+MAIN_DEMOD_USE_PLL = False          # True: legacy PLL demod, False: discriminator
+
+# --------------------------------------------------
 # PLL gains
 # --------------------------------------------------
 MAIN_PLL_KP = 0.12926              # Main PLL proportional gain
@@ -79,14 +92,26 @@ PILOT_NOISE_BAND1_HIGH = 17500.0    # Pilot SNR noise band 1 upper edge (Hz)
 PILOT_NOISE_BAND2_LOW = 20500.0     # Pilot SNR noise band 2 lower edge (Hz)
 PILOT_NOISE_BAND2_HIGH = 22000.0    # Pilot SNR noise band 2 upper edge (Hz)
 STEREO_PILOT_RESIDUAL_CENTER_HZ = 19000.0  # Center frequency used by residual pilot tracking
-STEREO_SUBCARRIER_PHASE_OFFSET_DEG = 285.0  # Fixed phase offset for 38k subcarrier generation
-                                    # (standard demodulator).  Was 300.0 with the old
-                                    # pilot path (real order-9 18-20k bandpass + FFT
-                                    # Hilbert): that bandpass had -7.5 deg phase at
-                                    # 19 kHz, doubled to -15 deg at the 38 kHz
-                                    # subcarrier.  The analytic heterodyne pilot path has
-                                    # exactly 0 deg static phase, so the offset shifts by
-                                    # the same 15 deg to keep the tuned operating point.
+STEREO_SUBCARRIER_PHASE_OFFSET_DEG = 316.0  # Fixed phase offset for 38k subcarrier generation
+                                    # (standard demodulator).  History of the value:
+                                    #   300.0  original tuning (PLL demod + real order-9
+                                    #          pilot bandpass + FFT Hilbert; the bandpass
+                                    #          hid -15 deg at the subcarrier)
+                                    #   285.0  analytic heterodyne pilot path (0 deg
+                                    #          static phase; 300 - 15)
+                                    #   316.0  discriminator main demod: the PLL's
+                                    #          closed loop had a -30.7 deg phase
+                                    #          inconsistency between 19 kHz and 38 kHz
+                                    #          which the discriminator does not
+                                    #          (285 + 30.7 = 315.7).  Synthetic sweep
+                                    #          confirms a broad optimum at 315-320 with
+                                    #          separation improving to ~26/33 dB.
+STEREO_SUBCARRIER_PHASE_OFFSET_DEG_PLL = 285.0  # Operating point when the legacy PLL main
+                                    # demod is selected (MAIN_DEMOD_USE_PLL = True): the
+                                    # PLL chain includes the -30.7 deg 19k/38k phase
+                                    # inconsistency, so it keeps the pre-discriminator
+                                    # value.  FMDemodulator picks the matching offset
+                                    # automatically based on MAIN_DEMOD_USE_PLL.
 STEREO_SUBCARRIER_PHASE_OFFSET_DEG_LIGHT = 297.4  # Same operating-point preservation for
                                     # the light demodulator: its old pilot bandpass was
                                     # order 1 with only -1.31 deg phase at 19 kHz
