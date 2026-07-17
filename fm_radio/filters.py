@@ -181,10 +181,14 @@ class StatefulResampler:
     for an endless radio stream.
 
     Global input/output counters make the emission window bookkeeping
-    exact when block sizes keep the polyphase grid aligned (all block
-    sizes multiples of ``down / gcd(up, down)``, as the fixed
-    SDR_BLOCK_SIZE does); for other sizes the counters still guarantee
-    the long-run output count never drifts.
+    exact for ARBITRARY block sizes: the prepended history is length-
+    adjusted per call so that the extended block always starts on a
+    multiple of the polyphase grid period ``down / gcd(up, down)``.
+    (A fixed-length tail is only grid-aligned when every block size is
+    itself a multiple of the period — true for the standard 3/16 chain
+    with 16384-sample blocks, but false for the light 96/125 chain,
+    where the resulting per-block fractional-phase offset reached
+    order-of-signal errors on wideband content.)
     """
 
     def __init__(self, up: int, down: int, window: object = None,
@@ -203,6 +207,12 @@ class StatefulResampler:
         # Half-length of the internal polyphase FIR (scipy default)
         self._half_len: int = 10 * max(self.up, self.down)
         self._overlap: int = self._half_len * 2
+        # Polyphase grid period: ext must start at a multiple of this
+        # for local output indices to map exactly onto the global
+        # output grid (off = ext_start*up/down must be an integer).
+        self._grid: int = self.down // math.gcd(self.up, self.down)
+        # History length: enough for the longest variable tail.
+        self._hist_len: int = self._overlap + self._grid - 1
         self._prev_tail: np.ndarray | None = None
         self._in_total: int = 0     # input samples consumed so far
         self._out_emitted: int = 0  # output samples emitted so far
@@ -214,14 +224,20 @@ class StatefulResampler:
         if self._prev_tail is None:
             # Zero seed: makes the first emitted outputs identical to the
             # leading edge of a one-shot resample_poly (which zero-pads).
-            self._prev_tail = np.zeros(self._overlap, dtype=x.dtype)
+            self._prev_tail = np.zeros(self._hist_len, dtype=x.dtype)
 
-        ext_start = self._in_total - self._overlap
-        ext = np.concatenate([self._prev_tail, x])
+        # Variable-length tail: extend the overlap by up to grid-1
+        # samples so ext starts on a polyphase grid point regardless of
+        # the block sizes seen so far.
+        r = (self._in_total - self._overlap) % self._grid
+        tail_len = self._overlap + r
+        ext_start = self._in_total - tail_len
+        ext = np.concatenate([self._prev_tail[self._hist_len - tail_len:], x])
         y = self._resample(ext)
         self._in_total += x.size
 
-        # Local output j of ``y`` corresponds to global output j + off.
+        # Local output j of ``y`` corresponds to global output j + off
+        # (exact: ext_start is a multiple of the grid period).
         off = (ext_start * self.up) // self.down
         # Only emit outputs whose FIR support is fully inside received
         # input: global outputs strictly below
@@ -234,10 +250,12 @@ class StatefulResampler:
         seg = y[a:b]
         self._out_emitted += seg.size
 
-        if x.size >= self._overlap:
-            self._prev_tail = x[-self._overlap:].copy()
+        if x.size >= self._hist_len:
+            self._prev_tail = x[-self._hist_len:].copy()
         else:
-            self._prev_tail = ext[-self._overlap:].copy()
+            self._prev_tail = np.concatenate(
+                [self._prev_tail, x],
+            )[-self._hist_len:].copy()
         return seg
 
     def reset(self) -> None:

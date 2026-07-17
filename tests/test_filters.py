@@ -111,6 +111,38 @@ def test_stateful_resampler_emit_align_keeps_blocks_decimatable(rng):
     assert np.allclose(y_stream, y_ref[:y_stream.size], atol=1e-9)
 
 
+def test_stateful_resampler_light_ratio_is_exact(rng):
+    """96/125 (light chain) with 16384-sample blocks must be exact.
+
+    16384 is not a multiple of the 96/125 polyphase grid period (125),
+    so the fixed-length-tail implementation emitted every block with a
+    fractional-phase offset from the global grid - order-of-signal
+    errors (max ~4.6 on unit-variance wideband input).  The variable-
+    length tail keeps ext grid-aligned for arbitrary block sizes.
+    """
+    r = StatefulResampler(96, 125)
+    x = rng.standard_normal(16384 * 4)
+    y_stream = np.concatenate(
+        [r.process(x[i:i + 16384]) for i in range(0, x.size, 16384)]
+    )
+    y_ref = sg.resample_poly(x, 96, 125)
+    assert np.allclose(y_stream, y_ref[:y_stream.size], atol=1e-9)
+
+
+def test_stateful_resampler_arbitrary_block_sizes_are_exact(rng):
+    """Mixed, grid-unaligned block sizes must still be an exact prefix."""
+    r = StatefulResampler(3, 16, window=("kaiser", 10.0))
+    sizes = [1000, 16384, 7, 12345, 500, 9000]
+    x = rng.standard_normal(sum(sizes))
+    pos, segs = 0, []
+    for s in sizes:
+        segs.append(r.process(x[pos:pos + s]))
+        pos += s
+    y_stream = np.concatenate(segs)
+    y_ref = sg.resample_poly(x, 3, 16, window=("kaiser", 10.0))
+    assert np.allclose(y_stream, y_ref[:y_stream.size], atol=1e-9)
+
+
 def test_stateful_resampler_reset_gives_repeatable_stream(rng):
     up, down = 3, 16
     r = StatefulResampler(up, down, window=("kaiser", 10.0))

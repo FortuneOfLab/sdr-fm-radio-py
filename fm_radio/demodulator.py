@@ -814,10 +814,23 @@ class FMDemodulatorLight(BaseFMDemodulator):
             current_phase = np.angle(iq_processed)
             if self.last_phase is None:
                 phase = np.unwrap(current_phase)
+                # Stream start: no previous sample, so the first
+                # difference is defined as zero (matches one-shot
+                # processing conventions).
+                fm_demod = np.diff(phase, prepend=phase[:1])
             else:
-                phase = np.unwrap(np.concatenate(([self.last_phase], current_phase)))[1:]
-            fm_demod = np.diff(phase, prepend=phase[0])
-            self.last_phase = phase[-1]
+                # Prepend the carried previous phase so the first
+                # difference of this block is the true sample-to-sample
+                # step.  The old code prepended the block's own first
+                # phase, forcing fm_demod[0] = 0 at EVERY block boundary
+                # (a 1-sample dropout every 16 ms).  The carried value
+                # is materialised in the block's dtype so the float32
+                # pipeline is not promoted to float64.
+                prev = np.array([self.last_phase], dtype=current_phase.dtype)
+                phase = np.unwrap(np.concatenate((prev, current_phase)))
+                fm_demod = np.diff(phase)
+                phase = phase[1:]
+            self.last_phase = float(phase[-1])
             composite = (
                 self._iq_resampler.process(fm_demod) * LIGHT_COMPOSITE_SCALE
             )
