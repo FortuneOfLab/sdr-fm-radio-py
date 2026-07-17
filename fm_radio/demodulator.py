@@ -65,6 +65,7 @@ from fm_radio.constants import (
     PILOT_BANDPASS_LOW, PILOT_BANDPASS_HIGH,
     STEREO_PILOT_RESIDUAL_CENTER_HZ,
     STEREO_SUBCARRIER_PHASE_OFFSET_DEG,
+    STEREO_SUBCARRIER_PHASE_OFFSET_DEG_LIGHT,
     STEREO_MONO_DELAY_SAMPLES,
     STEREO_LR_SIDE_RATIO_CAP_ENABLE, STEREO_LR_SIDE_RATIO_CAP_TARGET,
     STEREO_LR_SIDE_RATIO_CAP_MIN_GAIN,
@@ -112,7 +113,8 @@ class BaseFMDemodulator(FMDemodulatorInterface):
     def __init__(self, iq_sample_rate: float, composite_rate: float,
                  final_audio_rate: float, stereo: bool,
                  mono_order: int, pilot_order: int, lr_order: int,
-                 logger_name: str):
+                 logger_name: str,
+                 subcarrier_phase_offset_deg: float = STEREO_SUBCARRIER_PHASE_OFFSET_DEG):
         self.logger = logging.getLogger(logger_name)
         self.iq_sample_rate = iq_sample_rate
         self.composite_rate = composite_rate
@@ -151,9 +153,26 @@ class BaseFMDemodulator(FMDemodulatorInterface):
             order=mono_order, cutoff=LR_HIGH_SPLIT_CUTOFF,
             sample_rate=self.composite_rate,
         )
-        self.bp_pilot = BandpassFilter(
-            order=pilot_order, lowcut=PILOT_BANDPASS_LOW,
-            highcut=PILOT_BANDPASS_HIGH, sample_rate=self.composite_rate,
+        # --- Analytic pilot extraction (heterodyne + lowpass) ---
+        # The pilot is extracted by mixing the composite down by the
+        # pilot centre frequency with a phase-continuous carrier, then
+        # lowpassing the complex baseband with carried filter state.
+        # This replaces the previous real bandpass + per-block FFT
+        # Hilbert: signal.hilbert assumes a periodic block, so any
+        # carrier offset made the pilot non-periodic in the block and
+        # produced phase errors of up to ~12 deg at every block edge
+        # (x2 at the 38 kHz subcarrier).  The heterodyne path is
+        # stateful end to end and has no block-boundary artefacts.
+        # Cutoff = half the old bandpass width keeps the same
+        # equivalent noise bandwidth, so pilot SNR scaling and the
+        # tuned blend thresholds are preserved.
+        pilot_lp_cutoff = 0.5 * (PILOT_BANDPASS_HIGH - PILOT_BANDPASS_LOW)
+        self.pilot_lp_sos: np.ndarray = signal.butter(
+            pilot_order, pilot_lp_cutoff / (self.composite_rate / 2.0),
+            btype="low", output="sos",
+        )
+        self._pilot_lp_zi: np.ndarray = np.zeros(
+            (self.pilot_lp_sos.shape[0], 2), dtype=np.complex128,
         )
         self.bp_pilot_noise_1 = BandpassFilter(
             order=pilot_order, lowcut=PILOT_NOISE_BAND1_LOW,
@@ -207,7 +226,7 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         self.stereo_phase_err_ema: float = 0.0
         self.lr_high_gate_gain: float = 1.0
         self.pilot_residual_center_hz: float = float(STEREO_PILOT_RESIDUAL_CENTER_HZ)
-        self.subcarrier_phase_offset_rad: float = np.deg2rad(STEREO_SUBCARRIER_PHASE_OFFSET_DEG)
+        self.subcarrier_phase_offset_rad: float = np.deg2rad(subcarrier_phase_offset_deg)
         self.mono_delay_samples: int = max(0, int(STEREO_MONO_DELAY_SAMPLES))
         self._mono_delay_state: np.ndarray = np.zeros(self.mono_delay_samples, dtype=np.float32)
         self._pilot_phase_last: float | None = None
@@ -266,19 +285,35 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         else:
             return self._demodulate_mono(composite)
 
-    def _estimate_pilot_phase(self, pilot_complex: np.ndarray) -> np.ndarray:
-        """Estimate pilot phase from analytic pilot signal (residual mode)."""
-        n = np.arange(pilot_complex.size, dtype=np.float64)
+    def _estimate_pilot_phase(
+        self, composite: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Estimate pilot phase via heterodyne + stateful lowpass.
+
+        The real composite is mixed down by the pilot centre frequency
+        (phase-continuous across blocks via ``_pilot_mix_phase``) and
+        lowpassed with carried state, yielding the complex pilot
+        residual directly for the PLL.  For a pilot of amplitude A the
+        residual amplitude is A/2 (the mix splits the real cosine into
+        two lines and the lowpass keeps one).
+
+        Returns:
+            Tuple of (pilot_phase, pilot_residual).
+        """
+        n = np.arange(composite.size, dtype=np.float64)
         w0 = 2.0 * np.pi * self.pilot_residual_center_hz / self.composite_rate
         mix_phase = self._pilot_mix_phase + w0 * n
         mix_phase_wrapped = np.mod(mix_phase, 2.0 * np.pi)
-        residual_in = pilot_complex * np.exp(-1j * mix_phase_wrapped)
+        mixed = composite * np.exp(-1j * mix_phase_wrapped)
+        residual_in, self._pilot_lp_zi = signal.sosfilt(
+            self.pilot_lp_sos, mixed, zi=self._pilot_lp_zi,
+        )
         residual_phase = self.pilot_pll.process(
-            np.asarray(residual_in, dtype=np.complex64)
+            residual_in.astype(np.complex64, copy=False)
         ).astype(np.float64, copy=False)
         pilot_phase = residual_phase + mix_phase
         self._pilot_mix_phase = float(
-            np.mod(self._pilot_mix_phase + w0 * pilot_complex.size, 2.0 * np.pi)
+            np.mod(self._pilot_mix_phase + w0 * composite.size, 2.0 * np.pi)
         )
         if pilot_phase.size:
             if self._pilot_phase_last is None:
@@ -288,7 +323,7 @@ class BaseFMDemodulator(FMDemodulatorInterface):
                     np.concatenate(([self._pilot_phase_last], pilot_phase))
                 )[1:]
             self._pilot_phase_last = float(pilot_phase[-1])
-        return pilot_phase
+        return pilot_phase, residual_in
 
     def _apply_mono_delay(self, mono: np.ndarray) -> np.ndarray:
         """Delay mono path to compensate LR path group delay."""
@@ -324,12 +359,14 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         """
         mono_raw = self.lp_mono.apply(composite)
         mono = self._apply_mono_delay(mono_raw)
-        pilot_signal = self.bp_pilot.apply(composite)
-        pilot_complex = signal.hilbert(pilot_signal.astype(np.float32))
-        pilot_phase = self._estimate_pilot_phase(pilot_complex)
+        pilot_phase, pilot_residual = self._estimate_pilot_phase(composite)
 
         # --- Adaptive stereo blend based on pilot SNR ---
-        pilot_power = float(np.mean(pilot_signal ** 2))
+        # The analytic residual has amplitude A/2 for a pilot of
+        # amplitude A, so 2*mean(|residual|^2) equals the mean square
+        # of the old real-bandpassed pilot (A^2/2), preserving the SNR
+        # scale that the blend thresholds were tuned against.
+        pilot_power = 2.0 * float(np.mean(np.abs(pilot_residual) ** 2))
         pilot_noise_1 = self.bp_pilot_noise_1.apply(composite)
         pilot_noise_2 = self.bp_pilot_noise_2.apply(composite)
         noise_power_1 = float(np.mean(pilot_noise_1 ** 2))
@@ -600,7 +637,6 @@ class BaseFMDemodulator(FMDemodulatorInterface):
             self.lp_lr_base, self.lp_lr_base_q,
             self.lp_lr_low, self.lp_lr_low_q,
             self.lp_lr_mid, self.lp_lr_mid_q,
-            self.bp_pilot,
             self.bp_pilot_noise_1, self.bp_pilot_noise_2,
             self.bp_lr,
             self.notch_pilot_l, self.notch_pilot_l2,
@@ -608,6 +644,7 @@ class BaseFMDemodulator(FMDemodulatorInterface):
             self.deemph_left, self.deemph_right,
         ):
             filt.reset()
+        self._pilot_lp_zi = np.zeros_like(self._pilot_lp_zi)
         self.side_nr.reset()
         self.side_nr_mid_aligner.reset()
         self._reset_subclass()
@@ -731,6 +768,10 @@ class FMDemodulatorLight(BaseFMDemodulator):
             pilot_order=PILOT_BANDPASS_ORDER_LIGHT,
             lr_order=LR_BANDPASS_ORDER_LIGHT,
             logger_name='fm_receiver.FMDemodulatorLight',
+            # The light demodulator's old pilot bandpass (order 1) had a
+            # different static phase than the standard order-9 one, so its
+            # tuned operating point maps to a different offset here.
+            subcarrier_phase_offset_deg=STEREO_SUBCARRIER_PHASE_OFFSET_DEG_LIGHT,
         )
 
         self.logger.info(
