@@ -90,10 +90,31 @@ def _to_float_audio(x: np.ndarray) -> np.ndarray:
     return x.astype(np.float32)
 
 
+def _read_wav_window(path: str, duration_s: float | None) -> tuple[int, np.ndarray]:
+    """Read up to ``duration_s`` seconds of a WAV without loading it whole.
+
+    Uses scipy's mmap mode and slices the requested window *before* any
+    dtype conversion, so peak memory is bounded by the window size, not
+    the file size.  IQ captures can exceed 4 GB now that the receiver
+    rotates long recordings; the previous eager read materialised the
+    entire file as int16 and again as float32 regardless of
+    ``--duration``.  Falls back to an eager read for WAV subtypes mmap
+    cannot handle (e.g. 24-bit packed).
+    """
+    try:
+        fs, raw = wavfile.read(path, mmap=True)
+    except Exception:
+        fs, raw = wavfile.read(path)
+    if duration_s is not None and duration_s > 0:
+        n = int(duration_s * fs)
+        raw = raw[:n]
+    return fs, np.asarray(raw)
+
+
 def _load_stereo_wav(path: str, target_fs: int, duration_s: float | None = None
                      ) -> tuple[np.ndarray, np.ndarray]:
-    fs, raw = wavfile.read(path)
-    x = _to_float_audio(np.asarray(raw))
+    fs, raw = _read_wav_window(path, duration_s)
+    x = _to_float_audio(raw)
     if x.ndim == 1:
         left = x
         right = x
@@ -101,10 +122,6 @@ def _load_stereo_wav(path: str, target_fs: int, duration_s: float | None = None
         left = x[:, 0]
         right = x[:, 1] if x.shape[1] > 1 else x[:, 0]
 
-    if duration_s is not None and duration_s > 0:
-        n = int(duration_s * fs)
-        left = left[:n]
-        right = right[:n]
     left = _resample(left, fs, target_fs)
     right = _resample(right, fs, target_fs)
     n = min(left.size, right.size)
@@ -118,16 +135,12 @@ def _load_stereo_wav(path: str, target_fs: int, duration_s: float | None = None
 
 
 def _load_iq_wav(path: str, target_fs: int, duration_s: float | None = None) -> np.ndarray:
-    fs, raw = wavfile.read(path)
-    x = _to_float_audio(np.asarray(raw))
-    if x.ndim < 2 or x.shape[1] < 2:
+    fs, raw = _read_wav_window(path, duration_s)
+    if raw.ndim < 2 or raw.shape[1] < 2:
         raise ValueError("IQ wav must have at least 2 channels (I=ch0, Q=ch1).")
+    x = _to_float_audio(raw)
     i = x[:, 0]
     q = x[:, 1]
-    if duration_s is not None and duration_s > 0:
-        n = int(duration_s * fs)
-        i = i[:n]
-        q = q[:n]
     i = _resample(i, fs, target_fs)
     q = _resample(q, fs, target_fs)
     n = min(i.size, q.size)
