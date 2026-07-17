@@ -226,6 +226,37 @@ def test_mono_to_stereo_switch_keeps_lr_aligned():
         assert left.shape == right.shape
 
 
+def test_light_composite_is_block_size_invariant():
+    """The light IQ->composite chain must be block-size invariant.
+
+    The light chain's 96/125 resampler ratio has a polyphase grid
+    period of 125, which SDR blocks (16384) never align to; before the
+    variable-tail resampler fix, every light block was emitted with a
+    fractional-phase offset (B7).
+    """
+    fs = 0.25e6
+    n_block = 16384
+    n = n_block * 4
+    t = np.arange(n) / fs
+    mpx = (0.30 * np.sin(2 * np.pi * 3_000.0 * t)
+           + 0.10 * np.sin(2 * np.pi * 38_000.0 * t))
+    x = np.exp(1j * np.cumsum(mpx)).astype(np.complex64)
+
+    d_one = FMDemodulatorLight(stereo=True)
+    d_one.dc_alpha = 0.0
+    comp_one = d_one.process_iq_samples(x)
+
+    d_blk = FMDemodulatorLight(stereo=True)
+    d_blk.dc_alpha = 0.0
+    comp_blk = np.concatenate([
+        d_blk.process_iq_samples(x[i:i + n_block])
+        for i in range(0, n, n_block)
+    ])
+
+    assert comp_blk.size == comp_one.size
+    assert np.allclose(comp_blk, comp_one, atol=1e-5)
+
+
 def test_light_demodulator_end_to_end_is_finite(rng):
     d = FMDemodulatorLight(stereo=True)
     x = _random_iq(rng, 4096)
