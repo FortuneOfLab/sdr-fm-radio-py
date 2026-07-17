@@ -60,6 +60,22 @@ FLOORS = {
 
 
 @pytest.mark.slow
+def test_phase_corrector_recovers_large_static_error():
+    """A -75 deg static subcarrier error must be fully corrected.
+
+    Real multipath channels need corrections well beyond the old
+    45 deg clamp (the reference station sits at ~-72 deg); with the
+    clamp at 45 this scenario lost 5.5-7.8 dB of separation
+    (18.9/20.2 dB), with the widened limit it recovers the clean
+    baseline (24.4/28.0 dB).
+    """
+    np.random.seed(0)
+    m = evaluate_quality(**BASE_KWARGS, subcarrier_phase_offset_deg=241.0)
+    assert m.separation_l_to_r_db > 22.0, m
+    assert m.separation_r_to_l_db > 22.0, m
+
+
+@pytest.mark.slow
 @pytest.mark.parametrize("scenario", list(SCENARIOS))
 def test_synthetic_quality_floors(scenario):
     np.random.seed(0)  # _fm_modulate_iq uses the legacy global RNG
