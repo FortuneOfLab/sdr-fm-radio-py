@@ -238,11 +238,16 @@ def _fm_modulate_iq(
 
     # Two-ray multipath: direct path plus one delayed, attenuated,
     # phase-rotated echo.  Delay is rounded to whole IQ samples
-    # (~0.98 us at 1.024 Msps).
+    # (~0.98 us at 1.024 Msps).  An echo delayed beyond the generated
+    # signal never arrives within the window, so the echo stays zero
+    # (guard needed: iq[:size - d] with d > size is a *non-empty*
+    # negative slice and would raise on assignment to the empty
+    # echo[d:]).
     if multipath_gain and multipath_delay_us > 0.0:
         d = max(1, int(round(multipath_delay_us * 1e-6 * fs_iq)))
         echo = np.zeros_like(iq)
-        echo[d:] = iq[:iq.size - d]
+        if d < iq.size:
+            echo[d:] = iq[:iq.size - d]
         coeff = np.complex64(
             multipath_gain * np.exp(1j * np.deg2rad(multipath_phase_deg))
         )
