@@ -612,8 +612,18 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         mono = self.lp_mono.apply(composite)
         mono = self.notch_pilot_l.apply(mono)
         mono = self.notch_pilot_l2.apply(mono)
-        mono_48 = self._audio_resampler_l.process(mono.astype(np.float32))
+        mono_f32 = mono.astype(np.float32)
+        mono_48 = self._audio_resampler_l.process(mono_f32)
+        # Advance the right-channel chain in lockstep with the same
+        # input: the stereo path uses both resamplers, so if only the
+        # left one progressed during mono operation, a later
+        # mono -> stereo switch would resume with the two resamplers at
+        # different global emission positions and the first stereo
+        # block would return mismatched L/R lengths (breaking the
+        # mid/side recombination downstream).
+        right_48 = self._audio_resampler_r.process(mono_f32)
         mono_48 = self.deemph_left.process(mono_48)
+        self.deemph_right.process(right_48)
         return mono_48, mono_48
 
     # ------------------------------------------------------------------
