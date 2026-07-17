@@ -79,13 +79,19 @@ PILOT_NOISE_BAND1_HIGH = 17500.0    # Pilot SNR noise band 1 upper edge (Hz)
 PILOT_NOISE_BAND2_LOW = 20500.0     # Pilot SNR noise band 2 lower edge (Hz)
 PILOT_NOISE_BAND2_HIGH = 22000.0    # Pilot SNR noise band 2 upper edge (Hz)
 STEREO_PILOT_RESIDUAL_CENTER_HZ = 19000.0  # Center frequency used by residual pilot tracking
-STEREO_SUBCARRIER_PHASE_OFFSET_DEG = 285.0  # Fixed phase offset for 38k subcarrier generation.
-                                    # Was 300.0 with the old pilot path (real 18-20k
-                                    # bandpass + FFT Hilbert): that bandpass had -7.5 deg
-                                    # phase at 19 kHz, doubled to -15 deg at the 38 kHz
+STEREO_SUBCARRIER_PHASE_OFFSET_DEG = 285.0  # Fixed phase offset for 38k subcarrier generation
+                                    # (standard demodulator).  Was 300.0 with the old
+                                    # pilot path (real order-9 18-20k bandpass + FFT
+                                    # Hilbert): that bandpass had -7.5 deg phase at
+                                    # 19 kHz, doubled to -15 deg at the 38 kHz
                                     # subcarrier.  The analytic heterodyne pilot path has
                                     # exactly 0 deg static phase, so the offset shifts by
                                     # the same 15 deg to keep the tuned operating point.
+STEREO_SUBCARRIER_PHASE_OFFSET_DEG_LIGHT = 297.4  # Same operating-point preservation for
+                                    # the light demodulator: its old pilot bandpass was
+                                    # order 1 with only -1.31 deg phase at 19 kHz
+                                    # (-2.62 deg at the subcarrier), so the old effective
+                                    # offset was 300 - 2.62 = 297.4 deg.
 STEREO_MONO_DELAY_SAMPLES = 18      # Delay mono path to match LR path group delay (at COMPOSITE_RATE)
 STEREO_LR_SIDE_RATIO_CAP_ENABLE = False     # Enable limiting of |L-R|/|L+R| ratio for stability
 STEREO_LR_SIDE_RATIO_CAP_TARGET = 0.35     # Target upper bound of |L-R|/|L+R| before limiting

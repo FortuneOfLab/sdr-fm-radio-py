@@ -65,6 +65,7 @@ from fm_radio.constants import (
     PILOT_BANDPASS_LOW, PILOT_BANDPASS_HIGH,
     STEREO_PILOT_RESIDUAL_CENTER_HZ,
     STEREO_SUBCARRIER_PHASE_OFFSET_DEG,
+    STEREO_SUBCARRIER_PHASE_OFFSET_DEG_LIGHT,
     STEREO_MONO_DELAY_SAMPLES,
     STEREO_LR_SIDE_RATIO_CAP_ENABLE, STEREO_LR_SIDE_RATIO_CAP_TARGET,
     STEREO_LR_SIDE_RATIO_CAP_MIN_GAIN,
@@ -112,7 +113,8 @@ class BaseFMDemodulator(FMDemodulatorInterface):
     def __init__(self, iq_sample_rate: float, composite_rate: float,
                  final_audio_rate: float, stereo: bool,
                  mono_order: int, pilot_order: int, lr_order: int,
-                 logger_name: str):
+                 logger_name: str,
+                 subcarrier_phase_offset_deg: float = STEREO_SUBCARRIER_PHASE_OFFSET_DEG):
         self.logger = logging.getLogger(logger_name)
         self.iq_sample_rate = iq_sample_rate
         self.composite_rate = composite_rate
@@ -224,7 +226,7 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         self.stereo_phase_err_ema: float = 0.0
         self.lr_high_gate_gain: float = 1.0
         self.pilot_residual_center_hz: float = float(STEREO_PILOT_RESIDUAL_CENTER_HZ)
-        self.subcarrier_phase_offset_rad: float = np.deg2rad(STEREO_SUBCARRIER_PHASE_OFFSET_DEG)
+        self.subcarrier_phase_offset_rad: float = np.deg2rad(subcarrier_phase_offset_deg)
         self.mono_delay_samples: int = max(0, int(STEREO_MONO_DELAY_SAMPLES))
         self._mono_delay_state: np.ndarray = np.zeros(self.mono_delay_samples, dtype=np.float32)
         self._pilot_phase_last: float | None = None
@@ -752,6 +754,10 @@ class FMDemodulatorLight(BaseFMDemodulator):
             pilot_order=PILOT_BANDPASS_ORDER_LIGHT,
             lr_order=LR_BANDPASS_ORDER_LIGHT,
             logger_name='fm_receiver.FMDemodulatorLight',
+            # The light demodulator's old pilot bandpass (order 1) had a
+            # different static phase than the standard order-9 one, so its
+            # tuned operating point maps to a different offset here.
+            subcarrier_phase_offset_deg=STEREO_SUBCARRIER_PHASE_OFFSET_DEG_LIGHT,
         )
 
         self.logger.info(
