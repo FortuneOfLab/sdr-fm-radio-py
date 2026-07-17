@@ -71,6 +71,21 @@ python fm_receiver.py --light
 - `CommandLineInterface` → Allows user input commands
 - `FMReceiverController` → Main controller integrating all components
 
+## Development
+
+### Running the tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest            # full suite (~30 s, includes the end-to-end quality gate)
+pytest -m "not slow"   # quick iteration without the end-to-end test
+```
+
+The test suite injects fakes for `pyaudio` and `rtlsdr` (see
+`tests/conftest.py`), so no sound device or RTL-SDR driver is required —
+it runs unmodified on CI. GitHub Actions runs the suite on Ubuntu and
+Windows for every push to `main` and every pull request.
+
 ## License
 
 This project is licensed under the **MIT License**.
