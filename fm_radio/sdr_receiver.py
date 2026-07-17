@@ -37,6 +37,7 @@ import threading
 import numpy as np
 from rtlsdr import RtlSdr
 
+from fm_radio import recording_meta
 from fm_radio.interfaces import SDRReceiverInterface
 from fm_radio.exceptions import SDRDeviceError, RecordingError
 from fm_radio.constants import (
@@ -103,6 +104,7 @@ class SDRReceiver(SDRReceiverInterface):
         # tracks the data chunk size of the current file so we can
         # rotate before crossing the 2^32-byte WAV header limit.
         self._iq_record_base_path: str | None = None
+        self._iq_record_meta: dict | None = None
         self._iq_record_part_index: int = 0
         self._iq_record_bytes_written: int = 0
         self._iq_record_worker_stop: threading.Event = threading.Event()
@@ -273,6 +275,25 @@ class SDRReceiver(SDRReceiverInterface):
                     self._iq_record_part_index = 0
                     self._iq_record_bytes_written = 0
                 self.iq_recording = True
+
+            # Metadata sidecar (CLI-thread only, never the SDR callback).
+            try:
+                gain_db = float(self.sdr.get_gain())
+            except Exception:
+                gain_db = None
+            self._iq_record_meta = {
+                "type": "iq",
+                "file": recording_meta.part_list(
+                    filename, 0, self._make_rotated_iq_path,
+                )[0],
+                "sample_rate_hz": int(self.sample_rate),
+                "center_freq_hz": float(self.center_freq),
+                "gain_db": gain_db,
+                "started_at": recording_meta.now_iso(),
+            }
+            recording_meta.write_sidecar(
+                filename, self._iq_record_meta, self.logger,
+            )
             self.logger.info(f"IQ recording started: {filename}")
 
     def stop_iq_recording(self) -> None:
@@ -312,6 +333,9 @@ class SDRReceiver(SDRReceiverInterface):
 
         with self.iq_record_lock:
             parts_count = self._iq_record_part_index + 1
+            base_path = self._iq_record_base_path
+            part_index = self._iq_record_part_index
+            drops = self._iq_record_drop_count
             if self.iq_record_wave is not None:
                 try:
                     self.iq_record_wave.close()
@@ -326,6 +350,19 @@ class SDRReceiver(SDRReceiverInterface):
                     )
                 finally:
                     self.iq_record_wave = None
+
+        # Finalise the metadata sidecar with the session outcome.
+        if base_path is not None and self._iq_record_meta:
+            self._iq_record_meta.update({
+                "stopped_at": recording_meta.now_iso(),
+                "parts": recording_meta.part_list(
+                    base_path, part_index, self._make_rotated_iq_path,
+                ),
+                "dropped_blocks": int(drops),
+            })
+            recording_meta.write_sidecar(
+                base_path, self._iq_record_meta, self.logger,
+            )
 
     # ------------------------------------------------------------------
     # IQ recording worker (runs disk writes off the SDR callback thread)

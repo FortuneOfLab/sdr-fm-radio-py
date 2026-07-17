@@ -148,7 +148,10 @@ def test_rotation_preserves_every_sample(sdr_receiver, tmp_path, monkeypatch):
             pass
     recv.stop_iq_recording()
 
-    files = sorted(p for p in tmp_path.iterdir() if p.name.startswith("rot"))
+    files = sorted(
+        p for p in tmp_path.iterdir()
+        if p.name.startswith("rot") and p.suffix == ".wav"
+    )
     assert len(files) >= 2
     total_frames = sum(_wav_frames(p) for p in files)
     assert total_frames == n_blocks * BLOCK_FRAMES

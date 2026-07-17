@@ -249,7 +249,16 @@ class FMReceiverController:
         Args:
             filename: Output WAV file path.
         """
-        self.audio_output.start_recording(filename)
+        # Capture context for the metadata sidecar; the audio subsystem
+        # itself does not know the tuner state.
+        try:
+            metadata = {
+                "center_freq_hz": float(self.sdr_receiver.get_center_frequency()),
+                "gain_db": float(self.sdr_receiver.get_gain()),
+            }
+        except Exception:
+            metadata = None
+        self.audio_output.start_recording(filename, metadata=metadata)
 
     def stop_recording(self) -> None:
         """Stop the current recording session."""
