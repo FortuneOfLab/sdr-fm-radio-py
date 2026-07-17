@@ -528,12 +528,52 @@ def _align_and_fit(ref: np.ndarray, x: np.ndarray, max_lag: int) -> tuple[np.nda
     return ref_fit.astype(np.float64), x_a.astype(np.float64)
 
 
-def _snr_db(ref_fit: np.ndarray, x: np.ndarray) -> float:
+# Robust-metric windowing: THD+N and SNR are computed per window and the
+# MEDIAN across windows is reported.  A whole-signal single-FFT metric
+# lets one localised transient (settle dynamics reaching past the warmup
+# trim, an end-of-stream edge) dominate the reading: the same DSP
+# measured -18 to -25 dB THD+N depending only on where the measurement
+# window edges landed.  The median across 1 s windows is insensitive to
+# a contaminated window and to the total duration.
+METRIC_WIN_S = 1.0
+METRIC_HOP_S = 0.5
+
+
+def _windowed_median(values: list[float]) -> float:
+    finite = [v for v in values if np.isfinite(v)]
+    if not finite:
+        return float("nan")
+    return float(np.median(finite))
+
+
+def _iter_windows(n: int, fs: int):
+    win = int(METRIC_WIN_S * fs)
+    hop = int(METRIC_HOP_S * fs)
+    if n < win + hop:
+        yield 0, n  # too short to window: single segment
+        return
+    for start in range(0, n - win + 1, hop):
+        yield start, start + win
+
+
+def _snr_db_single(ref_fit: np.ndarray, x: np.ndarray) -> float:
     err = x - ref_fit
     return 10.0 * np.log10((np.mean(ref_fit ** 2) + EPS) / (np.mean(err ** 2) + EPS))
 
 
-def _thdn_db(x: np.ndarray, fs: int, tone_hz: float) -> float:
+def _snr_db(ref_fit: np.ndarray, x: np.ndarray) -> float:
+    """Median of per-window SNR (see METRIC_WIN_S note above)."""
+    n = min(ref_fit.size, x.size)
+    if n == 0:
+        return float("nan")
+    vals = [
+        _snr_db_single(ref_fit[a:b], x[a:b])
+        for a, b in _iter_windows(n, AUDIO_OUTPUT_RATE)
+    ]
+    return _windowed_median(vals)
+
+
+def _thdn_db_single(x: np.ndarray, fs: int, tone_hz: float) -> float:
     x = np.asarray(x, dtype=np.float64)
     n = x.size
     if n < fs // 2:
@@ -544,11 +584,26 @@ def _thdn_db(x: np.ndarray, fs: int, tone_hz: float) -> float:
     power = np.abs(spec) ** 2
     k0 = int(round(tone_hz * n / fs))
     k0 = max(1, min(k0, power.size - 2))
-    fund_bins = slice(max(0, k0 - 1), min(power.size, k0 + 2))
+    # The Hann main lobe is 4 bins wide; +-3 bins covers it with margin
+    # so fundamental leakage is not mis-counted as noise (the previous
+    # +-1 bin clipped part of the main lobe and biased the floor).
+    fund_bins = slice(max(0, k0 - 3), min(power.size, k0 + 4))
     fund_power = float(np.sum(power[fund_bins]) + EPS)
     total_power = float(np.sum(power[1:]) + EPS)
     noise_power = max(total_power - fund_power, EPS)
     return 10.0 * np.log10(noise_power / fund_power)
+
+
+def _thdn_db(x: np.ndarray, fs: int, tone_hz: float) -> float:
+    """Median of per-window THD+N (see METRIC_WIN_S note above)."""
+    x = np.asarray(x, dtype=np.float64)
+    if x.size < fs // 2:
+        return float("nan")
+    vals = [
+        _thdn_db_single(x[a:b], fs, tone_hz)
+        for a, b in _iter_windows(x.size, fs)
+    ]
+    return _windowed_median(vals)
 
 
 def _align_pair(ref: np.ndarray, x: np.ndarray, max_lag: int) -> tuple[np.ndarray, np.ndarray]:
@@ -616,6 +671,18 @@ def evaluate_quality(
     fs_iq = int(SDR_SAMPLE_RATE)
     max_lag = int(0.2 * fs_audio)
     settle = int(max(0.0, warmup_s) * fs_audio)
+    # Fixed tail guard: the last fraction of the aligned stream contains
+    # end-of-stream edge effects (final partial processing blocks,
+    # held-back resampler tails) whose inclusion depends on the total
+    # duration; trimming a fixed amount makes the measurement segment
+    # deterministic w.r.t. duration.
+    tail_guard = int(0.25 * fs_audio)
+
+    def _trim(seg: np.ndarray) -> np.ndarray:
+        if seg.size > settle + tail_guard:
+            return seg[settle:seg.size - tail_guard]
+        return seg[settle:]
+
     impairments = dict(
         carrier_offset_hz=carrier_offset_hz,
         multipath_delay_us=multipath_delay_us,
@@ -658,10 +725,10 @@ def evaluate_quality(
     left_ref_fit, left_x = _align_and_fit(left_ref, left_out, max_lag)
     right_ref_fit, right_x = _align_and_fit(right_ref, right_out, max_lag)
 
-    left_ref_fit = left_ref_fit[settle:]
-    left_x = left_x[settle:]
-    right_ref_fit = right_ref_fit[settle:]
-    right_x = right_x[settle:]
+    left_ref_fit = _trim(left_ref_fit)
+    left_x = _trim(left_x)
+    right_ref_fit = _trim(right_ref_fit)
+    right_x = _trim(right_x)
 
     snr_l = _snr_db(left_ref_fit, left_x)
     snr_r = _snr_db(right_ref_fit, right_x)
@@ -701,7 +768,7 @@ def evaluate_quality(
             subcarrier_phase_offset_deg=subcarrier_phase_offset_deg,
             demod_diag=demod_diag, demod_diag_interval=demod_diag_interval,
         )
-    sep_l2r = _stereo_separation_ls_db(l_main[settle:], r_leak[settle:], max_lag)
+    sep_l2r = _stereo_separation_ls_db(_trim(l_main), _trim(r_leak), max_lag)
 
     l_zero = np.zeros_like(r_only)
     mpx_r = _build_mpx(
@@ -729,7 +796,7 @@ def evaluate_quality(
             subcarrier_phase_offset_deg=subcarrier_phase_offset_deg,
             demod_diag=demod_diag, demod_diag_interval=demod_diag_interval,
         )
-    sep_r2l = _stereo_separation_ls_db(r_main[settle:], l_leak[settle:], max_lag)
+    sep_r2l = _stereo_separation_ls_db(_trim(r_main), _trim(l_leak), max_lag)
 
     return QualityMetrics(
         thdn_left_db=thdn_l,

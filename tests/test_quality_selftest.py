@@ -134,6 +134,48 @@ def test_modulate_multipath_delay_beyond_signal_is_harmless():
     assert np.allclose(np.abs(iq), 1.0, atol=1e-5)  # direct path only
 
 
+def test_thdn_median_resists_localised_transient():
+    """A short burst must not dominate the windowed-median THD+N.
+
+    This is the B2 hardening: the previous whole-signal single-FFT
+    metric let one contaminated edge region swing the reading by over
+    10 dB depending on the total duration.
+    """
+    from fm_radio.quality_selftest import _thdn_db, _thdn_db_single
+    fs = 48000
+    t = np.arange(4 * fs) / fs
+    clean = (0.5 * np.sin(2 * np.pi * 1000.0 * t)).astype(np.float64)
+    dirty = clean.copy()
+    # 100 ms loud broadband burst in the middle of the signal.
+    rng = np.random.default_rng(3)
+    burst = rng.standard_normal(fs // 10) * 0.5
+    dirty[2 * fs:2 * fs + burst.size] += burst
+
+    whole = _thdn_db_single(dirty, fs, 1000.0)
+    windowed = _thdn_db(dirty, fs, 1000.0)
+    reference = _thdn_db(clean, fs, 1000.0)
+    # Whole-signal FFT is dominated by the burst; the median is not.
+    assert whole > -20.0
+    assert windowed < -50.0
+    assert abs(windowed - reference) < 6.0
+
+
+def test_snr_median_resists_localised_transient():
+    from fm_radio.quality_selftest import _snr_db, _snr_db_single
+    fs = 48000
+    t = np.arange(4 * fs) / fs
+    ref = (0.5 * np.sin(2 * np.pi * 1000.0 * t)).astype(np.float64)
+    rng = np.random.default_rng(4)
+    x = ref + rng.standard_normal(ref.size) * 1e-3
+    x_dirty = x.copy()
+    x_dirty[2 * fs:2 * fs + fs // 10] += 0.5
+    whole = _snr_db_single(ref, x_dirty)
+    windowed = _snr_db(ref, x_dirty)
+    clean_windowed = _snr_db(ref, x)
+    assert windowed > whole + 10.0
+    assert abs(windowed - clean_windowed) < 3.0
+
+
 def test_main_rejects_duration_not_exceeding_warmup(monkeypatch):
     import fm_radio.quality_selftest as qs
     monkeypatch.setattr(sys, "argv", [

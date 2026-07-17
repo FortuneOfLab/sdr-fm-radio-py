@@ -47,8 +47,10 @@ SCENARIOS = {
     ),
 }
 
-# Measured values (2026-07): clean Sep 24.5/28.4, clock 25.8/26.3,
-# tuning 33.5/34.0, multipath 23.3/26.0; THD -27..-28; SNR 30.5-33.6.
+# Measured values (2026-07, windowed-median metrics): clean Sep
+# 24.4/28.4, clock 25.8/26.2, tuning 32.6/33.2, multipath 23.1/25.7;
+# THD -31..-32.5; SNR 30.9-34.2.  THD is duration-stable to ~0.5 dB
+# (was swinging -18..-32 with the whole-signal single-FFT metric).
 FLOORS = {
     "clean": dict(sep=18.0, thd=-20.0, snr=24.0),
     "clock-200ppm": dict(sep=18.0, thd=-20.0, snr=24.0),
