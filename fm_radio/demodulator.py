@@ -655,8 +655,18 @@ class FMDemodulator(BaseFMDemodulator):
         # --- Standard-only: main PLL + IQ lowpass filter ---
         self.main_pll: PLL = PLL(Kp=MAIN_PLL_KP, Ki=MAIN_PLL_KI, return_phase=False)
         nyquist = self.iq_sample_rate / 2.0
-        self.iq_b, self.iq_a = signal.butter(
+        # SOS form with carried filter state.  A stateless per-block
+        # lfilter here resets the IIR internal state at every 16 ms
+        # block boundary, producing a start-of-block transient of up to
+        # ~75 deg phase error at the PLL input — audible as periodic
+        # impulse noise after FM demodulation.
+        self.iq_sos: np.ndarray = signal.butter(
             IQ_LOWPASS_ORDER, IQ_LOWPASS_CUTOFF / nyquist, btype="low",
+            output="sos",
+        )
+        # Complex state: the filter runs on complex64 IQ samples.
+        self._iq_zi: np.ndarray = np.zeros(
+            (self.iq_sos.shape[0], 2), dtype=np.complex128,
         )
         self._iq_resampler = StatefulResampler(
             self.up, self.down,
@@ -680,7 +690,10 @@ class FMDemodulator(BaseFMDemodulator):
             )
             iq_processed = iq_samples - self.dc_offset
             iq_processed = np.asarray(iq_processed, dtype=np.complex64, copy=False)
-            iq_filtered = signal.lfilter(self.iq_b, self.iq_a, iq_processed)
+            iq_filtered, self._iq_zi = signal.sosfilt(
+                self.iq_sos, iq_processed, zi=self._iq_zi,
+            )
+            iq_filtered = iq_filtered.astype(np.complex64, copy=False)
             main_output = self.main_pll.process(iq_filtered)
             composite = self._iq_resampler.process(main_output)
             return composite.astype(np.float32, copy=False)
@@ -692,6 +705,7 @@ class FMDemodulator(BaseFMDemodulator):
         """Reset main PLL state."""
         self.main_pll.reset()
         self._iq_resampler.reset()
+        self._iq_zi = np.zeros_like(self._iq_zi)
 
 
 class FMDemodulatorLight(BaseFMDemodulator):
