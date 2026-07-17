@@ -178,6 +178,7 @@ def _build_mpx(
     enable_preemphasis: bool,
     preemphasis_tau_s: float,
     dsb_phase_deg: float,
+    clock_ppm: float = 0.0,
 ) -> np.ndarray:
     if enable_preemphasis:
         left_audio = _preemphasis(left_audio, fs_audio, preemphasis_tau_s)
@@ -193,9 +194,19 @@ def _build_mpx(
     # mono (L+R) at ~45%, stereo DSB (L-R) at ~45%, pilot at ~10%.
     lpr = 0.45 * (left + right)
     lmr = 0.45 * (left - right)
-    pilot = pilot_amp * np.cos(2.0 * np.pi * 19_000.0 * t)
+    # clock_ppm models a transmitter/receiver sample-clock mismatch by
+    # scaling the pilot and subcarrier frequencies while keeping their
+    # exact 2:1 coherence.  A real broadcast pilot is never at exactly
+    # 19 000.000 Hz relative to the receiver clock — and an exactly
+    # periodic pilot is the one condition under which several classes
+    # of block-processing defects are invisible (the FFT-Hilbert edge
+    # bug fixed in PR #6 was undetectable at 0 ppm).  Audio-band
+    # frequencies are left unscaled: sub-Hz shifts of the test tone
+    # are irrelevant to every metric.
+    scale = 1.0 + clock_ppm * 1e-6
+    pilot = pilot_amp * np.cos(2.0 * np.pi * 19_000.0 * scale * t)
     dsb_phase_rad = np.deg2rad(dsb_phase_deg)
-    dsb = lmr * np.cos(2.0 * np.pi * 38_000.0 * t + dsb_phase_rad)
+    dsb = lmr * np.cos(2.0 * np.pi * 38_000.0 * scale * t + dsb_phase_rad)
     mpx = lpr + dsb + pilot
     return mpx.astype(np.float32)
 
@@ -206,11 +217,37 @@ def _fm_modulate_iq(
     fs_iq: int,
     freq_dev_hz: float,
     cnr_db: float | None,
+    carrier_offset_hz: float = 0.0,
+    multipath_delay_us: float = 0.0,
+    multipath_gain: float = 0.0,
+    multipath_phase_deg: float = 0.0,
 ) -> np.ndarray:
     mpx_iq = _resample(mpx, fs_composite, fs_iq).astype(np.float64)
     k = 2.0 * np.pi * freq_dev_hz / fs_iq
     phase = np.cumsum(k * mpx_iq, dtype=np.float64)
     iq = np.exp(1j * phase).astype(np.complex64)
+
+    # Receiver tuning error: shifts the whole FM signal inside the IQ
+    # lowpass passband (appears as a DC term in the demodulated
+    # composite and exercises asymmetric filtering of the sidebands).
+    if carrier_offset_hz:
+        n = np.arange(iq.size, dtype=np.float64)
+        iq = (iq * np.exp(
+            1j * 2.0 * np.pi * carrier_offset_hz * n / fs_iq
+        )).astype(np.complex64)
+
+    # Two-ray multipath: direct path plus one delayed, attenuated,
+    # phase-rotated echo.  Delay is rounded to whole IQ samples
+    # (~0.98 us at 1.024 Msps).
+    if multipath_gain and multipath_delay_us > 0.0:
+        d = max(1, int(round(multipath_delay_us * 1e-6 * fs_iq)))
+        echo = np.zeros_like(iq)
+        echo[d:] = iq[:iq.size - d]
+        coeff = np.complex64(
+            multipath_gain * np.exp(1j * np.deg2rad(multipath_phase_deg))
+        )
+        iq = (iq + coeff * echo).astype(np.complex64)
+
     if cnr_db is None:
         return iq
     signal_power = float(np.mean(np.abs(iq) ** 2))
@@ -553,7 +590,7 @@ def evaluate_quality(
     fixed_blend: float | None = None,
     path: str = "full",
     warmup_s: float = 0.5,
-    enable_preemphasis: bool = False,
+    enable_preemphasis: bool = True,
     preemphasis_tau_s: float = 50e-6,
     dsb_phase_deg: float = 0.0,
     source_lr: tuple[np.ndarray, np.ndarray] | None = None,
@@ -563,12 +600,23 @@ def evaluate_quality(
     subcarrier_phase_offset_deg: float | None = None,
     demod_diag: bool = False,
     demod_diag_interval: int | None = None,
+    clock_ppm: float = 0.0,
+    carrier_offset_hz: float = 0.0,
+    multipath_delay_us: float = 0.0,
+    multipath_gain: float = 0.0,
+    multipath_phase_deg: float = 0.0,
 ) -> QualityMetrics:
     fs_audio = AUDIO_OUTPUT_RATE
     fs_composite = int(COMPOSITE_RATE)
     fs_iq = int(SDR_SAMPLE_RATE)
     max_lag = int(0.2 * fs_audio)
     settle = int(max(0.0, warmup_s) * fs_audio)
+    impairments = dict(
+        carrier_offset_hz=carrier_offset_hz,
+        multipath_delay_us=multipath_delay_us,
+        multipath_gain=multipath_gain,
+        multipath_phase_deg=multipath_phase_deg,
+    )
 
     if source_lr is None:
         left_ref, right_ref = _make_stereo_tone(duration_s, fs_audio, tone_hz, 0.6, 0.6)
@@ -579,7 +627,7 @@ def evaluate_quality(
     mpx = _build_mpx(
         left_ref, right_ref, fs_audio, fs_composite, pilot_amp,
         enable_preemphasis=enable_preemphasis, preemphasis_tau_s=preemphasis_tau_s,
-        dsb_phase_deg=dsb_phase_deg,
+        dsb_phase_deg=dsb_phase_deg, clock_ppm=clock_ppm,
     )
     if path == "composite":
         left_out, right_out, blend_hist = _run_demod_from_composite(
@@ -591,7 +639,8 @@ def evaluate_quality(
             demod_diag=demod_diag, demod_diag_interval=demod_diag_interval,
         )
     else:
-        iq = _fm_modulate_iq(mpx, fs_composite, fs_iq, freq_dev_hz, cnr_db)
+        iq = _fm_modulate_iq(mpx, fs_composite, fs_iq, freq_dev_hz, cnr_db,
+                               **impairments)
         left_out, right_out, blend_hist = _run_demod_from_iq(
             iq, fixed_blend=fixed_blend,
             disable_iq_phase_correction=disable_iq_phase_correction,
@@ -625,7 +674,7 @@ def evaluate_quality(
     mpx_l = _build_mpx(
         l_only, r_zero, fs_audio, fs_composite, pilot_amp,
         enable_preemphasis=enable_preemphasis, preemphasis_tau_s=preemphasis_tau_s,
-        dsb_phase_deg=dsb_phase_deg,
+        dsb_phase_deg=dsb_phase_deg, clock_ppm=clock_ppm,
     )
     if path == "composite":
         l_main, r_leak, _ = _run_demod_from_composite(
@@ -637,7 +686,8 @@ def evaluate_quality(
             demod_diag=demod_diag, demod_diag_interval=demod_diag_interval,
         )
     else:
-        iq_l = _fm_modulate_iq(mpx_l, fs_composite, fs_iq, freq_dev_hz, cnr_db)
+        iq_l = _fm_modulate_iq(mpx_l, fs_composite, fs_iq, freq_dev_hz, cnr_db,
+                               **impairments)
         l_main, r_leak, _ = _run_demod_from_iq(
             iq_l, fixed_blend=fixed_blend,
             disable_iq_phase_correction=disable_iq_phase_correction,
@@ -652,7 +702,7 @@ def evaluate_quality(
     mpx_r = _build_mpx(
         l_zero, r_only, fs_audio, fs_composite, pilot_amp,
         enable_preemphasis=enable_preemphasis, preemphasis_tau_s=preemphasis_tau_s,
-        dsb_phase_deg=dsb_phase_deg,
+        dsb_phase_deg=dsb_phase_deg, clock_ppm=clock_ppm,
     )
     if path == "composite":
         l_leak, r_main, _ = _run_demod_from_composite(
@@ -664,7 +714,8 @@ def evaluate_quality(
             demod_diag=demod_diag, demod_diag_interval=demod_diag_interval,
         )
     else:
-        iq_r = _fm_modulate_iq(mpx_r, fs_composite, fs_iq, freq_dev_hz, cnr_db)
+        iq_r = _fm_modulate_iq(mpx_r, fs_composite, fs_iq, freq_dev_hz, cnr_db,
+                               **impairments)
         l_leak, r_main, _ = _run_demod_from_iq(
             iq_r, fixed_blend=fixed_blend,
             disable_iq_phase_correction=disable_iq_phase_correction,
@@ -713,12 +764,42 @@ def _parser() -> argparse.ArgumentParser:
         help="Seconds to discard at head for loop/filter settling",
     )
     p.add_argument(
-        "--preemphasis", action="store_true",
-        help="Apply pre-emphasis to synthetic L/R before MPX synthesis",
+        "--preemphasis", dest="preemphasis", action="store_true", default=True,
+        help="Apply pre-emphasis to synthetic L/R before MPX synthesis "
+             "(default: on — real broadcasts always transmit with "
+             "pre-emphasis, and the receiver always de-emphasises)",
+    )
+    p.add_argument(
+        "--no-preemphasis", dest="preemphasis", action="store_false",
+        help="Disable pre-emphasis in the synthetic MPX",
     )
     p.add_argument(
         "--preemphasis-tau-us", type=float, default=50.0,
         help="Pre-emphasis tau in microseconds",
+    )
+    p.add_argument(
+        "--clock-ppm", type=float, default=0.0,
+        help="Pilot/subcarrier clock error in ppm (scales 19k/38k while "
+             "keeping 2:1 coherence). Real pilots are never at exactly "
+             "19 kHz relative to the receiver clock; ~200 ppm is a "
+             "worst-case cheap-dongle crystal.",
+    )
+    p.add_argument(
+        "--carrier-offset-hz", type=float, default=0.0,
+        help="Receiver tuning error in Hz (shifts the FM signal inside "
+             "the IQ lowpass; appears as DC in the composite)",
+    )
+    p.add_argument(
+        "--multipath-delay-us", type=float, default=0.0,
+        help="Two-ray multipath echo delay in microseconds (0=off)",
+    )
+    p.add_argument(
+        "--multipath-gain", type=float, default=0.0,
+        help="Two-ray multipath echo amplitude relative to direct path",
+    )
+    p.add_argument(
+        "--multipath-phase-deg", type=float, default=0.0,
+        help="Two-ray multipath echo carrier phase in degrees",
     )
     p.add_argument(
         "--fixed-blend", type=float, default=-1.0,
@@ -858,6 +939,11 @@ def main() -> None:
         ),
         demod_diag=bool(args.demod_diag),
         demod_diag_interval=(None if int(args.demod_diag_interval) <= 0 else int(args.demod_diag_interval)),
+        clock_ppm=float(args.clock_ppm),
+        carrier_offset_hz=float(args.carrier_offset_hz),
+        multipath_delay_us=float(args.multipath_delay_us),
+        multipath_gain=float(args.multipath_gain),
+        multipath_phase_deg=float(args.multipath_phase_deg),
     )
     if args.source_wav:
         eval_kwargs["source_lr"] = _load_stereo_wav(

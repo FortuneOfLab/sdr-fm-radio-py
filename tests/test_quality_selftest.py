@@ -83,6 +83,44 @@ def test_read_window_duration_beyond_file_is_clamped(tmp_path, rng):
     assert raw.shape[0] == 100
 
 
+def test_build_mpx_clock_ppm_detunes_pilot():
+    from fm_radio.quality_selftest import _build_mpx
+    fs_c = 192000
+    silence = np.zeros(FS, dtype=np.float32)  # 1 s => 1 Hz FFT bins
+    mpx = _build_mpx(silence, silence, FS, fs_c, pilot_amp=0.1,
+                     enable_preemphasis=False, preemphasis_tau_s=50e-6,
+                     dsb_phase_deg=0.0, clock_ppm=1000.0)
+    spec = np.abs(np.fft.rfft(mpx))
+    peak_hz = np.argmax(spec) * fs_c / mpx.size
+    # 1000 ppm on 19 kHz = +19 Hz.
+    assert abs(peak_hz - 19019.0) < 2.0
+
+
+def test_modulate_carrier_offset_shifts_instantaneous_frequency():
+    from fm_radio.quality_selftest import _fm_modulate_iq
+    fs_c, fs_iq = 192000, 1024000
+    mpx = np.zeros(fs_c // 10, dtype=np.float32)  # unmodulated carrier
+    iq = _fm_modulate_iq(mpx, fs_c, fs_iq, 75_000.0, None,
+                         carrier_offset_hz=50_000.0)
+    freq = np.angle(iq[1:] * np.conj(iq[:-1]))
+    measured_hz = float(np.mean(freq)) * fs_iq / (2 * np.pi)
+    assert abs(measured_hz - 50_000.0) < 100.0
+
+
+def test_modulate_multipath_adds_expected_echo():
+    from fm_radio.quality_selftest import _fm_modulate_iq
+    fs_c, fs_iq = 192000, 1024000
+    mpx = np.zeros(fs_c // 10, dtype=np.float32)  # unmodulated carrier
+    iq = _fm_modulate_iq(mpx, fs_c, fs_iq, 75_000.0, None,
+                         multipath_delay_us=3.0, multipath_gain=0.25,
+                         multipath_phase_deg=60.0)
+    d = int(round(3.0e-6 * fs_iq))
+    expected = abs(1.0 + 0.25 * np.exp(1j * np.deg2rad(60.0)))
+    # Before the echo arrives: direct path only; after: combined.
+    assert np.allclose(np.abs(iq[:d]), 1.0, atol=1e-5)
+    assert np.allclose(np.abs(iq[d + 1:]), expected, atol=1e-5)
+
+
 def test_main_rejects_duration_not_exceeding_warmup(monkeypatch):
     import fm_radio.quality_selftest as qs
     monkeypatch.setattr(sys, "argv", [
