@@ -38,6 +38,7 @@ from collections import deque
 import numpy as np
 import pyaudio
 
+from fm_radio import recording_meta
 from fm_radio.interfaces import AudioOutputInterface
 from fm_radio.exceptions import AudioOutputError, RecordingError
 from fm_radio.constants import (
@@ -113,6 +114,7 @@ class AudioOutput(AudioOutputInterface):
         self._record_part_index: int = 0
         self._record_bytes_written: int = 0
         self._record_channels: int = AUDIO_CHANNELS
+        self._record_meta: dict | None = None
         self._record_worker: threading.Thread = threading.Thread(
             target=self._record_worker_loop,
             name='AudioRecordWorker',
@@ -195,7 +197,8 @@ class AudioOutput(AudioOutputInterface):
         except Exception as e:
             self.logger.error(f"Error enqueueing audio: {e}", exc_info=True)
 
-    def start_recording(self, filename: str, channels: int = 2) -> None:
+    def start_recording(self, filename: str, channels: int = 2,
+                        metadata: dict | None = None) -> None:
         """Start recording audio (asynchronous via worker thread).
 
         Thread safety design:
@@ -212,6 +215,8 @@ class AudioOutput(AudioOutputInterface):
         Args:
             filename: Filename to save the WAV file.
             channels: Number of channels.
+            metadata: Extra key/value pairs (e.g. centre frequency,
+                gain) merged into the ``.json`` metadata sidecar.
         """
         # Serialise all start callers — the wave.open below is the
         # only place that can truncate the target file, and we want
@@ -247,6 +252,22 @@ class AudioOutput(AudioOutputInterface):
                     self._record_bytes_written = 0
                     self._record_channels = channels
                 self.recording = True
+
+            # Metadata sidecar (CLI-thread only, never realtime).
+            self._record_meta = {
+                "type": "audio",
+                "file": recording_meta.part_list(
+                    filename, 0, self._make_rotated_record_path,
+                )[0],
+                "sample_rate_hz": int(self.output_rate),
+                "channels": int(channels),
+                "started_at": recording_meta.now_iso(),
+            }
+            if metadata:
+                self._record_meta.update(metadata)
+            recording_meta.write_sidecar(
+                filename, self._record_meta, self.logger,
+            )
             self.logger.info(f"Recording started: {filename}")
 
     def stop_recording(self) -> None:
@@ -286,6 +307,9 @@ class AudioOutput(AudioOutputInterface):
 
         with self.record_lock:
             parts_count = self._record_part_index + 1
+            base_path = self._record_base_path
+            part_index = self._record_part_index
+            drops = self._record_drop_count
             if self.record_wave is not None:
                 try:
                     self.record_wave.close()
@@ -300,6 +324,19 @@ class AudioOutput(AudioOutputInterface):
                     )
                 finally:
                     self.record_wave = None
+
+        # Finalise the metadata sidecar with the session outcome.
+        if base_path is not None and getattr(self, "_record_meta", None):
+            self._record_meta.update({
+                "stopped_at": recording_meta.now_iso(),
+                "parts": recording_meta.part_list(
+                    base_path, part_index, self._make_rotated_record_path,
+                ),
+                "dropped_chunks": int(drops),
+            })
+            recording_meta.write_sidecar(
+                base_path, self._record_meta, self.logger,
+            )
 
     def record(self, stereo_audio: np.ndarray) -> None:
         """Hand stereo audio to the recording worker.

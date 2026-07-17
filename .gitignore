@@ -172,3 +172,19 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# --- Project artifacts (sdr-fm-radio-py) ---
+# Station recordings, analysis outputs and diagnostics are local data,
+# never committed.  Recordings live under recordings/ (with .json
+# metadata sidecars); ad-hoc listening/analysis files may appear in
+# the repo root.
+recordings/
+*.wav
+*.csv
+*.bak
+*.npy
+_tmp*
+dropout*.log
+.claude/
+.vscode/
+.codex_artifacts/

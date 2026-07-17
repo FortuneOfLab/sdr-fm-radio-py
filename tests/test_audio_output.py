@@ -136,7 +136,10 @@ def test_rotation_preserves_every_sample(audio_output, tmp_path, monkeypatch):
         ao.record(CHUNK.copy())
     ao.stop_recording()
 
-    files = sorted(p for p in tmp_path.iterdir() if p.name.startswith("rot"))
+    files = sorted(
+        p for p in tmp_path.iterdir()
+        if p.name.startswith("rot") and p.suffix == ".wav"
+    )
     assert len(files) >= 2, "rotation must have produced part files"
     total_frames = sum(_wav_frames(p) for p in files)
     assert total_frames == n_chunks * 768

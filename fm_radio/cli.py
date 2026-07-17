@@ -32,14 +32,28 @@ input (station number / frequency) are handled via fallback logic.
 
 from __future__ import annotations
 
+import os
 import time
 import threading
 from typing import TYPE_CHECKING, Callable
 
+from fm_radio.constants import RECORDINGS_DIR
 from fm_radio.exceptions import RecordingError
 
 if TYPE_CHECKING:
     from fm_radio.controller import FMReceiverController
+
+
+def build_recording_path(freq_mhz: float, iq: bool = False) -> str:
+    """Build an auto-generated recording path under RECORDINGS_DIR.
+
+    Creates the directory on first use so recordings never land in the
+    repository root (which used to accumulate dozens of WAVs).
+    """
+    os.makedirs(RECORDINGS_DIR, exist_ok=True)
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    suffix = "_IQ" if iq else ""
+    return os.path.join(RECORDINGS_DIR, f"{stamp}_{freq_mhz:.1f}MHz{suffix}.wav")
 
 
 class CommandLineInterface(threading.Thread):
@@ -161,9 +175,8 @@ class CommandLineInterface(threading.Thread):
 
     def _cmd_record_start(self, cmd: str) -> bool:
         """Handle 'record start' — begin recording with auto-generated filename."""
-        current_time = time.strftime("%Y%m%d_%H%M%S")
         freq = self.controller.get_frequency() / 1e6
-        filename = f"{current_time}_{freq:.1f}MHz.wav"
+        filename = build_recording_path(freq, iq=False)
         try:
             self.controller.start_recording(filename)
             print(f"Recording started: {filename}")
@@ -182,9 +195,8 @@ class CommandLineInterface(threading.Thread):
 
     def _cmd_iq_record_start(self, cmd: str) -> bool:
         """Handle 'iqrec start' - begin IQ recording with auto-generated filename."""
-        current_time = time.strftime("%Y%m%d_%H%M%S")
         freq = self.controller.get_frequency() / 1e6
-        filename = f"{current_time}_{freq:.1f}MHz_IQ.wav"
+        filename = build_recording_path(freq, iq=True)
         try:
             self.controller.start_iq_recording(filename)
             print(f"IQ recording started: {filename}")

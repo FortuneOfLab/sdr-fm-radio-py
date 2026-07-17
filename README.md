@@ -71,6 +71,15 @@ python fm_receiver.py --light
 - `CommandLineInterface` → Allows user input commands
 - `FMReceiverController` → Main controller integrating all components
 
+## Recording files
+
+Auto-named recordings (both audio and raw IQ) are written to the
+`recordings/` directory. Each recording session gets a `.json` metadata
+sidecar next to the WAV containing the capture parameters (centre
+frequency, gain, sample rate), start/stop timestamps, drop counts and —
+since long recordings rotate at the WAV 4 GiB limit — the full list of
+`.partNNN.wav` files belonging to the session.
+
 ## Development
 
 ### Running the tests

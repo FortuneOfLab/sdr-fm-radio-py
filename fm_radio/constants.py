@@ -150,6 +150,9 @@ AUDIO_ENQUEUE_TIMEOUT = 0.01       # Timeout for audio queue put (seconds)
 # --------------------------------------------------
 # Recording
 # --------------------------------------------------
+RECORDINGS_DIR = "recordings"       # Directory (relative to CWD) where the
+                                    # CLI places auto-named recordings and
+                                    # their .json metadata sidecars
 RECORD_SAMPLE_WIDTH = 2             # 16-bit PCM sample width (bytes)
 RECORD_MAX_INT16 = 32767            # Max value for int16 conversion
 RECORD_QUEUE_MAXSIZE = 200          # Max queued recording chunks (~3.2 s at
