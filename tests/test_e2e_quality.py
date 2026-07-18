@@ -91,6 +91,59 @@ def test_phase_corrector_recovers_large_static_error():
 
 
 @pytest.mark.slow
+def test_phase_tracker_never_acquires_on_mono_broadcast():
+    """A mono broadcast (L=R) must never acquire a phase estimate.
+
+    Codex repro from the PR #23 review: anisotropy alone is
+    scale-invariant, so on a NOISELESS mono signal the tiny
+    deterministic side-band residue (~-32 dB below mono) looked
+    strongly 1-D and acquired a random angle on block 0.  The
+    absolute-energy gate (side power within -18 dB of mono) blocks
+    that; at CNR 20 the noise-dominated side is blocked by the
+    anisotropy gate instead.
+    """
+    from fm_radio.demodulator import FMDemodulator
+    from fm_radio.quality_selftest import _build_mpx, _fm_modulate_iq
+    from fm_radio.constants import (
+        AUDIO_OUTPUT_RATE, COMPOSITE_RATE, SDR_SAMPLE_RATE, SDR_BLOCK_SIZE,
+    )
+    fs = AUDIO_OUTPUT_RATE
+    n = int(3.0 * fs)
+    t = np.arange(n) / fs
+    tone = (0.25 * np.sin(2 * np.pi * 1000.0 * t)).astype(np.float32)
+    mpx = _build_mpx(tone, tone, fs, int(COMPOSITE_RATE), 0.10, True,
+                     50e-6, 0.0)
+    for cnr in (None, 20.0):
+        np.random.seed(0)
+        iq = _fm_modulate_iq(mpx, int(COMPOSITE_RATE), int(SDR_SAMPLE_RATE),
+                             75_000.0, cnr)
+        d = FMDemodulator(stereo=True)
+        for i in range(0, iq.size, SDR_BLOCK_SIZE):
+            c = iq[i:i + SDR_BLOCK_SIZE]
+            if c.size < 8:
+                break
+            d.demodulate(d.process_iq_samples(c))
+        assert not d._phase_acquired, cnr
+        assert d.stereo_phase_err_ema == 0.0, cnr
+
+
+@pytest.mark.slow
+def test_phase_tracker_acquires_correct_branch_at_boundary():
+    """Acquisition at a true rotation of -88 deg must not swap L/R.
+
+    Raw estimates on a station near the +-90 boundary straddle it and
+    ~half wrap to +88-ish; a single-block acquisition would lock the
+    wrong 180-deg branch (permanent L/R swap) with that probability.
+    The doubled-angle circular mean over the acquisition streak is
+    invariant to the wrap, so separation stays high and positive.
+    """
+    np.random.seed(0)
+    m = evaluate_quality(**BASE_KWARGS, subcarrier_phase_offset_deg=228.0)
+    assert m.separation_l_to_r_db > 24.0, m
+    assert m.separation_r_to_l_db > 24.0, m
+
+
+@pytest.mark.slow
 def test_phase_tracker_follows_drift_beyond_90_deg():
     """The tracker must follow a DSB phase drift through +-90 deg.
 

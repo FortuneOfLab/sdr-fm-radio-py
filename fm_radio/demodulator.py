@@ -67,7 +67,9 @@ from fm_radio.constants import (
     STEREO_LR_SIDE_RATIO_CAP_ENABLE, STEREO_LR_SIDE_RATIO_CAP_TARGET,
     STEREO_LR_SIDE_RATIO_CAP_MIN_GAIN,
     STEREO_LR_SIDE_RATIO_CAP_ATTACK, STEREO_LR_SIDE_RATIO_CAP_RELEASE,
-    STEREO_PHASE_ERR_SMOOTHING, STEREO_PHASE_ANISO_GATE, STEREO_IQ_PHASE_CORRECTION_ENABLE,
+    STEREO_PHASE_ERR_SMOOTHING, STEREO_PHASE_ANISO_GATE,
+    STEREO_PHASE_SIDE_GATE_DB, STEREO_PHASE_ACQUIRE_BLOCKS,
+    STEREO_IQ_PHASE_CORRECTION_ENABLE,
     PILOT_NOISE_BAND1_LOW, PILOT_NOISE_BAND1_HIGH,
     PILOT_NOISE_BAND2_LOW, PILOT_NOISE_BAND2_HIGH,
     LR_BANDPASS_ORDER, LR_BANDPASS_ORDER_LIGHT,
@@ -224,6 +226,8 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         self.stereo_phase_err_ema: float = 0.0
         self.stereo_phase_aniso: float = 0.0
         self._phase_acquired: bool = False
+        self._phase_acq_acc: complex = 0j
+        self._phase_acq_count: int = 0
         self.pilot_residual_center_hz: float = float(STEREO_PILOT_RESIDUAL_CENTER_HZ)
         self.subcarrier_phase_offset_rad: float = np.deg2rad(subcarrier_phase_offset_deg)
         self.mono_delay_samples: int = max(0, int(STEREO_MONO_DELAY_SAMPLES))
@@ -442,15 +446,53 @@ class BaseFMDemodulator(FMDemodulatorInterface):
                 / (denom + 1e-18)
             )
             self.stereo_phase_aniso = aniso
-            if denom > 1e-18 and aniso >= STEREO_PHASE_ANISO_GATE:
+            # Absolute-energy gate: anisotropy is scale-invariant, so
+            # on a MONO broadcast the tiny deterministic residue in the
+            # side band (filter transients, pilot-harmonic products)
+            # can look strongly 1-D while sitting ~-32 dB below the
+            # mono programme.  Require the demodulated side power to be
+            # within STEREO_PHASE_SIDE_GATE_DB of the mono power before
+            # trusting the estimate (real stereo music: p5 = -11 dB;
+            # noise-dominated side fails the anisotropy gate instead).
+            mono_pow = float(np.mean(mono ** 2))
+            side_gate = mono_pow * (10.0 ** (STEREO_PHASE_SIDE_GATE_DB / 10.0))
+            informative = (
+                denom > 1e-18
+                and mono_pow > 1e-18
+                and denom >= side_gate
+                and aniso >= STEREO_PHASE_ANISO_GATE
+            )
+            if informative:
                 beta_pa = 0.5 * np.arctan2(2.0 * cov_iq, var_i - var_q + 1e-12)
                 if not self._phase_acquired:
-                    # Acquisition: take the principal-axis value in
-                    # (-90, 90] directly - the FM standard's pilot
-                    # convention makes |true rotation| < 90 deg the
-                    # only resolvable assumption at cold start.
-                    self.stereo_phase_err_ema = float(beta_pa)
-                    self._phase_acquired = True
+                    # Acquisition: require STEREO_PHASE_ACQUIRE_BLOCKS
+                    # CONSECUTIVE informative blocks (rejects start-up
+                    # filter transients) and initialise from the
+                    # doubled-angle circular mean 0.5*arg(sum(e^{j2b}))
+                    # over the streak.  The doubled domain is invariant
+                    # to the +-90 deg wrap of individual raw estimates:
+                    # on a station whose true rotation sits near the
+                    # boundary (the reference station is at ~-83 deg,
+                    # with ~20% of raws wrapping to +88-ish), a single
+                    # -block init would lock the wrong 180-deg branch
+                    # (a permanent L/R swap) with that probability.
+                    # The circular mean lands on the true axis and the
+                    # (-90, 90] representative implements the cold-
+                    # start convention |true rotation| < 90 deg - the
+                    # only resolvable assumption, per the FM standard's
+                    # pilot phase convention.
+                    self._phase_acq_acc += complex(
+                        np.cos(2.0 * beta_pa), np.sin(2.0 * beta_pa)
+                    )
+                    self._phase_acq_count += 1
+                    if self._phase_acq_count >= STEREO_PHASE_ACQUIRE_BLOCKS:
+                        self.stereo_phase_err_ema = float(
+                            0.5 * np.arctan2(
+                                self._phase_acq_acc.imag,
+                                self._phase_acq_acc.real,
+                            )
+                        )
+                        self._phase_acquired = True
                 else:
                     # Tracking: the estimator is pi-periodic, so take
                     # the innovation to the NEAREST candidate in the
@@ -469,6 +511,11 @@ class BaseFMDemodulator(FMDemodulatorInterface):
                     self.stereo_phase_err_ema = float(
                         (ema + np.pi) % (2.0 * np.pi) - np.pi
                     )
+            elif not self._phase_acquired:
+                # Acquisition demands CONSECUTIVE informative blocks;
+                # a break restarts the streak and its accumulator.
+                self._phase_acq_acc = 0j
+                self._phase_acq_count = 0
             cph = np.cos(self.stereo_phase_err_ema)
             sph = np.sin(self.stereo_phase_err_ema)
         else:
@@ -633,6 +680,8 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         self.stereo_phase_err_ema = 0.0
         self.stereo_phase_aniso = 0.0
         self._phase_acquired = False
+        self._phase_acq_acc = 0j
+        self._phase_acq_count = 0
         self.lr_side_cap_gain = 1.0
         if self.mono_delay_samples > 0:
             self._mono_delay_state = np.zeros(self.mono_delay_samples, dtype=np.float32)

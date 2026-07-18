@@ -152,6 +152,25 @@ STEREO_PHASE_ANISO_GATE = 0.2       # Minimum covariance anisotropy
                                     # needs no clamp; only the initial acquisition
                                     # assumes the true rotation lies within +-90 deg,
                                     # which is the FM standard's pilot phase convention.
+STEREO_PHASE_SIDE_GATE_DB = -18.0   # Minimum demodulated side power relative to mono
+                                    # power (dB) for a phase-tracker update.  Anisotropy
+                                    # alone is scale-invariant: on a MONO broadcast the
+                                    # tiny deterministic residue in the side band can be
+                                    # strongly 1-D at ~-32 dB below mono, which would
+                                    # otherwise acquire a random angle.  Measured
+                                    # denom/mono: real stereo music p5 = -11 dB,
+                                    # noiseless-mono residue median = -32 dB, mono at
+                                    # CNR 20 = -22 dB (also blocked by the anisotropy
+                                    # gate), so -18 leaves ~7 dB of margin both ways.
+STEREO_PHASE_ACQUIRE_BLOCKS = 6     # Consecutive informative blocks (~100 ms) required
+                                    # before cold-start acquisition; the initial angle is
+                                    # the doubled-angle circular mean over the streak,
+                                    # which is invariant to +-90 deg wrapping of the raw
+                                    # estimates (a single-block init on a station near
+                                    # the boundary would lock the wrong 180-deg branch -
+                                    # a permanent L/R swap - with the probability of one
+                                    # raw estimate wrapping, ~20% on the reference
+                                    # station).
 STEREO_IQ_PHASE_CORRECTION_ENABLE = True   # Enable I/Q rotation correction in LR demod
 
 LR_BANDPASS_ORDER = 15              # L-R bandpass filter order (standard)
