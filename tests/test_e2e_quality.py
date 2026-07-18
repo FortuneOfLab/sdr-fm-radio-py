@@ -69,21 +69,44 @@ FLOORS = {
 def test_phase_corrector_recovers_large_static_error():
     """A -75 deg static subcarrier error must be FULLY corrected.
 
-    Real multipath channels need corrections well beyond the old
-    45 deg clamp (the reference station sits at ~-72 deg).  Measured
-    separation for this scenario (seeded) by clamp limit:
+    Real multipath channels need corrections well beyond the original
+    45 deg clamp (the reference station's raw estimates sit at ~-83
+    deg).  Measured separation for this scenario (seeded) across the
+    corrector's history:
 
-        limit 45: 18.85 / 20.21 dB   (old default, severe loss)
-        limit 60: 23.06 / 25.75 dB   (partial: -15 deg residual)
-        limit 75: 24.36 / 27.98 dB   (full recovery = clean baseline)
+        clamp 45:          18.85 / 20.21 dB  (severe loss)
+        clamp 60:          23.06 / 25.75 dB  (partial: -15 deg residual)
+        clamp 75:          24.36 / 27.98 dB  (recovery, slow approach)
+        gated 4-quadrant:  30.28 / 30.51 dB  (direct acquisition at
+                           -75, no clamp truncation of the estimate
+                           distribution)
 
-    The floors sit between the 60 and 75 deg results so the test
-    locks in the chosen limit, not merely "wider than 45".
+    The floors keep the pre-tracker discrimination (fail at clamp 60)
+    and the tracker clears them by ~4-7 dB.
     """
     np.random.seed(0)
     m = evaluate_quality(**BASE_KWARGS, subcarrier_phase_offset_deg=241.0)
     assert m.separation_l_to_r_db > 23.5, m
     assert m.separation_r_to_l_db > 26.5, m
+
+
+@pytest.mark.slow
+def test_phase_tracker_follows_drift_beyond_90_deg():
+    """The tracker must follow a DSB phase drift through +-90 deg.
+
+    The channel phase ramps -40 deg/s for 3 s (0 -> -120 deg).  Any
+    clamped estimator saturates (a 75 deg clamp leaves a 45 deg
+    residual at the end - roughly 8 dB of separation in the late
+    windows), and past 90 deg the raw principal-axis estimate wraps
+    to the opposite branch.  The continuity-based tracker follows the
+    pi-periodic family and holds full separation throughout
+    (measured 30.8 / 29.5 dB, floors well below).
+    """
+    np.random.seed(0)
+    m = evaluate_quality(**BASE_KWARGS, dsb_phase_drift_deg_per_s=-40.0)
+    assert m.separation_l_to_r_db > 24.0, m
+    assert m.separation_r_to_l_db > 24.0, m
+    assert m.thdn_left_db < -20.0, m
 
 
 @pytest.mark.slow

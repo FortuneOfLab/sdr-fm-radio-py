@@ -60,7 +60,7 @@ flowchart TD
     MUL_Q --> LPF7Q["LPF 7 kHz (Q)"]
 
     %% --- IQ Phase Correction ---
-    LPF15I --> IQ_CORR["IQ Phase Correction\nφ_err = ½ atan2(2·Cov, Var_I − Var_Q)\nEMA smoothed, ±75° clamp\nout = I·cos(φ) + Q·sin(φ)"]
+    LPF15I --> IQ_CORR["IQ Phase Correction\n4-quadrant tracker\nφ_pa = ½ atan2(2·Cov, Var_I − Var_Q)\nanisotropy-gated, branch by continuity\nout = I·cos(φ) + Q·sin(φ)"]
     LPF15Q --> IQ_CORR
     LPF12I --> IQ_CORR
     LPF12Q --> IQ_CORR

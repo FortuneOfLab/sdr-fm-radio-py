@@ -187,8 +187,14 @@ float32 量子化により長時間セッションで劣化するため置換さ
 4. サブキャリア生成 `cos/sin(2θ + φ_offset)`（φ_offset は復調方式ごと:
    discriminator 316°、PLL 285°、Light 297.4°）
 5. L−R 帯の同期復調（DSB-SC、ゲイン 2.0）と 3 バンド LPF（I/Q 並列）
-6. I/Q 位相補正（`½·atan2(2·Cov, Var_I−Var_Q)`、EMA 平滑、**±75° クラ
-   ンプ**）
+6. I/Q 位相補正 — **異方性ゲート付き4象限トラッカー**: 主軸推定
+   `½·atan2(2·Cov, Var_I−Var_Q)` は ±90° 周期の曖昧性を持つため、
+   共分散異方性 `sqrt((Var_I−Var_Q)²+4·Cov²)/(Var_I+Var_Q)` が
+   `STEREO_PHASE_ANISO_GATE`(0.2)以上の情報のあるブロックのみで、
+   π 周期族のうち現追跡値に最も近い候補への差分で EMA を更新
+   （連続性が 180° 分岐を解決、クランプ不要で ±180° 追従）。
+   モノラル番組中はゲートが閉じて追跡値を凍結。取得時のみ
+   「真の回転が ±90° 内」という FM 規格の pilot 位相規約を仮定
 7. 3 バンド整形 + ブレンド + HF ブレンドの上限ゲイン（既定は中立 1.0）
 8. ステレオマトリクス `L=Mono+Side, R=Mono−Side`
 9. パイロットノッチ ×2（19 kHz、Q=30）
@@ -361,7 +367,7 @@ IQ (1.024 MHz)
       ├ パイロット: 19 kHz ヘテロダイン + 複素 LPF (N=9) → 位相 θ
       ├ サブキャリア cos/sin(2θ + φ_offset)
       ├ L−R BPF (N=15, 23–53 kHz) × サブキャリア × 2.0
-      ├ 3 バンド LPF (I/Q) → IQ 位相補正 (±75° クランプ)
+      ├ 3 バンド LPF (I/Q) → IQ 位相補正 (異方性ゲート付き4象限トラッカー)
       ├ 3 バンド整形 + 適応ブレンド + HF ブレンド上限
       └ マトリクス L=M+S, R=M−S
   → パイロットノッチ ×2 (19 kHz, Q=30)
@@ -422,7 +428,7 @@ IQ (250 kHz)
 | `STEREO_BLEND_PILOT_SNR_DB_LO` / `_HI` | 7.0 / 16.5 | ブレンド係数の SNR 範囲 |
 | `STEREO_HF_BLEND_PILOT_SNR_DB_LO` / `_HI` | 15.0 / 35.0 | HF ブレンド上限の SNR ランプ |
 | `LR_HIGH_MAX_GAIN` / `LR_SUPER_HIGH_MAX_GAIN` | 1.00 / 1.00 | HF 減衰上限（既定は中立） |
-| `STEREO_PHASE_ERR_LIMIT_DEG` | 75.0 | I/Q 位相補正のクランプ（±90° 曖昧性から 15° ガード） |
+| `STEREO_PHASE_ANISO_GATE` | 0.2 | 位相トラッカー更新に要する共分散異方性（音楽 p5=0.55 / ノイズ p99=0.05 の間） |
 | `STEREO_SUBCARRIER_PHASE_OFFSET_DEG` | 316.0 | サブキャリア位相オフセット（discriminator） |
 | `STEREO_SUBCARRIER_PHASE_OFFSET_DEG_PLL` | 285.0 | 同（PLL 選択時） |
 | `STEREO_SUBCARRIER_PHASE_OFFSET_DEG_LIGHT` | 297.4 | 同（軽量モード） |

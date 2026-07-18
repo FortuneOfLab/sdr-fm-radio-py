@@ -128,18 +128,30 @@ STEREO_LR_SIDE_RATIO_CAP_MIN_GAIN = 0.35   # Lower bound of side-cap gain to avo
 STEREO_LR_SIDE_RATIO_CAP_ATTACK = 0.25     # Gain attack speed when limiting engages
 STEREO_LR_SIDE_RATIO_CAP_RELEASE = 0.45    # Gain release speed when limiting disengages
 STEREO_PHASE_ERR_SMOOTHING = 0.15   # EMA smoothing for LR demod phase correction
-STEREO_PHASE_ERR_LIMIT_DEG = 75.0   # Clamp limit for LR demod phase correction (deg).
-                                    # The principal-axis estimator (0.5*atan2) is
-                                    # unambiguous only within +-90 deg (beyond that it
-                                    # locks a quadrant off and swaps L/R), so a clamp is
-                                    # required; 75 keeps a 15 deg guard band.  Was 45.0,
-                                    # which truncated the estimate distribution on real
-                                    # multipath channels: the reference station needs
-                                    # ~-72 deg and the old clamp held the EMA at -39,
-                                    # silently under-correcting.  Synthetic checks: an
-                                    # imposed -75 deg static error recovers full
-                                    # separation at this limit (18.9 -> 24.4 dB) with
-                                    # no wander at weak signal (CNR 12).
+STEREO_PHASE_ANISO_GATE = 0.2       # Minimum covariance anisotropy
+                                    # sqrt((varI-varQ)^2+4cov^2)/(varI+varQ) required to
+                                    # update the phase tracker.  The principal-axis
+                                    # estimate is only meaningful when the demodulated
+                                    # (I,Q) pair is strongly 1-D; on mono programme the
+                                    # side channel is noise (isotropic) and unclamped
+                                    # updates would random-walk the tracker across the
+                                    # 180-deg branch boundary (L/R swap).  Measured on
+                                    # the reference station: music blocks p5 = 0.55,
+                                    # isotropic-noise blocks p99 = 0.05, so 0.2 has an
+                                    # order of magnitude of margin on both sides.  The
+                                    # tracker FREEZES (holds its last angle) while the
+                                    # gate is closed.
+                                    # History: this replaces STEREO_PHASE_ERR_LIMIT_DEG
+                                    # (45, then 75).  A clamp guards the +-90 deg
+                                    # principal-axis ambiguity but also truncates
+                                    # legitimate large corrections (the reference
+                                    # station's raw estimates sit around -83 deg and
+                                    # wrap past the boundary).  The tracker now resolves
+                                    # the 180-deg branch by CONTINUITY (nearest candidate
+                                    # in the pi-periodic family to the tracked state) and
+                                    # needs no clamp; only the initial acquisition
+                                    # assumes the true rotation lies within +-90 deg,
+                                    # which is the FM standard's pilot phase convention.
 STEREO_IQ_PHASE_CORRECTION_ENABLE = True   # Enable I/Q rotation correction in LR demod
 
 LR_BANDPASS_ORDER = 15              # L-R bandpass filter order (standard)

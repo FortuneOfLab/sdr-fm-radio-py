@@ -67,7 +67,7 @@ from fm_radio.constants import (
     STEREO_LR_SIDE_RATIO_CAP_ENABLE, STEREO_LR_SIDE_RATIO_CAP_TARGET,
     STEREO_LR_SIDE_RATIO_CAP_MIN_GAIN,
     STEREO_LR_SIDE_RATIO_CAP_ATTACK, STEREO_LR_SIDE_RATIO_CAP_RELEASE,
-    STEREO_PHASE_ERR_SMOOTHING, STEREO_PHASE_ERR_LIMIT_DEG, STEREO_IQ_PHASE_CORRECTION_ENABLE,
+    STEREO_PHASE_ERR_SMOOTHING, STEREO_PHASE_ANISO_GATE, STEREO_IQ_PHASE_CORRECTION_ENABLE,
     PILOT_NOISE_BAND1_LOW, PILOT_NOISE_BAND1_HIGH,
     PILOT_NOISE_BAND2_LOW, PILOT_NOISE_BAND2_HIGH,
     LR_BANDPASS_ORDER, LR_BANDPASS_ORDER_LIGHT,
@@ -222,6 +222,8 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         self.pilot_snr_ema: float | None = None
         self.pilot_jitter_ema: float = 0.0
         self.stereo_phase_err_ema: float = 0.0
+        self.stereo_phase_aniso: float = 0.0
+        self._phase_acquired: bool = False
         self.pilot_residual_center_hz: float = float(STEREO_PILOT_RESIDUAL_CENTER_HZ)
         self.subcarrier_phase_offset_rad: float = np.deg2rad(subcarrier_phase_offset_deg)
         self.mono_delay_samples: int = max(0, int(STEREO_MONO_DELAY_SAMPLES))
@@ -430,17 +432,48 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         var_i = float(np.mean(lr_base_full_i ** 2))
         var_q = float(np.mean(lr_base_full_q ** 2))
         if self.iq_phase_correction_enabled:
-            phase_err_raw = 0.5 * np.arctan2(2.0 * cov_iq, var_i - var_q + 1e-12)
-            phase_lim = np.deg2rad(STEREO_PHASE_ERR_LIMIT_DEG)
-            phase_err_raw = float(np.clip(phase_err_raw, -phase_lim, phase_lim))
-            phase_alpha = STEREO_PHASE_ERR_SMOOTHING
-            self.stereo_phase_err_ema = (
-                phase_alpha * phase_err_raw + (1.0 - phase_alpha) * self.stereo_phase_err_ema
+            # Anisotropy of the (I, Q) covariance: 1.0 for a perfectly
+            # 1-D signal, ~0 for isotropic noise.  Gates the tracker so
+            # mono programme (no side information) cannot random-walk
+            # the angle across the 180-deg branch boundary.
+            denom = var_i + var_q
+            aniso = float(
+                np.sqrt((var_i - var_q) ** 2 + 4.0 * cov_iq * cov_iq)
+                / (denom + 1e-18)
             )
+            self.stereo_phase_aniso = aniso
+            if denom > 1e-18 and aniso >= STEREO_PHASE_ANISO_GATE:
+                beta_pa = 0.5 * np.arctan2(2.0 * cov_iq, var_i - var_q + 1e-12)
+                if not self._phase_acquired:
+                    # Acquisition: take the principal-axis value in
+                    # (-90, 90] directly - the FM standard's pilot
+                    # convention makes |true rotation| < 90 deg the
+                    # only resolvable assumption at cold start.
+                    self.stereo_phase_err_ema = float(beta_pa)
+                    self._phase_acquired = True
+                else:
+                    # Tracking: the estimator is pi-periodic, so take
+                    # the innovation to the NEAREST candidate in the
+                    # {beta_pa + k*pi} family.  Continuity resolves the
+                    # 180-deg branch, so corrections beyond +-90 deg
+                    # stay locked instead of swapping L/R (the old
+                    # clamp saturated at 75 deg and truncated the
+                    # reference station's ~-83 deg demand).
+                    dd = beta_pa - self.stereo_phase_err_ema
+                    dd = (dd + np.pi / 2.0) % np.pi - np.pi / 2.0
+                    ema = (
+                        self.stereo_phase_err_ema
+                        + STEREO_PHASE_ERR_SMOOTHING * dd
+                    )
+                    # Wrap the tracked angle into (-180, 180].
+                    self.stereo_phase_err_ema = float(
+                        (ema + np.pi) % (2.0 * np.pi) - np.pi
+                    )
             cph = np.cos(self.stereo_phase_err_ema)
             sph = np.sin(self.stereo_phase_err_ema)
         else:
             self.stereo_phase_err_ema = 0.0
+            self.stereo_phase_aniso = 0.0
             cph = 1.0
             sph = 0.0
         lr_base_full = lr_base_full_i * cph + lr_base_full_q * sph
@@ -509,7 +542,7 @@ class BaseFMDemodulator(FMDemodulatorInterface):
                 phase_jitter = float(np.std(phase_step - np.mean(phase_step))) if phase_step.size else 0.0
                 self.logger.info(
                     "StereoDiag snr=%.2fdB blend=%.3f pilotP=%.6g noiseP=%.6g "
-                    "phJit=%.6g lrBandRMS=%.6g lrBaseRMS=%.6g phaseIQ=%.3fdeg "
+                    "phJit=%.6g lrBandRMS=%.6g lrBaseRMS=%.6g phaseIQ=%.3fdeg aniso=%.2f "
                     "iqCorr=%s "
                     "monoDelay=%d scOff=%.1fdeg sideCap=%.3f",
                     snr_db, self.blend_factor, pilot_power, noise_power,
@@ -517,6 +550,7 @@ class BaseFMDemodulator(FMDemodulatorInterface):
                     float(np.sqrt(np.mean(lr_band ** 2) + 1e-12)),
                     float(np.sqrt(np.mean(lr_baseband ** 2) + 1e-12)),
                     float(np.rad2deg(self.stereo_phase_err_ema)),
+                    self.stereo_phase_aniso,
                     "on" if self.iq_phase_correction_enabled else "off",
                     self.mono_delay_samples,
                     float(np.rad2deg(self.subcarrier_phase_offset_rad)),
@@ -597,6 +631,8 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         self.pilot_snr_ema = None
         self.pilot_jitter_ema = 0.0
         self.stereo_phase_err_ema = 0.0
+        self.stereo_phase_aniso = 0.0
+        self._phase_acquired = False
         self.lr_side_cap_gain = 1.0
         if self.mono_delay_samples > 0:
             self._mono_delay_state = np.zeros(self.mono_delay_samples, dtype=np.float32)
