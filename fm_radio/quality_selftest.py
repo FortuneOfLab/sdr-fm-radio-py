@@ -59,6 +59,13 @@ from fm_radio.demodulator import FMDemodulator
 
 EPS = 1e-12
 
+# Seconds discarded at the head of every sweep tone before measuring, so
+# the demod loop / filters / side NR have settled.  Shared by the sweep
+# measurement, the probe-frequency bin snapping, and the CLI duration
+# guard so they cannot drift apart.
+_SWEEP_SETTLE_S = 1.2
+_SWEEP_MIN_MEASURE_S = 0.3
+
 
 @dataclass
 class QualityMetrics:
@@ -673,7 +680,7 @@ def _sweep_tone_gain(
     iq = _fm_modulate_iq(mpx, fs_composite, fs_iq, freq_dev_hz, None)
     diag = _run_demod_diag_iq(iq, **diag_kwargs)
     lo, ro = diag["left"], diag["right"]
-    settle = int(1.2 * fs_audio)
+    settle = int(_SWEEP_SETTLE_S * fs_audio)
     lo = lo[settle:]
     ro = ro[settle:]
     m = min(lo.size, ro.size)
@@ -731,7 +738,7 @@ def _default_sweep_freqs(fs_audio: int, duration_s: float) -> np.ndarray:
            19000, 20000]
     # Snap each to the nearest FFT bin of the post-settle segment so the
     # single-bin correlation has no scalloping loss.
-    seg = n - int(1.2 * fs_audio)
+    seg = max(1, n - int(_SWEEP_SETTLE_S * fs_audio))
     snapped = sorted({round(f * seg / fs_audio) * fs_audio / seg for f in raw})
     return np.asarray([f for f in snapped if 0 < f < fs_audio / 2],
                       dtype=np.float64)
@@ -1014,6 +1021,11 @@ def _parser() -> argparse.ArgumentParser:
         help="Reference frequency (Hz) that --sweep-response normalises to 0 dB",
     )
     p.add_argument(
+        "--sweep-csv", type=str, default="",
+        help="Write the --sweep-response table to this file (overwrites). "
+             "Separate from --noise-csv, which appends noise-diagnostic rows.",
+    )
+    p.add_argument(
         "--play", action="store_true",
         help="Play demodulated audio via default audio device (IQ WAV mode)",
     )
@@ -1279,6 +1291,16 @@ def main() -> None:
         return
 
     if args.sweep_response:
+        # The sweep discards a fixed settle window before measuring, so
+        # the total duration must leave a usable measurement segment.
+        # (The generic --warmup-s guard above does not cover this path.)
+        if float(args.duration) < _SWEEP_SETTLE_S + _SWEEP_MIN_MEASURE_S:
+            raise SystemExit(
+                f"--sweep-response needs --duration >= "
+                f"{_SWEEP_SETTLE_S + _SWEEP_MIN_MEASURE_S:.1f} s "
+                f"({_SWEEP_SETTLE_S:.1f} s is discarded for settling); "
+                f"got {float(args.duration):.2f} s."
+            )
         if args.sweep_freqs.strip():
             freqs = np.asarray(
                 [float(x) for x in args.sweep_freqs.split(",") if x.strip()],
@@ -1321,10 +1343,10 @@ def main() -> None:
             line = f"{f:.0f}," + ",".join(cells)
             print(line)
             rows_out.append(line)
-        if args.noise_csv:
-            with open(args.noise_csv, "w", encoding="utf-8") as f:
+        if args.sweep_csv:
+            with open(args.sweep_csv, "w", encoding="utf-8") as f:
                 f.write("\n".join(rows_out) + "\n")
-            print(f"CSV: wrote frequency response to {args.noise_csv}")
+            print(f"CSV: wrote frequency response to {args.sweep_csv}")
         return
 
     if args.sweep_dsb_phase:
