@@ -226,6 +226,31 @@ def test_mono_to_stereo_switch_keeps_lr_aligned():
         assert left.shape == right.shape
 
 
+def test_light_demod_immune_to_accumulated_phase():
+    """Light demod output must not degrade as absolute phase accumulates.
+
+    The old angle->unwrap->diff kept the unwrapped phase in float32;
+    under a carrier offset it grows as 2*pi*df*t, and once it reaches
+    ~1e6 rad the float32 spacing (~0.06 rad) dwarfs the per-sample
+    step.  Reproducing that pipeline on a pure 50 kHz offset carrier
+    measured 0.031 rad/sample of quantisation noise after 4 s (and
+    growing); the conj-product discriminator measures 8e-5 and is
+    time-invariant.  A constant-frequency input must give a constant
+    composite: assert the late-time deviation stays tiny.
+    """
+    fs = 0.25e6
+    n = int(4.0 * fs)
+    t = np.arange(n) / fs
+    x = np.exp(1j * 2 * np.pi * 50e3 * t).astype(np.complex64)
+    d = FMDemodulatorLight(stereo=False)
+    d.dc_alpha = 0.0
+    comp = np.concatenate([
+        d.process_iq_samples(x[i:i + 16384]) for i in range(0, n, 16384)
+    ])
+    tail = comp[-int(0.5 * fs * 96 / 125):]
+    assert float(np.std(tail)) < 1e-3, float(np.std(tail))
+
+
 def test_light_composite_is_block_size_invariant():
     """The light IQ->composite chain must be block-size invariant.
 
