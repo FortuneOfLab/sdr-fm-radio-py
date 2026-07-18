@@ -292,7 +292,8 @@ gain）→ 3) 数値入力（局番号 / 周波数）の順。録音ファイル
 ### 3.11 エントリポイント（__main__.py）
 
 `python -m fm_radio` / `fm_receiver.py` の起点。コマンドライン引数
-（`--light` / `--log` / `--debug` / `--log-file`）を解釈し、ログ設定を
+（`--light` / `--log`（別名 `--verbose` / `-v`）/ `--debug` /
+`--log-file`）を解釈し、ログ設定を
 行い（有効時）、`FMReceiverController` を生成して `start()` を呼びます。
 ログ有効時は GC モニタ（Gen2 コレクションのポーズ時間を記録）も登録し、
 音声ドロップ調査に用います。
@@ -473,7 +474,7 @@ python fm_receiver.py
 python fm_receiver.py --light
 
 # ログ有効化 / デバッグ / ファイル出力
-python fm_receiver.py --log
+python fm_receiver.py --log        # 別名: --verbose / -v
 python fm_receiver.py --debug
 python fm_receiver.py --log-file fm_receiver.log
 ```
