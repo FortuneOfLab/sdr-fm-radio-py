@@ -2,9 +2,11 @@
 
 Runs the full MPX -> FM IQ -> demodulator chain and asserts conservative
 floors for the objective metrics.  The floors sit well below the
-measured values (clean run at CNR=35: Sep ~24/28 dB, THD+N ~-28 dB,
-SNR ~31-32 dB with pre-emphasis on) so they are robust across platforms
-and RNG noise draws while still catching structural regressions.
+measured values (clean run at CNR=35: Sep ~30/30.5 dB, THD+N ~-37 dB,
+SNR ~35/37.5 dB with pre-emphasis on) so they are robust across
+platforms and RNG noise draws while still catching structural
+regressions.  See the FLOORS comment below for the measurement
+history across tuning changes.
 
 The impaired scenarios exist because a pristine synthetic channel can
 hide whole bug classes: the FFT-Hilbert block-edge defect fixed in
