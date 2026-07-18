@@ -88,6 +88,7 @@ from fm_radio.constants import (
     SIDE_NR_ENABLE, SIDE_NR_FRAME, SIDE_NR_HOP,
     SIDE_NR_ALPHA_FLOOR, SIDE_NR_BETA,
     SIDE_NR_NOISE_DECAY_DB_PER_SEC,
+    SIDE_NR_TONE_PROTECT_DB, SIDE_NR_TONE_PROTECT_MED_BINS,
     SIDE_NR_LO_HZ, SIDE_NR_HI_HZ,
 )
 
@@ -243,6 +244,8 @@ class BaseFMDemodulator(FMDemodulatorInterface):
             alpha_floor=float(SIDE_NR_ALPHA_FLOOR),
             beta=float(SIDE_NR_BETA),
             noise_decay_db_per_sec=float(SIDE_NR_NOISE_DECAY_DB_PER_SEC),
+            tone_protect_db=float(SIDE_NR_TONE_PROTECT_DB),
+            tone_protect_med_bins=int(SIDE_NR_TONE_PROTECT_MED_BINS),
             lo_hz=float(SIDE_NR_LO_HZ),
             hi_hz=float(SIDE_NR_HI_HZ),
         )

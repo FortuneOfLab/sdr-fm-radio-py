@@ -219,6 +219,40 @@ def test_side_nr_reduces_stationary_noise(rng):
     assert red_db < -8.0, f"in-band reduction only {red_db:.1f} dB"
 
 
+def test_side_nr_preserves_tone_while_reducing_noise(rng):
+    """A stationary tone in broadband noise keeps its amplitude.
+
+    The minimum-statistics floor used to climb into a sustained tone's
+    own bin (the tone never pauses) and pin its gain at alpha_floor;
+    the local-median tracker clamp prevents that.  The broadband noise
+    between tones must still be reduced.
+    """
+    fs = 48000
+    nr = SideNoiseReducer(
+        sample_rate=fs, frame=1024, hop=256, alpha_floor=0.30, beta=1.0,
+        noise_decay_db_per_sec=6.0,
+    )
+    n = 20 * fs
+    t = np.arange(n) / fs
+    tone_amp = 0.05
+    tone = (tone_amp * np.sin(2 * np.pi * 5000.0 * t)).astype(np.float32)
+    noise = (rng.standard_normal(n) * 0.005).astype(np.float32)
+    x = tone + noise
+    out = []
+    for i in range(0, n, 480):
+        y = nr.process(x[i:i + 480])
+        if y.size:
+            out.append(y)
+    y = np.concatenate(out)
+    # Measure the tone amplitude in the last 5 s by single-bin correlation.
+    seg = y[-5 * fs:]
+    tt = np.arange(seg.size) / fs
+    amp = np.abs(np.mean(seg * np.exp(-1j * 2 * np.pi * 5000.0 * tt)) * 2)
+    loss_db = 20 * np.log10(amp / tone_amp)
+    # Without protection this measured ~-10 dB (alpha_floor).
+    assert loss_db > -1.5, f"tone lost {loss_db:.1f} dB"
+
+
 def test_side_nr_beta_zero_produces_finite_output(rng):
     # --side-nr-beta 0 is reachable from the CLI; xi=0 with beta=0 used
     # to produce 0/0 = NaN gains that silenced the side channel.
