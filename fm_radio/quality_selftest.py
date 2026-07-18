@@ -200,6 +200,7 @@ def _build_mpx(
     preemphasis_tau_s: float,
     dsb_phase_deg: float,
     clock_ppm: float = 0.0,
+    dsb_phase_drift_deg_per_s: float = 0.0,
 ) -> np.ndarray:
     if enable_preemphasis:
         left_audio = _preemphasis(left_audio, fs_audio, preemphasis_tau_s)
@@ -226,7 +227,13 @@ def _build_mpx(
     # are irrelevant to every metric.
     scale = 1.0 + clock_ppm * 1e-6
     pilot = pilot_amp * np.cos(2.0 * np.pi * 19_000.0 * scale * t)
-    dsb_phase_rad = np.deg2rad(dsb_phase_deg)
+    # dsb_phase_drift models a slowly changing multipath channel: the
+    # DSB carrier phase (relative to 2x the pilot) ramps linearly over
+    # the run, exercising the receiver's I/Q phase TRACKER rather than
+    # only its static operating point.
+    dsb_phase_rad = np.deg2rad(
+        dsb_phase_deg + dsb_phase_drift_deg_per_s * t
+    )
     dsb = lmr * np.cos(2.0 * np.pi * 38_000.0 * scale * t + dsb_phase_rad)
     mpx = lpr + dsb + pilot
     return mpx.astype(np.float32)
@@ -769,6 +776,7 @@ def evaluate_quality(
     enable_preemphasis: bool = True,
     preemphasis_tau_s: float = 50e-6,
     dsb_phase_deg: float = 0.0,
+    dsb_phase_drift_deg_per_s: float = 0.0,
     source_lr: tuple[np.ndarray, np.ndarray] | None = None,
     disable_iq_phase_correction: bool = False,
     mono_delay_samples: int | None = None,
@@ -815,6 +823,7 @@ def evaluate_quality(
         left_ref, right_ref, fs_audio, fs_composite, pilot_amp,
         enable_preemphasis=enable_preemphasis, preemphasis_tau_s=preemphasis_tau_s,
         dsb_phase_deg=dsb_phase_deg, clock_ppm=clock_ppm,
+        dsb_phase_drift_deg_per_s=dsb_phase_drift_deg_per_s,
     )
     if path == "composite":
         left_out, right_out, blend_hist = _run_demod_from_composite(
@@ -860,6 +869,7 @@ def evaluate_quality(
         l_only, r_zero, fs_audio, fs_composite, pilot_amp,
         enable_preemphasis=enable_preemphasis, preemphasis_tau_s=preemphasis_tau_s,
         dsb_phase_deg=dsb_phase_deg, clock_ppm=clock_ppm,
+        dsb_phase_drift_deg_per_s=dsb_phase_drift_deg_per_s,
     )
     if path == "composite":
         l_main, r_leak, _ = _run_demod_from_composite(
@@ -886,6 +896,7 @@ def evaluate_quality(
         l_zero, r_only, fs_audio, fs_composite, pilot_amp,
         enable_preemphasis=enable_preemphasis, preemphasis_tau_s=preemphasis_tau_s,
         dsb_phase_deg=dsb_phase_deg, clock_ppm=clock_ppm,
+        dsb_phase_drift_deg_per_s=dsb_phase_drift_deg_per_s,
     )
     if path == "composite":
         l_leak, r_main, _ = _run_demod_from_composite(
@@ -1009,6 +1020,12 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--dsb-phase-deg", type=float, default=0.0,
         help="Phase offset (degrees) for synthetic 38kHz DSB (L-R) generation",
+    )
+    p.add_argument(
+        "--dsb-drift-deg-s", type=float, default=0.0,
+        help="Linear drift (deg/s) of the DSB phase over the run; models a "
+             "slowly changing multipath channel and exercises the I/Q "
+             "phase tracker",
     )
     p.add_argument(
         "--sweep-dsb-phase", action="store_true",
@@ -1384,7 +1401,11 @@ def main() -> None:
         )
         return
 
-    m = evaluate_quality(dsb_phase_deg=float(args.dsb_phase_deg), **eval_kwargs)
+    m = evaluate_quality(
+        dsb_phase_deg=float(args.dsb_phase_deg),
+        dsb_phase_drift_deg_per_s=float(args.dsb_drift_deg_s),
+        **eval_kwargs,
+    )
     print("FM Quality Self-Test")
     print(f"THD+N L: {m.thdn_left_db:.2f} dB")
     print(f"THD+N R: {m.thdn_right_db:.2f} dB")

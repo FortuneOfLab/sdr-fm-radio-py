@@ -67,7 +67,9 @@ from fm_radio.constants import (
     STEREO_LR_SIDE_RATIO_CAP_ENABLE, STEREO_LR_SIDE_RATIO_CAP_TARGET,
     STEREO_LR_SIDE_RATIO_CAP_MIN_GAIN,
     STEREO_LR_SIDE_RATIO_CAP_ATTACK, STEREO_LR_SIDE_RATIO_CAP_RELEASE,
-    STEREO_PHASE_ERR_SMOOTHING, STEREO_PHASE_ERR_LIMIT_DEG, STEREO_IQ_PHASE_CORRECTION_ENABLE,
+    STEREO_PHASE_ERR_SMOOTHING, STEREO_PHASE_ANISO_GATE,
+    STEREO_PHASE_SIDE_GATE_DB, STEREO_PHASE_ACQUIRE_BLOCKS,
+    STEREO_IQ_PHASE_CORRECTION_ENABLE,
     PILOT_NOISE_BAND1_LOW, PILOT_NOISE_BAND1_HIGH,
     PILOT_NOISE_BAND2_LOW, PILOT_NOISE_BAND2_HIGH,
     LR_BANDPASS_ORDER, LR_BANDPASS_ORDER_LIGHT,
@@ -222,6 +224,10 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         self.pilot_snr_ema: float | None = None
         self.pilot_jitter_ema: float = 0.0
         self.stereo_phase_err_ema: float = 0.0
+        self.stereo_phase_aniso: float = 0.0
+        self._phase_acquired: bool = False
+        self._phase_acq_acc: complex = 0j
+        self._phase_acq_count: int = 0
         self.pilot_residual_center_hz: float = float(STEREO_PILOT_RESIDUAL_CENTER_HZ)
         self.subcarrier_phase_offset_rad: float = np.deg2rad(subcarrier_phase_offset_deg)
         self.mono_delay_samples: int = max(0, int(STEREO_MONO_DELAY_SAMPLES))
@@ -430,17 +436,91 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         var_i = float(np.mean(lr_base_full_i ** 2))
         var_q = float(np.mean(lr_base_full_q ** 2))
         if self.iq_phase_correction_enabled:
-            phase_err_raw = 0.5 * np.arctan2(2.0 * cov_iq, var_i - var_q + 1e-12)
-            phase_lim = np.deg2rad(STEREO_PHASE_ERR_LIMIT_DEG)
-            phase_err_raw = float(np.clip(phase_err_raw, -phase_lim, phase_lim))
-            phase_alpha = STEREO_PHASE_ERR_SMOOTHING
-            self.stereo_phase_err_ema = (
-                phase_alpha * phase_err_raw + (1.0 - phase_alpha) * self.stereo_phase_err_ema
+            # Anisotropy of the (I, Q) covariance: 1.0 for a perfectly
+            # 1-D signal, ~0 for isotropic noise.  Gates the tracker so
+            # mono programme (no side information) cannot random-walk
+            # the angle across the 180-deg branch boundary.
+            denom = var_i + var_q
+            aniso = float(
+                np.sqrt((var_i - var_q) ** 2 + 4.0 * cov_iq * cov_iq)
+                / (denom + 1e-18)
             )
+            self.stereo_phase_aniso = aniso
+            # Absolute-energy gate: anisotropy is scale-invariant, so
+            # on a MONO broadcast the tiny deterministic residue in the
+            # side band (filter transients, pilot-harmonic products)
+            # can look strongly 1-D while sitting ~-32 dB below the
+            # mono programme.  Require the demodulated side power to be
+            # within STEREO_PHASE_SIDE_GATE_DB of the mono power before
+            # trusting the estimate (real stereo music: p5 = -11 dB;
+            # noise-dominated side fails the anisotropy gate instead).
+            mono_pow = float(np.mean(mono ** 2))
+            side_gate = mono_pow * (10.0 ** (STEREO_PHASE_SIDE_GATE_DB / 10.0))
+            informative = (
+                denom > 1e-18
+                and mono_pow > 1e-18
+                and denom >= side_gate
+                and aniso >= STEREO_PHASE_ANISO_GATE
+            )
+            if informative:
+                beta_pa = 0.5 * np.arctan2(2.0 * cov_iq, var_i - var_q + 1e-12)
+                if not self._phase_acquired:
+                    # Acquisition: require STEREO_PHASE_ACQUIRE_BLOCKS
+                    # CONSECUTIVE informative blocks (rejects start-up
+                    # filter transients) and initialise from the
+                    # doubled-angle circular mean 0.5*arg(sum(e^{j2b}))
+                    # over the streak.  The doubled domain is invariant
+                    # to the +-90 deg wrap of individual raw estimates:
+                    # on a station whose true rotation sits near the
+                    # boundary (the reference station is at ~-83 deg,
+                    # with ~20% of raws wrapping to +88-ish), a single
+                    # -block init would lock the wrong 180-deg branch
+                    # (a permanent L/R swap) with that probability.
+                    # The circular mean lands on the true axis and the
+                    # (-90, 90] representative implements the cold-
+                    # start convention |true rotation| < 90 deg - the
+                    # only resolvable assumption, per the FM standard's
+                    # pilot phase convention.
+                    self._phase_acq_acc += complex(
+                        np.cos(2.0 * beta_pa), np.sin(2.0 * beta_pa)
+                    )
+                    self._phase_acq_count += 1
+                    if self._phase_acq_count >= STEREO_PHASE_ACQUIRE_BLOCKS:
+                        self.stereo_phase_err_ema = float(
+                            0.5 * np.arctan2(
+                                self._phase_acq_acc.imag,
+                                self._phase_acq_acc.real,
+                            )
+                        )
+                        self._phase_acquired = True
+                else:
+                    # Tracking: the estimator is pi-periodic, so take
+                    # the innovation to the NEAREST candidate in the
+                    # {beta_pa + k*pi} family.  Continuity resolves the
+                    # 180-deg branch, so corrections beyond +-90 deg
+                    # stay locked instead of swapping L/R (the old
+                    # clamp saturated at 75 deg and truncated the
+                    # reference station's ~-83 deg demand).
+                    dd = beta_pa - self.stereo_phase_err_ema
+                    dd = (dd + np.pi / 2.0) % np.pi - np.pi / 2.0
+                    ema = (
+                        self.stereo_phase_err_ema
+                        + STEREO_PHASE_ERR_SMOOTHING * dd
+                    )
+                    # Wrap the tracked angle into (-180, 180].
+                    self.stereo_phase_err_ema = float(
+                        (ema + np.pi) % (2.0 * np.pi) - np.pi
+                    )
+            elif not self._phase_acquired:
+                # Acquisition demands CONSECUTIVE informative blocks;
+                # a break restarts the streak and its accumulator.
+                self._phase_acq_acc = 0j
+                self._phase_acq_count = 0
             cph = np.cos(self.stereo_phase_err_ema)
             sph = np.sin(self.stereo_phase_err_ema)
         else:
             self.stereo_phase_err_ema = 0.0
+            self.stereo_phase_aniso = 0.0
             cph = 1.0
             sph = 0.0
         lr_base_full = lr_base_full_i * cph + lr_base_full_q * sph
@@ -509,7 +589,7 @@ class BaseFMDemodulator(FMDemodulatorInterface):
                 phase_jitter = float(np.std(phase_step - np.mean(phase_step))) if phase_step.size else 0.0
                 self.logger.info(
                     "StereoDiag snr=%.2fdB blend=%.3f pilotP=%.6g noiseP=%.6g "
-                    "phJit=%.6g lrBandRMS=%.6g lrBaseRMS=%.6g phaseIQ=%.3fdeg "
+                    "phJit=%.6g lrBandRMS=%.6g lrBaseRMS=%.6g phaseIQ=%.3fdeg aniso=%.2f "
                     "iqCorr=%s "
                     "monoDelay=%d scOff=%.1fdeg sideCap=%.3f",
                     snr_db, self.blend_factor, pilot_power, noise_power,
@@ -517,6 +597,7 @@ class BaseFMDemodulator(FMDemodulatorInterface):
                     float(np.sqrt(np.mean(lr_band ** 2) + 1e-12)),
                     float(np.sqrt(np.mean(lr_baseband ** 2) + 1e-12)),
                     float(np.rad2deg(self.stereo_phase_err_ema)),
+                    self.stereo_phase_aniso,
                     "on" if self.iq_phase_correction_enabled else "off",
                     self.mono_delay_samples,
                     float(np.rad2deg(self.subcarrier_phase_offset_rad)),
@@ -597,6 +678,10 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         self.pilot_snr_ema = None
         self.pilot_jitter_ema = 0.0
         self.stereo_phase_err_ema = 0.0
+        self.stereo_phase_aniso = 0.0
+        self._phase_acquired = False
+        self._phase_acq_acc = 0j
+        self._phase_acq_count = 0
         self.lr_side_cap_gain = 1.0
         if self.mono_delay_samples > 0:
             self._mono_delay_state = np.zeros(self.mono_delay_samples, dtype=np.float32)
