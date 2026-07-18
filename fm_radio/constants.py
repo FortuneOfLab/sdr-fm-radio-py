@@ -239,6 +239,11 @@ SIDE_NR_HOP = 256               # STFT hop size (75% overlap)
 SIDE_NR_ALPHA_FLOOR = 0.30      # Minimum Wiener gain (linear). 0.30 ≈ -10 dB max attenuation
 SIDE_NR_BETA = 1.0              # Over-subtraction factor (1.0 = pure Wiener)
 SIDE_NR_NOISE_DECAY_DB_PER_SEC = 6.0  # Noise floor leakage rate (dB/sec)
+SIDE_NR_TONE_PROTECT_DB = 8.0   # Clamp noise-tracker input to local median + this (dB);
+                                # protects stationary tones from being absorbed into the
+                                # noise floor (measured -10 dB tone loss without it).
+                                # <= 0 disables the protection.
+SIDE_NR_TONE_PROTECT_MED_BINS = 33  # Median window (bins) for the tonal-protection clamp
 SIDE_NR_LO_HZ = 1500.0          # Lower edge of NR band (preserve low-frequency stereo)
 SIDE_NR_HI_HZ = 15000.0         # Upper edge of NR band
 

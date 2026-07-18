@@ -338,6 +338,8 @@ class SideNoiseReducer:
         dd_alpha: float = 0.98,
         gain_freq_smooth_bins: int = 3,
         lo_hz: float = 1500.0, hi_hz: float = 15000.0,
+        tone_protect_db: float = 8.0,
+        tone_protect_med_bins: int = 33,
     ) -> None:
         if frame <= 0 or hop <= 0:
             raise ValueError("frame and hop must be positive")
@@ -383,6 +385,23 @@ class SideNoiseReducer:
         # Number of FFT bins over which to smooth the gain (median filter).
         # Helps avoid isolated tonal artefacts.  Set <=1 to disable.
         self.gain_freq_smooth_bins: int = int(max(1, gain_freq_smooth_bins))
+        # Tonal protection for the noise tracker: a STATIONARY tone never
+        # pauses, so the minimum-statistics floor climbs (noise_decay)
+        # until it swallows the tone's own bin and the Wiener gain pins
+        # at alpha_floor (~-10 dB measured via --sweep-response).  A
+        # narrowband tone stands far above the frequency-local median of
+        # the smoothed spectrum, while the broadband FM side noise does
+        # not, so the tracker input is clamped to
+        # median * 10^(tone_protect_db/10); the floor in a tone bin then
+        # settles near the true broadband level and the tone keeps a
+        # gain near 1.  Set tone_protect_db <= 0 to disable.
+        self.tone_protect_db: float = float(tone_protect_db)
+        # Odd median-window width in bins; must span more than a tone's
+        # spectral footprint (Hann main lobe ~4 bins) but stay narrow
+        # enough to follow the noise's spectral tilt.  33 bins ~ 1.5 kHz
+        # at frame=1024 / fs=48 kHz.
+        k = int(max(3, tone_protect_med_bins))
+        self.tone_protect_med_bins: int = k if k % 2 == 1 else k + 1
         self.in_buf: np.ndarray = np.zeros(0, dtype=np.float32)
         self.synth_overlap: np.ndarray = np.zeros(
             self.frame - self.hop, dtype=np.float32,
@@ -443,12 +462,23 @@ class SideNoiseReducer:
             # Initialised from the first frame so initial gain stays near 1
             # before the floor settles; subsequent frames track minimum
             # with a slow upward leak so silent-bin dips lock the estimate.
+            # Narrowband peaks are clamped to the frequency-local median
+            # before feeding the tracker (see __init__: tone_protect_db)
+            # so a sustained tone cannot raise its own bin's floor.
+            tracker_in = self.power_smooth
+            if self.tone_protect_db > 0.0:
+                local_med = signal.medfilt(
+                    self.power_smooth.astype(np.float64),
+                    kernel_size=self.tone_protect_med_bins,
+                )
+                cap = local_med * (10.0 ** (self.tone_protect_db / 10.0))
+                tracker_in = np.minimum(self.power_smooth, cap)
             if self.noise_floor is None:
-                self.noise_floor = self.power_smooth.copy()
+                self.noise_floor = tracker_in.copy()
             else:
                 self.noise_floor = np.minimum(
                     self.noise_floor * self.noise_decay,
-                    self.power_smooth,
+                    tracker_in,
                 )
             noise_est = self.noise_bias * self.noise_floor + 1e-18
 

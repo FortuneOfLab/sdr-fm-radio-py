@@ -73,12 +73,16 @@ def test_preemphasis_roundtrip_is_flat():
 
 
 @pytest.mark.slow
-def test_side_nr_attenuates_stationary_tone_vs_bypass():
-    """Side NR removes ~10 dB of a stationary side tone above 1.5 kHz.
+def test_side_nr_preserves_stationary_tone():
+    """Side NR must pass a stationary side tone at near-bypass level.
 
-    Documents the DD-Wiener minimum-statistics behaviour surfaced by the
-    sweep: a stationary tone is treated as noise.  Below 1.5 kHz the NR
-    band bypasses, so 1 kHz is a fair reference for both configs.
+    Without tonal protection the DD-Wiener minimum-statistics floor
+    absorbed a sustained tone into the noise estimate and pinned its
+    gain at alpha_floor (~-10 dB measured at 5 kHz).  The local-median
+    clamp on the tracker input keeps the floor at the broadband level,
+    so the tone survives within ~1 dB of the NR-off response.  Below
+    1.5 kHz the NR band bypasses, so 1 kHz is a fair reference for
+    both configs.
     """
     freqs = np.array([1000, 5000], dtype=float)
     on = measure_frequency_response(
@@ -92,6 +96,6 @@ def test_side_nr_attenuates_stationary_tone_vs_bypass():
     # Reference both at 1 kHz (inside the NR bypass region).
     on_db = 20 * np.log10((on[1] + 1e-12) / (on[0] + 1e-12))
     off_db = 20 * np.log10((off[1] + 1e-12) / (off[0] + 1e-12))
-    # Side NR must pull the 5 kHz tone down by at least 6 dB more than
-    # the bypass response does.
-    assert on_db < off_db - 6.0
+    # The tone must sit within 1.5 dB of the bypass response (it sat
+    # 7.5 dB below before the tonal protection).
+    assert abs(on_db - off_db) < 1.5, (on_db, off_db)
