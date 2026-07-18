@@ -55,6 +55,24 @@ def test_mono_passband_is_flat_low():
 
 
 @pytest.mark.slow
+def test_preemphasis_roundtrip_is_flat():
+    """Pre-emph ON mono response must be flat within +-0.5 dB to 13 kHz.
+
+    The synthetic analog pre-emphasis (exact FFT multiply) and the
+    receiver's analog-fitted 1p1z de-emphasis must cancel.  Before the
+    pair of fixes this showed a +3.5 dB bump at 13 kHz (+2.4 dB from
+    the bilinear pre-emphasis over-boost, +1.1 dB from the matched-Z
+    de-emphasis under-attenuation).
+    """
+    freqs = np.array([300, 1000, 3000, 7000, 11000, 13000], dtype=float)
+    resp = measure_frequency_response(
+        freqs, modes=("mono",), duration_s=2.0, enable_preemphasis=True,
+    )
+    db = _db(resp["mono"], freqs, 1000.0)
+    assert np.max(np.abs(db)) < 0.5, db
+
+
+@pytest.mark.slow
 def test_side_nr_attenuates_stationary_tone_vs_bypass():
     """Side NR removes ~10 dB of a stationary side tone above 1.5 kHz.
 

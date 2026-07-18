@@ -172,9 +172,22 @@ def _make_stereo_tone(
 
 
 def _preemphasis(x: np.ndarray, fs: int, tau_s: float) -> np.ndarray:
-    # H(s) = 1 + s*tau, bilinear transformed.
-    b, a = signal.bilinear([tau_s, 1.0], [1.0], fs=fs)
-    return signal.lfilter(b, a, x).astype(np.float32)
+    """Exact analog pre-emphasis H(f) = 1 + j*2*pi*f*tau via FFT multiply.
+
+    A real transmitter applies ANALOG pre-emphasis, so the synthetic
+    path models it exactly in the frequency domain.  The previous
+    bilinear-transform IIR over-boosted the top of the band by up to
+    +3.6 dB at 15 kHz (48 kHz sampling), which showed up as a bogus
+    +3.6 dB bump in the --sweep-response round trip and skewed every
+    pre-emphasis-on THD/SNR measurement.  The FFT product is the exact
+    analog curve at every bin; the only artefact is circular wraparound
+    over a few samples at the block edges, which the settle/warmup
+    trims of every consumer discard.
+    """
+    X = np.fft.rfft(x.astype(np.float64))
+    f = np.fft.rfftfreq(x.size, d=1.0 / fs)
+    X *= 1.0 + 1j * 2.0 * np.pi * f * tau_s
+    return np.fft.irfft(X, n=x.size).astype(np.float32)
 
 
 def _build_mpx(
