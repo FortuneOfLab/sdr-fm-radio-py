@@ -115,16 +115,14 @@ flowchart TD
     class MONO_LPF,DELAY,MATRIX,NOTCH_L,NOTCH_R,RS2_L,RS2_R,DEEMP_L,DEEMP_R,SIDENR,OUT_L,OUT_R audio
 ```
 
-## FMDemodulatorLight (Phase-Differentiation)
+## FMDemodulatorLight (Arctan Discriminator)
 
 ```mermaid
 flowchart TD
     IQ["IQ Samples\n(250 kHz complex)"]
     IQ --> DC["DC Offset Removal\n(EMA α=0.01)"]
-    DC --> ANGLE["Phase Extraction\nnp.angle(IQ)"]
-    ANGLE --> UNWRAP["Phase Unwrap\n(block-continuous,\ncarried previous phase)"]
-    UNWRAP --> DIFF["Phase Differentiation\nnp.diff(phase)"]
-    DIFF --> RS1["StatefulResampler\n96 : 125 (grid-aligned)\n250 kHz → 192 kHz"]
+    DC --> DISC["FM Demodulation\narctan discriminator\nangle(x[n]·conj(x[n-1]))\n(same as Standard)"]
+    DISC --> RS1["StatefulResampler\n96 : 125 (grid-aligned)\n250 kHz → 192 kHz"]
     RS1 --> SCALE["× 0.35\n(LIGHT_COMPOSITE_SCALE)"]
     SCALE --> COMP["Composite Signal\n192 kHz"]
 
@@ -133,7 +131,7 @@ flowchart TD
     classDef iq fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
     classDef comp fill:#fff3e0,stroke:#e65100,stroke-width:2px
 
-    class IQ,DC,ANGLE,UNWRAP,DIFF,RS1,SCALE iq
+    class IQ,DC,DISC,RS1,SCALE iq
     class COMP,STEREO comp
 ```
 

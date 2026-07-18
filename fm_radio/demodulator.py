@@ -792,15 +792,15 @@ class FMDemodulatorLight(BaseFMDemodulator):
             f"Stereo={'enabled' if stereo else 'disabled'}"
         )
 
-        # --- Light-only: phase tracking for differentiation ---
-        self.last_phase: float | None = None
+        # --- Light-only: discriminator state (previous IQ sample) ---
+        self._disc_last: np.ndarray | None = None
         self._iq_resampler = StatefulResampler(
             self.up, self.down, emit_align=self._resample_down,
         )
 
     def process_iq_samples(self, iq_samples: np.ndarray) -> np.ndarray:
-        """Apply DC offset correction, phase extraction/differentiation,
-        and resampling to generate the composite signal.
+        """Apply DC offset correction, arctan discrimination, and
+        resampling to generate the composite signal.
 
         Args:
             iq_samples: Input IQ samples.
@@ -814,26 +814,26 @@ class FMDemodulatorLight(BaseFMDemodulator):
                 + (1 - self.dc_alpha) * self.dc_offset
             )
             iq_processed = iq_samples - self.dc_offset
-            current_phase = np.angle(iq_processed)
-            if self.last_phase is None:
-                phase = np.unwrap(current_phase)
-                # Stream start: no previous sample, so the first
-                # difference is defined as zero (matches one-shot
-                # processing conventions).
-                fm_demod = np.diff(phase, prepend=phase[:1])
+            # Arctan discriminator, same form as the standard chain:
+            # angle(x[n]*conj(x[n-1])) is the wrapped per-sample phase
+            # step - identical to the previous angle->unwrap->diff
+            # whenever the true step is within +-pi (unwrap's own
+            # assumption), but it never accumulates absolute phase.
+            # The old path kept the unwrapped phase in float32; under a
+            # carrier offset it grows as 2*pi*df*t without bound, and
+            # once it reaches ~1e6 rad the float32 spacing (~0.06 rad)
+            # dwarfs the per-sample step, quantising the audio in long
+            # light-mode sessions.  The previous block's last sample
+            # seeds the first difference (stream start: zero).
+            if self._disc_last is None:
+                prev = iq_processed[:1]
             else:
-                # Prepend the carried previous phase so the first
-                # difference of this block is the true sample-to-sample
-                # step.  The old code prepended the block's own first
-                # phase, forcing fm_demod[0] = 0 at EVERY block boundary
-                # (a 1-sample dropout every 16 ms).  The carried value
-                # is materialised in the block's dtype so the float32
-                # pipeline is not promoted to float64.
-                prev = np.array([self.last_phase], dtype=current_phase.dtype)
-                phase = np.unwrap(np.concatenate((prev, current_phase)))
-                fm_demod = np.diff(phase)
-                phase = phase[1:]
-            self.last_phase = float(phase[-1])
+                prev = self._disc_last
+            ext = np.concatenate((prev, iq_processed))
+            fm_demod = np.angle(
+                ext[1:] * np.conj(ext[:-1])
+            ).astype(np.float32, copy=False)
+            self._disc_last = iq_processed[-1:].copy()
             composite = (
                 self._iq_resampler.process(fm_demod) * LIGHT_COMPOSITE_SCALE
             )
@@ -843,6 +843,6 @@ class FMDemodulatorLight(BaseFMDemodulator):
             raise DemodulationError(f"Error processing IQ samples (Light): {e}") from e
 
     def _reset_subclass(self) -> None:
-        """Reset phase tracking state."""
-        self.last_phase = None
+        """Reset discriminator state."""
+        self._disc_last = None
         self._iq_resampler.reset()
