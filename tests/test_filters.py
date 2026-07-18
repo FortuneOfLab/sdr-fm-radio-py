@@ -56,6 +56,25 @@ def test_deemphasis_reset_gives_zero_output_for_zero_input():
     assert np.allclose(out, 0.0)
 
 
+def test_deemphasis_matches_analog_curve():
+    """The 1p1z de-emphasis must track analog 1/(1+j2pift) within 0.15 dB.
+
+    The old matched-Z one-pole under-attenuated by up to +1.4 dB at
+    15 kHz, which against a real broadcast's analog pre-emphasis is an
+    audible HF brightness error.  DC gain must be exactly unity.
+    """
+    fs, tau = 48000.0, 50e-6
+    de = DeemphasisIIRFilter(sample_rate=fs, tau=tau)
+    assert abs((de.b0 + de.b1) / (1.0 - de.a1) - 1.0) < 1e-9  # DC gain
+    f = np.linspace(20.0, 15000.0, 400)
+    z = np.exp(1j * 2 * np.pi * f / fs)
+    h = (de.b0 + de.b1 / z) / (1 - de.a1 / z)
+    target = 1.0 / (1.0 + 1j * 2 * np.pi * f * tau)
+    err_db = 20 * np.log10(np.abs(h)) - 20 * np.log10(np.abs(target))
+    assert np.max(np.abs(err_db)) < 0.15, np.max(np.abs(err_db))
+    assert abs(de.a1) < 1.0  # stable
+
+
 def test_lowpass_streaming_matches_oneshot(rng):
     lp_stream = LowpassFilter(order=5, cutoff=15000, sample_rate=192000)
     lp_ref = LowpassFilter(order=5, cutoff=15000, sample_rate=192000)

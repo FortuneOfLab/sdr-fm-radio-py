@@ -2,9 +2,11 @@
 
 Runs the full MPX -> FM IQ -> demodulator chain and asserts conservative
 floors for the objective metrics.  The floors sit well below the
-measured values (clean run at CNR=35: Sep ~24/28 dB, THD+N ~-28 dB,
-SNR ~31-32 dB with pre-emphasis on) so they are robust across platforms
-and RNG noise draws while still catching structural regressions.
+measured values (clean run at CNR=35: Sep ~30/30.5 dB, THD+N ~-37 dB,
+SNR ~35/37.5 dB with pre-emphasis on) so they are robust across
+platforms and RNG noise draws while still catching structural
+regressions.  See the FLOORS comment below for the measurement
+history across tuning changes.
 
 The impaired scenarios exist because a pristine synthetic channel can
 hide whole bug classes: the FFT-Hilbert block-edge defect fixed in
@@ -48,11 +50,13 @@ SCENARIOS = {
 }
 
 # Measured values (2026-07, windowed-median metrics, neutral HF
-# ceilings): clean Sep 29.3/30.7, THD -32.8, SNR 32.7.  With the
-# earlier 0.85/0.50 HF damping ceilings the same scenarios measured
-# clean Sep 24.4/28.4, clock 25.8/26.2, tuning 32.6/33.2, multipath
-# 23.1/25.7; THD -31..-32.5; SNR 30.9-34.2.  THD is duration-stable
-# to ~0.5 dB (was swinging -18..-32 with the whole-signal metric).
+# ceilings, analog-exact pre-emphasis + analog-fitted de-emphasis):
+# clean Sep 30.2/30.5, THD -37.4, SNR 34.9/37.5.  History: with the
+# bilinear pre-emphasis + matched-Z de-emphasis mismatch these were
+# Sep 29.3/30.7, THD -32.8, SNR 32.7; with the earlier 0.85/0.50 HF
+# damping ceilings Sep 24.4/28.4, THD -31..-32.5, SNR 30.9-34.2.
+# THD is duration-stable to ~0.5 dB (was swinging -18..-32 with the
+# whole-signal single-FFT metric).
 FLOORS = {
     "clean": dict(sep=18.0, thd=-20.0, snr=24.0),
     "clock-200ppm": dict(sep=18.0, thd=-20.0, snr=24.0),
