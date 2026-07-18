@@ -52,6 +52,7 @@ from fm_radio.constants import (
     COMPOSITE_RATE,
     SDR_BLOCK_SIZE,
     SDR_SAMPLE_RATE,
+    SIDE_NR_ENABLE,
 )
 from fm_radio.demodulator import FMDemodulator
 
@@ -632,6 +633,110 @@ def _stereo_separation_ls_db(main: np.ndarray, leak: np.ndarray, max_lag: int) -
     return 20.0 * np.log10(1.0 / (abs(k) + EPS))
 
 
+# ----------------------------------------------------------------------
+# Frequency-response sweep
+# ----------------------------------------------------------------------
+
+def _sweep_tone_gain(
+    freq_hz: float,
+    mode: str,                       # "mono" (L=R) or "side" (L=-R)
+    duration_s: float,
+    fs_audio: int,
+    fs_composite: int,
+    fs_iq: int,
+    freq_dev_hz: float,
+    amp: float,
+    enable_preemphasis: bool,
+    preemphasis_tau_s: float,
+    diag_kwargs: dict,
+) -> float:
+    """Excite a single audio tone and return output/input amplitude ratio.
+
+    ``mode`` selects which stereo component carries the tone: ``mono``
+    puts it in L+R (L=R), ``side`` in L-R (L=-R).  The excited component
+    is recovered from the demodulated (L+R) or (L-R) and its amplitude at
+    ``freq_hz`` is measured by single-bin correlation.  IQ is generated
+    noiseless (cnr_db=None) so the ratio is the pure filter magnitude
+    response of that path.  A single tone at a time avoids the FM
+    intermodulation that corrupts a multitone probe.
+    """
+    n = int(duration_s * fs_audio)
+    t = np.arange(n, dtype=np.float64) / fs_audio
+    tone = (amp * np.sin(2.0 * np.pi * freq_hz * t)).astype(np.float32)
+    left = tone
+    right = tone if mode == "mono" else (-tone)
+    mpx = _build_mpx(
+        left, right, fs_audio, fs_composite, 0.10,
+        enable_preemphasis=enable_preemphasis,
+        preemphasis_tau_s=preemphasis_tau_s, dsb_phase_deg=0.0,
+    )
+    iq = _fm_modulate_iq(mpx, fs_composite, fs_iq, freq_dev_hz, None)
+    diag = _run_demod_diag_iq(iq, **diag_kwargs)
+    lo, ro = diag["left"], diag["right"]
+    settle = int(1.2 * fs_audio)
+    lo = lo[settle:]
+    ro = ro[settle:]
+    m = min(lo.size, ro.size)
+    if m <= 8:
+        return float("nan")
+    lo = lo[:m].astype(np.float64)
+    ro = ro[:m].astype(np.float64)
+    out = (lo + ro) if mode == "mono" else (lo - ro)
+    tt = np.arange(m, dtype=np.float64) / fs_audio
+    corr = np.mean(out * np.exp(-1j * 2.0 * np.pi * freq_hz * tt)) * 2.0
+    # Input amplitude of the excited component is 2*amp for both L+R and
+    # L-R (L=R gives L+R=2·tone; L=-R gives L-R=2·tone).
+    return float(np.abs(corr) / (2.0 * amp))
+
+
+def measure_frequency_response(
+    freqs_hz: np.ndarray,
+    modes: tuple[str, ...] = ("mono", "side"),
+    duration_s: float = 2.0,
+    amp: float = 0.25,
+    freq_dev_hz: float = 75_000.0,
+    enable_preemphasis: bool = True,
+    preemphasis_tau_s: float = 50e-6,
+    diag_kwargs: dict | None = None,
+) -> dict[str, np.ndarray]:
+    """Measure the mono/side audio magnitude response over ``freqs_hz``.
+
+    Returns a dict keyed by mode, each an array of linear gains aligned
+    with ``freqs_hz`` (snap the frequencies to FFT-bin centres upstream
+    for cleanest results).
+    """
+    fs_audio = AUDIO_OUTPUT_RATE
+    fs_composite = int(COMPOSITE_RATE)
+    fs_iq = int(SDR_SAMPLE_RATE)
+    diag_kwargs = dict(diag_kwargs or {})
+    out: dict[str, np.ndarray] = {}
+    for mode in modes:
+        gains = [
+            _sweep_tone_gain(
+                float(f), mode, duration_s, fs_audio, fs_composite, fs_iq,
+                freq_dev_hz, amp, enable_preemphasis, preemphasis_tau_s,
+                diag_kwargs,
+            )
+            for f in freqs_hz
+        ]
+        out[mode] = np.asarray(gains, dtype=np.float64)
+    return out
+
+
+def _default_sweep_freqs(fs_audio: int, duration_s: float) -> np.ndarray:
+    """Log-spaced probe frequencies snapped to FFT-bin centres."""
+    n = int(duration_s * fs_audio)
+    raw = [50, 100, 200, 300, 500, 800, 1000, 1500, 2000, 3000, 5000,
+           7000, 9000, 11000, 13000, 14000, 15000, 16000, 17000, 18000,
+           19000, 20000]
+    # Snap each to the nearest FFT bin of the post-settle segment so the
+    # single-bin correlation has no scalloping loss.
+    seg = n - int(1.2 * fs_audio)
+    snapped = sorted({round(f * seg / fs_audio) * fs_audio / seg for f in raw})
+    return np.asarray([f for f in snapped if 0 < f < fs_audio / 2],
+                      dtype=np.float64)
+
+
 def evaluate_quality(
     duration_s: float,
     tone_hz: float,
@@ -892,6 +997,21 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--sweep-candidates", type=str, default="0,90,180,270",
         help="Comma-separated DSB phase candidates in degrees for sweep mode",
+    )
+    p.add_argument(
+        "--sweep-response", action="store_true",
+        help="Measure the mono/side audio magnitude response (single-tone "
+             "sweep, noiseless) and print a dB table.  Honours --preemphasis "
+             "/ --no-preemphasis and the --side-nr* flags.",
+    )
+    p.add_argument(
+        "--sweep-freqs", type=str, default="",
+        help="Comma-separated probe frequencies in Hz for --sweep-response "
+             "(default: log-spaced 50 Hz–20 kHz)",
+    )
+    p.add_argument(
+        "--sweep-ref-hz", type=float, default=1000.0,
+        help="Reference frequency (Hz) that --sweep-response normalises to 0 dB",
     )
     p.add_argument(
         "--play", action="store_true",
@@ -1156,6 +1276,55 @@ def main() -> None:
                     ["cmd", "/c", "start", "", play_path],
                     check=False,
                 )
+        return
+
+    if args.sweep_response:
+        if args.sweep_freqs.strip():
+            freqs = np.asarray(
+                [float(x) for x in args.sweep_freqs.split(",") if x.strip()],
+                dtype=np.float64,
+            )
+        else:
+            freqs = _default_sweep_freqs(AUDIO_OUTPUT_RATE, float(args.duration))
+        diag_kwargs: dict = {}
+        if args.side_nr is not None:
+            diag_kwargs["side_nr_enable"] = bool(args.side_nr)
+        if not np.isnan(float(args.side_nr_alpha_floor)):
+            diag_kwargs["side_nr_alpha_floor"] = float(args.side_nr_alpha_floor)
+        if not np.isnan(float(args.side_nr_beta)):
+            diag_kwargs["side_nr_beta"] = float(args.side_nr_beta)
+        resp = measure_frequency_response(
+            freqs, duration_s=float(args.duration),
+            freq_dev_hz=float(args.freq_dev_hz),
+            enable_preemphasis=bool(args.preemphasis),
+            preemphasis_tau_s=float(args.preemphasis_tau_us) * 1e-6,
+            diag_kwargs=diag_kwargs,
+        )
+        ref_hz = float(args.sweep_ref_hz)
+        ref_idx = int(np.argmin(np.abs(freqs - ref_hz)))
+        print("FM Quality Self-Test (Frequency Response)")
+        print(
+            f"pre-emphasis={'on' if args.preemphasis else 'off'} "
+            f"side_nr={diag_kwargs.get('side_nr_enable', SIDE_NR_ENABLE)} "
+            f"ref={freqs[ref_idx]:.0f}Hz (0 dB)"
+        )
+        header = "freq_hz," + ",".join(f"{m}_db" for m in resp)
+        print(header)
+        rows_out: list[str] = [header]
+        for i, f in enumerate(freqs):
+            cells = []
+            for m in resp:
+                g = resp[m][i]
+                ref = resp[m][ref_idx]
+                db = 20.0 * np.log10((g + 1e-12) / (ref + 1e-12))
+                cells.append(f"{db:.2f}")
+            line = f"{f:.0f}," + ",".join(cells)
+            print(line)
+            rows_out.append(line)
+        if args.noise_csv:
+            with open(args.noise_csv, "w", encoding="utf-8") as f:
+                f.write("\n".join(rows_out) + "\n")
+            print(f"CSV: wrote frequency response to {args.noise_csv}")
         return
 
     if args.sweep_dsb_phase:

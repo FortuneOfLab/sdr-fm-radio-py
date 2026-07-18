@@ -279,6 +279,11 @@ gain）→ 3) 数値入力（局番号 / 周波数）の順。録音ファイル
     `--multipath-*`、プリエンファシス（既定 ON）
 - 実測 IQ 経路（`--iq-wav`）: パイロット SNR 分位点、mid/side の HF
   ノイズ床、ステレオ聴取ペナルティ、CSV 出力
+- 周波数応答経路（`--sweep-response`）: 単一トーンを対数間隔で掃引し
+  （無雑音）、mono（L+R）/ side（L−R）経路の振幅応答を dB テーブルで
+  出力。ディエンファシスのロールオフ、15 kHz LPF、19 kHz ノッチの効き、
+  side NR の定常成分減衰などを検証できる。`--preemphasis` /
+  `--no-preemphasis` と `--side-nr*` を尊重。
 
 ### 3.10 録音メタデータ（recording_meta.py）
 
@@ -505,6 +510,10 @@ python -m fm_radio.quality_selftest --duration 3 --cnr-db 35 --clock-ppm 200
 # 実測 IQ WAV の診断
 python -m fm_radio.quality_selftest --iq-wav recordings/<file>.wav \
     --duration 30 --warmup-s 2.5
+
+# 音声経路の周波数応答（mono / side、dB テーブル）
+python -m fm_radio.quality_selftest --sweep-response --duration 2
+python -m fm_radio.quality_selftest --sweep-response --no-side-nr  # side NR オフ比較
 ```
 
 ---
