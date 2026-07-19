@@ -478,11 +478,14 @@ class BaseFMDemodulator(FMDemodulatorInterface):
             # asymmetric about 38 kHz), presenting a stable pseudo-axis
             # at aniso ~0.5 that overlaps genuine content.  The pilot
             # noise-band estimate predicts the side-band noise via a
-            # chain constant: noise-only measures +16..17.5 dB
-            # (synthetic) / +2..7 dB (hardware) above noise_power,
-            # genuine stereo content +24.5 dB and up, so requiring
-            # STEREO_PHASE_SIDE_OVER_NOISE_DB (21 dB) blocks the
-            # pseudo-axis in both regimes while passing real content.
+            # chain constant.  Measured through THIS path (see the
+            # constant's comment for the full table): noise-only med
+            # 22.1 dB (synthetic silence, CNR 35) / 4-11 dB (hardware),
+            # genuine stereo content p5 = 24.6 dB, so requiring
+            # STEREO_PHASE_SIDE_OVER_NOISE_DB (24 dB) blocks the
+            # pseudo-axis in both regimes while passing real content;
+            # the thin margins are compensated by the weight ramp
+            # below (barely-passing blocks are nearly weightless).
             noise_ref = noise_power * (
                 10.0 ** (STEREO_PHASE_SIDE_OVER_NOISE_DB / 10.0)
             )
@@ -589,6 +592,14 @@ class BaseFMDemodulator(FMDemodulatorInterface):
                         (ema + np.pi) % (2.0 * np.pi) - np.pi
                     )
             else:
+                # The branch guard reads _phase_conf as RECENT
+                # confidence, so it must decay while the gates are
+                # closed - otherwise a long uninformative stretch
+                # after strong stereo would leak the ANGLE home yet
+                # keep crossing rights from stale confidence.  Same
+                # alpha as the informative update; sustained confident
+                # content re-earns crossing in ~0.2 s.
+                self._phase_conf *= 0.9
                 if not self._phase_acquired:
                     # Acquisition demands CONSECUTIVE informative
                     # blocks; a break restarts the streak and its

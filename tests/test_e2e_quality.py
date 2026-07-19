@@ -144,36 +144,42 @@ def test_phase_tracker_acquires_correct_branch_at_boundary():
 
 
 @pytest.mark.slow
-def test_phase_tracker_blocks_low_confidence_branch_crossing():
-    """Marginal-confidence wander must not cross +-90 deg (L/R flip).
+def test_phase_tracker_branch_guard_blocks_then_admits():
+    """The +-90 guard must PARK a low-confidence crossing, then admit.
 
-    Field failure (2026-07-20 antenna capture, near-mono nighttime
-    programme): gate-passing marginal blocks walked the tracker ~74 deg
-    and across the branch boundary, flipping L/R mid-session.  This
-    scenario reproduces the marginal regime synthetically (small side
-    fraction + noise -> aniso ~0.4, confidence ~0.3) with a DSB drift
-    that tries to pull the tracker through the boundary; the branch
-    guard must hold it inside.  The confident-drift test below proves
-    the guard still ALLOWS crossing under sustained good tracking.
+    Field failure (2026-07-20 antenna capture): marginal blocks walked
+    the tracker across the branch boundary, flipping L/R mid-session.
+    This test drives the guard itself: the tracker is pre-seeded just
+    inside the boundary (+89.9 deg) with ZERO recent confidence, and
+    fed confident stereo whose axis lies beyond it (~+110 deg).  While
+    the confidence EMA builds (first ~dozen blocks) the guard must park
+    the angle at the boundary; once confidence exceeds
+    STEREO_PHASE_BRANCH_CONF it must ADMIT the crossing and converge
+    past +100 deg - exercising both the block and the admit paths.
     """
     from fm_radio.demodulator import FMDemodulator
     from fm_radio.quality_selftest import _build_mpx, _fm_modulate_iq
     from fm_radio.constants import (
         AUDIO_OUTPUT_RATE, COMPOSITE_RATE, SDR_SAMPLE_RATE, SDR_BLOCK_SIZE,
-        STEREO_PHASE_BRANCH_CONF,
     )
     fs = AUDIO_OUTPUT_RATE
-    n = int(6.0 * fs)
+    n = int(4.0 * fs)
     t = np.arange(n) / fs
     tone = 0.25 * np.sin(2 * np.pi * 1000.0 * t)
-    left = (tone * 1.10).astype(np.float32)
-    right = (tone * 0.90).astype(np.float32)
+    left = tone.astype(np.float32)
+    right = (-tone).astype(np.float32)
+    # dsb phase -45 deg maps to a ~+50 deg corrector demand in this
+    # chain (see the leak test); -100 deg lands the axis near +110.
     mpx = _build_mpx(left, right, fs, int(COMPOSITE_RATE), 0.10, True,
-                     50e-6, 0.0, dsb_phase_drift_deg_per_s=-40.0)
+                     50e-6, -100.0)
     np.random.seed(0)
     iq = _fm_modulate_iq(mpx, int(COMPOSITE_RATE), int(SDR_SAMPLE_RATE),
-                         75_000.0, 15.0)
+                         75_000.0, 35.0)
     d = FMDemodulator(stereo=True)
+    d.subcarrier_phase_offset_rad = np.deg2rad(316.0)  # DSP value
+    d._phase_acquired = True
+    d.stereo_phase_err_ema = float(np.deg2rad(89.9))
+    d._phase_conf = 0.0
     emas = []
     for i in range(0, iq.size, SDR_BLOCK_SIZE):
         c = iq[i:i + SDR_BLOCK_SIZE]
@@ -182,8 +188,9 @@ def test_phase_tracker_blocks_low_confidence_branch_crossing():
         d.demodulate(d.process_iq_samples(c))
         emas.append(np.rad2deg(d.stereo_phase_err_ema))
     emas = np.array(emas)
-    assert d._phase_conf < STEREO_PHASE_BRANCH_CONF, d._phase_conf
-    assert np.max(np.abs(emas)) <= 90.5, np.max(np.abs(emas))
+    parked = np.sum((emas > 89.0) & (emas <= 90.05))
+    assert parked >= 5, f"guard never parked at the boundary ({parked})"
+    assert emas[-1] > 100.0, emas[-1]  # admitted after confidence built
 
 
 @pytest.mark.slow
