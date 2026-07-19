@@ -70,6 +70,9 @@ from fm_radio.constants import (
     STEREO_LR_SIDE_RATIO_CAP_ATTACK, STEREO_LR_SIDE_RATIO_CAP_RELEASE,
     STEREO_PHASE_ERR_SMOOTHING, STEREO_PHASE_ANISO_GATE,
     STEREO_PHASE_SIDE_GATE_DB, STEREO_PHASE_ACQUIRE_BLOCKS,
+    STEREO_PHASE_CONF_ANISO, STEREO_PHASE_BRANCH_CONF,
+    STEREO_PHASE_SIDE_OVER_NOISE_DB, STEREO_PHASE_NOISE_CONF_RAMP_DB,
+    STEREO_PHASE_LEAK_DEG_PER_SEC,
     STEREO_IQ_PHASE_CORRECTION_ENABLE,
     PILOT_NOISE_BAND1_LOW, PILOT_NOISE_BAND1_HIGH,
     PILOT_NOISE_BAND2_LOW, PILOT_NOISE_BAND2_HIGH,
@@ -229,6 +232,8 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         self._phase_acquired: bool = False
         self._phase_acq_acc: complex = 0j
         self._phase_acq_count: int = 0
+        self._phase_conf: float = 0.0
+        self.stereo_phase_side_over_noise_db: float = 0.0
         self.pilot_residual_center_hz: float = float(STEREO_PILOT_RESIDUAL_CENTER_HZ)
         # The per-variant offset constants are DSP-intrinsic (tuned on
         # synthetic IQ, which never passes through the tuner).  Real
@@ -465,10 +470,33 @@ class BaseFMDemodulator(FMDemodulatorInterface):
             # noise-dominated side fails the anisotropy gate instead).
             mono_pow = float(np.mean(mono ** 2))
             side_gate = mono_pow * (10.0 ** (STEREO_PHASE_SIDE_GATE_DB / 10.0))
+            # Side-over-noise gate: the discriminator's noise spectrum
+            # rises as f^2, so the demodulated side band carries MORE
+            # noise power than the mono band (during silence side/mono
+            # measured +5 dB - the mono-relative gate inverts) and that
+            # band noise is intrinsically ANISOTROPIC (the parabola is
+            # asymmetric about 38 kHz), presenting a stable pseudo-axis
+            # at aniso ~0.5 that overlaps genuine content.  The pilot
+            # noise-band estimate predicts the side-band noise via a
+            # chain constant.  Measured through THIS path (see the
+            # constant's comment for the full table): noise-only med
+            # 22.1 dB (synthetic silence, CNR 35) / 4-11 dB (hardware),
+            # genuine stereo content p5 = 24.6 dB, so requiring
+            # STEREO_PHASE_SIDE_OVER_NOISE_DB (24 dB) blocks the
+            # pseudo-axis in both regimes while passing real content;
+            # the thin margins are compensated by the weight ramp
+            # below (barely-passing blocks are nearly weightless).
+            noise_ref = noise_power * (
+                10.0 ** (STEREO_PHASE_SIDE_OVER_NOISE_DB / 10.0)
+            )
+            self.stereo_phase_side_over_noise_db = float(
+                10.0 * np.log10((denom + 1e-30) / (noise_power + 1e-30))
+            )
             informative = (
                 denom > 1e-18
                 and mono_pow > 1e-18
                 and denom >= side_gate
+                and denom > noise_ref
                 and aniso >= STEREO_PHASE_ANISO_GATE
             )
             if informative:
@@ -510,26 +538,97 @@ class BaseFMDemodulator(FMDemodulatorInterface):
                     # stay locked instead of swapping L/R (the old
                     # clamp saturated at 75 deg and truncated the
                     # reference station's ~-83 deg demand).
+                    #
+                    # Confidence weighting: on weak / near-mono
+                    # programme the gates pass MARGINAL blocks whose
+                    # axis is content- and leakage-driven, and a field
+                    # capture showed those walking the tracker ~74 deg
+                    # and across the branch boundary (a mid-session
+                    # L/R flip).  The innovation is scaled by
+                    # w = (aniso - gate) / (conf - gate) clipped to
+                    # [0, 1]: confident blocks (aniso >= 0.6, typical
+                    # of genuine stereo, measured 0.75-0.89) track at
+                    # full speed, marginal ones barely move the state.
+                    w = (aniso - STEREO_PHASE_ANISO_GATE) / max(
+                        STEREO_PHASE_CONF_ANISO - STEREO_PHASE_ANISO_GATE,
+                        1e-6,
+                    )
+                    # The noise pseudo-axis reaches aniso ~0.5, inside
+                    # the ramp above, so anisotropy alone still grants
+                    # it substantial weight.  Multiply by the margin
+                    # over the side-over-noise gate (0 at the gate, 1
+                    # at gate + ramp): blocks that BARELY pass the
+                    # noise gate are nearly weightless, so the rare
+                    # pseudo-axis leakage cannot outrun the
+                    # gate-closed leak toward 0.
+                    w_noise = (
+                        self.stereo_phase_side_over_noise_db
+                        - STEREO_PHASE_SIDE_OVER_NOISE_DB
+                    ) / max(STEREO_PHASE_NOISE_CONF_RAMP_DB, 1e-6)
+                    w = float(np.clip(w, 0.0, 1.0)) * float(
+                        np.clip(w_noise, 0.0, 1.0)
+                    )
+                    self._phase_conf = 0.9 * self._phase_conf + 0.1 * w
                     dd = beta_pa - self.stereo_phase_err_ema
                     dd = (dd + np.pi / 2.0) % np.pi - np.pi / 2.0
-                    ema = (
-                        self.stereo_phase_err_ema
-                        + STEREO_PHASE_ERR_SMOOTHING * dd
-                    )
+                    ema_old = self.stereo_phase_err_ema
+                    ema = ema_old + STEREO_PHASE_ERR_SMOOTHING * w * dd
+                    # Branch guard: crossing +-90 deg flips the
+                    # nearest-representative branch (an L/R polarity
+                    # flip).  With the hardware trim every legitimate
+                    # operating point sits near 0, so a crossing is
+                    # only accepted when the recent confidence EMA is
+                    # high (sustained genuine-stereo tracking, e.g. a
+                    # real channel drift); low-confidence wander is
+                    # halted at the boundary instead.
+                    lim = np.pi / 2.0
+                    if self._phase_conf < STEREO_PHASE_BRANCH_CONF:
+                        if ema_old < lim and ema >= lim:
+                            ema = lim - 1e-6
+                        elif ema_old > -lim and ema <= -lim:
+                            ema = -lim + 1e-6
                     # Wrap the tracked angle into (-180, 180].
                     self.stereo_phase_err_ema = float(
                         (ema + np.pi) % (2.0 * np.pi) - np.pi
                     )
-            elif not self._phase_acquired:
-                # Acquisition demands CONSECUTIVE informative blocks;
-                # a break restarts the streak and its accumulator.
-                self._phase_acq_acc = 0j
-                self._phase_acq_count = 0
+            else:
+                # The branch guard reads _phase_conf as RECENT
+                # confidence, so it must decay while the gates are
+                # closed - otherwise a long uninformative stretch
+                # after strong stereo would leak the ANGLE home yet
+                # keep crossing rights from stale confidence.  Same
+                # alpha as the informative update; sustained confident
+                # content re-earns crossing in ~0.2 s.
+                self._phase_conf *= 0.9
+                if not self._phase_acquired:
+                    # Acquisition demands CONSECUTIVE informative
+                    # blocks; a break restarts the streak and its
+                    # accumulator.
+                    self._phase_acq_acc = 0j
+                    self._phase_acq_count = 0
+                else:
+                    # Uninformed (gate closed) after acquisition: leak
+                    # the tracked angle toward 0 - the hardware-trim
+                    # prior - instead of holding a possibly wandered
+                    # value.  With no side information the prior is the
+                    # best estimate, and a genuine offset re-converges
+                    # within ~1 s of confident content returning.
+                    leak = np.deg2rad(STEREO_PHASE_LEAK_DEG_PER_SEC) * (
+                        composite.size / float(self.composite_rate)
+                    )
+                    e = self.stereo_phase_err_ema
+                    if abs(e) <= leak:
+                        self.stereo_phase_err_ema = 0.0
+                    else:
+                        self.stereo_phase_err_ema = float(
+                            e - np.sign(e) * leak
+                        )
             cph = np.cos(self.stereo_phase_err_ema)
             sph = np.sin(self.stereo_phase_err_ema)
         else:
             self.stereo_phase_err_ema = 0.0
             self.stereo_phase_aniso = 0.0
+            self.stereo_phase_side_over_noise_db = 0.0
             cph = 1.0
             sph = 0.0
         lr_base_full = lr_base_full_i * cph + lr_base_full_q * sph
@@ -598,7 +697,7 @@ class BaseFMDemodulator(FMDemodulatorInterface):
                 phase_jitter = float(np.std(phase_step - np.mean(phase_step))) if phase_step.size else 0.0
                 self.logger.info(
                     "StereoDiag snr=%.2fdB blend=%.3f pilotP=%.6g noiseP=%.6g "
-                    "phJit=%.6g lrBandRMS=%.6g lrBaseRMS=%.6g phaseIQ=%.3fdeg aniso=%.2f "
+                    "phJit=%.6g lrBandRMS=%.6g lrBaseRMS=%.6g phaseIQ=%.3fdeg aniso=%.2f sideNoise=%.1fdB conf=%.2f "
                     "iqCorr=%s "
                     "monoDelay=%d scOff=%.1fdeg sideCap=%.3f",
                     snr_db, self.blend_factor, pilot_power, noise_power,
@@ -607,6 +706,8 @@ class BaseFMDemodulator(FMDemodulatorInterface):
                     float(np.sqrt(np.mean(lr_baseband ** 2) + 1e-12)),
                     float(np.rad2deg(self.stereo_phase_err_ema)),
                     self.stereo_phase_aniso,
+                    self.stereo_phase_side_over_noise_db,
+                    self._phase_conf,
                     "on" if self.iq_phase_correction_enabled else "off",
                     self.mono_delay_samples,
                     float(np.rad2deg(self.subcarrier_phase_offset_rad)),
@@ -688,9 +789,11 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         self.pilot_jitter_ema = 0.0
         self.stereo_phase_err_ema = 0.0
         self.stereo_phase_aniso = 0.0
+        self.stereo_phase_side_over_noise_db = 0.0
         self._phase_acquired = False
         self._phase_acq_acc = 0j
         self._phase_acq_count = 0
+        self._phase_conf = 0.0
         self.lr_side_cap_gain = 1.0
         if self.mono_delay_samples > 0:
             self._mono_delay_state = np.zeros(self.mono_delay_samples, dtype=np.float32)

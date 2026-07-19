@@ -187,6 +187,49 @@ STEREO_PHASE_ACQUIRE_BLOCKS = 6     # Consecutive informative blocks (~100 ms) r
                                     # a permanent L/R swap - with the probability of one
                                     # raw estimate wrapping, ~20% on the reference
                                     # station).
+STEREO_PHASE_SIDE_OVER_NOISE_DB = 24.0  # Minimum demodulated side power above the
+                                    # pilot-band noise estimate (dB) for a tracker
+                                    # update.  FM discriminator noise rises as f^2, so
+                                    # the side band's own noise sits ABOVE the mono band
+                                    # (mono-relative gating inverts during silence) and
+                                    # is anisotropic (band asymmetry about 38 kHz plus
+                                    # deterministic FM products), forming a stable
+                                    # pseudo-axis at aniso ~0.5 that overlaps genuine
+                                    # content.  Measured through the real demod path:
+                                    # noise-only sits at med 22.1 (synthetic silence,
+                                    # CNR 35; p95 23.4), 16.5 (CNR 20), 4-11 dB
+                                    # (hardware); genuine stereo content p5 = 24.6
+                                    # (91.6 music).  24.0 blocks all noise regimes to
+                                    # the ~1% level - the residual trickle is mopped up
+                                    # by the confidence weighting and the gate-closed
+                                    # leak - while music tracks on its strong majority
+                                    # of blocks.
+STEREO_PHASE_NOISE_CONF_RAMP_DB = 6.0  # Confidence ramp above the side-over-noise
+                                    # gate: an update's weight scales linearly from 0
+                                    # at the gate to 1 at gate + this, multiplied with
+                                    # the anisotropy weight.  Noise pseudo-axis blocks
+                                    # that barely clear the gate are nearly weightless.
+STEREO_PHASE_CONF_ANISO = 0.6       # Anisotropy at which a tracker update gets FULL
+                                    # weight; between the gate (0.2) and this the
+                                    # innovation is scaled linearly.  Field capture
+                                    # (2026-07-20 antenna, near-mono nighttime
+                                    # programme) showed gate-passing marginal blocks
+                                    # (aniso 0.2-0.5) walking the tracker ~74 deg and
+                                    # across the branch boundary; genuine stereo blocks
+                                    # measure 0.75-0.89 and keep full-speed tracking.
+STEREO_PHASE_BRANCH_CONF = 0.7      # Minimum recent-confidence EMA required to let the
+                                    # tracked angle cross +-90 deg (a nearest-branch
+                                    # L/R polarity flip).  With the hardware trim all
+                                    # legitimate operating points sit near 0, so only
+                                    # sustained confident tracking (e.g. a real channel
+                                    # drift, as in the e2e drift test) may cross;
+                                    # low-confidence wander halts at the boundary.
+STEREO_PHASE_LEAK_DEG_PER_SEC = 0.5 # Decay rate of the tracked angle toward 0 (the
+                                    # hardware-trim prior) while the gates are CLOSED
+                                    # after acquisition.  With no side information the
+                                    # prior beats holding a possibly wandered value; a
+                                    # genuine static offset re-converges within ~1 s of
+                                    # confident content returning.
 STEREO_IQ_PHASE_CORRECTION_ENABLE = True   # Enable I/Q rotation correction in LR demod
 
 LR_BANDPASS_ORDER = 15              # L-R bandpass filter order (standard)
