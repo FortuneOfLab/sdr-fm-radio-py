@@ -617,6 +617,7 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         else:
             self.stereo_phase_err_ema = 0.0
             self.stereo_phase_aniso = 0.0
+            self.stereo_phase_side_over_noise_db = 0.0
             cph = 1.0
             sph = 0.0
         lr_base_full = lr_base_full_i * cph + lr_base_full_q * sph
@@ -777,6 +778,7 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         self.pilot_jitter_ema = 0.0
         self.stereo_phase_err_ema = 0.0
         self.stereo_phase_aniso = 0.0
+        self.stereo_phase_side_over_noise_db = 0.0
         self._phase_acquired = False
         self._phase_acq_acc = 0j
         self._phase_acq_count = 0
