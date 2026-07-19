@@ -110,6 +110,22 @@ STEREO_SUBCARRIER_PHASE_OFFSET_DEG = 316.0  # Fixed phase offset for 38k subcarr
                                     #          (285 + 30.7 = 315.7).  Synthetic sweep
                                     #          confirms a broad optimum at 315-320 with
                                     #          separation improving to ~26/33 dB.
+HARDWARE_SUBCARRIER_PHASE_TRIM_DEG = 84.0  # Front-end (tuner) phase trim added to every
+                                    # variant's DSP-intrinsic subcarrier offset for real
+                                    # hardware.  Discovery: ALL real captures - antenna
+                                    # 91.6 (-83 deg), antenna 80.0 (-80), and an optical-
+                                    # fibre feed 80.0 with no multipath (+92 = axis -88) -
+                                    # showed the same ~+-85-90 deg corrector demand that
+                                    # synthetic IQ (no tuner) does not, identifying it as
+                                    # the R820T IF filter's 19k/38k phase characteristic,
+                                    # not multipath.  Sitting at the +-90 deg boundary
+                                    # also made the acquisition branch flip between
+                                    # sessions (the optical capture decoded L/R-swapped
+                                    # vs the antenna ones).  With this trim (316+84 =
+                                    # 40 deg effective) the tracker settles at 0 +- 4.3
+                                    # deg on all three captures, on the same branch as
+                                    # every historical antenna session (decode total
+                                    # ~39 deg, matching the listening-approved state).
 STEREO_SUBCARRIER_PHASE_OFFSET_DEG_PLL = 285.0  # Operating point when the legacy PLL main
                                     # demod is selected (MAIN_DEMOD_USE_PLL = True): the
                                     # PLL chain includes the -30.7 deg 19k/38k phase
