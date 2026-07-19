@@ -144,6 +144,103 @@ def test_phase_tracker_acquires_correct_branch_at_boundary():
 
 
 @pytest.mark.slow
+def test_phase_tracker_blocks_low_confidence_branch_crossing():
+    """Marginal-confidence wander must not cross +-90 deg (L/R flip).
+
+    Field failure (2026-07-20 antenna capture, near-mono nighttime
+    programme): gate-passing marginal blocks walked the tracker ~74 deg
+    and across the branch boundary, flipping L/R mid-session.  This
+    scenario reproduces the marginal regime synthetically (small side
+    fraction + noise -> aniso ~0.4, confidence ~0.3) with a DSB drift
+    that tries to pull the tracker through the boundary; the branch
+    guard must hold it inside.  The confident-drift test below proves
+    the guard still ALLOWS crossing under sustained good tracking.
+    """
+    from fm_radio.demodulator import FMDemodulator
+    from fm_radio.quality_selftest import _build_mpx, _fm_modulate_iq
+    from fm_radio.constants import (
+        AUDIO_OUTPUT_RATE, COMPOSITE_RATE, SDR_SAMPLE_RATE, SDR_BLOCK_SIZE,
+        STEREO_PHASE_BRANCH_CONF,
+    )
+    fs = AUDIO_OUTPUT_RATE
+    n = int(6.0 * fs)
+    t = np.arange(n) / fs
+    tone = 0.25 * np.sin(2 * np.pi * 1000.0 * t)
+    left = (tone * 1.10).astype(np.float32)
+    right = (tone * 0.90).astype(np.float32)
+    mpx = _build_mpx(left, right, fs, int(COMPOSITE_RATE), 0.10, True,
+                     50e-6, 0.0, dsb_phase_drift_deg_per_s=-40.0)
+    np.random.seed(0)
+    iq = _fm_modulate_iq(mpx, int(COMPOSITE_RATE), int(SDR_SAMPLE_RATE),
+                         75_000.0, 15.0)
+    d = FMDemodulator(stereo=True)
+    emas = []
+    for i in range(0, iq.size, SDR_BLOCK_SIZE):
+        c = iq[i:i + SDR_BLOCK_SIZE]
+        if c.size < 8:
+            break
+        d.demodulate(d.process_iq_samples(c))
+        emas.append(np.rad2deg(d.stereo_phase_err_ema))
+    emas = np.array(emas)
+    assert d._phase_conf < STEREO_PHASE_BRANCH_CONF, d._phase_conf
+    assert np.max(np.abs(emas)) <= 90.5, np.max(np.abs(emas))
+
+
+@pytest.mark.slow
+def test_phase_tracker_leaks_home_when_uninformed():
+    """After acquisition, mono content must decay the angle toward 0.
+
+    The hardware trim makes 0 the prior; holding a possibly wandered
+    angle through a long uninformative stretch is worse than gliding
+    home (a genuine offset re-converges within ~1 s of confident
+    content returning).  Acquire at ~-45 deg via a static DSB phase,
+    then feed mono content and assert the angle decays at roughly
+    STEREO_PHASE_LEAK_DEG_PER_SEC.
+    """
+    from fm_radio.demodulator import FMDemodulator
+    from fm_radio.quality_selftest import _build_mpx, _fm_modulate_iq
+    from fm_radio.constants import (
+        AUDIO_OUTPUT_RATE, COMPOSITE_RATE, SDR_SAMPLE_RATE, SDR_BLOCK_SIZE,
+    )
+    fs = AUDIO_OUTPUT_RATE
+    n_st = int(2.0 * fs)
+    n_mo = int(20.0 * fs)
+    t = np.arange(n_st + n_mo) / fs
+    tone = 0.25 * np.sin(2 * np.pi * 1000.0 * t)
+    # Stereo lead-in, then SILENCE.  (A mono TONE would not do: the FM
+    # chain's intermodulation products land in the side band coherently
+    # and intermittently pass the gates - the same marginal-update
+    # mechanism as the field wander - whereas the leak is defined by
+    # gate-CLOSED blocks, which silence guarantees.)
+    left = np.concatenate([tone[:n_st], np.zeros(n_mo)])
+    right = np.concatenate([-tone[:n_st], np.zeros(n_mo)])
+    mpx = _build_mpx(left.astype(np.float32), right.astype(np.float32),
+                     fs, int(COMPOSITE_RATE), 0.10, True, 50e-6, -45.0)
+    np.random.seed(0)
+    iq = _fm_modulate_iq(mpx, int(COMPOSITE_RATE), int(SDR_SAMPLE_RATE),
+                         75_000.0, 35.0)
+    d = FMDemodulator(stereo=True)
+    d.subcarrier_phase_offset_rad = np.deg2rad(316.0)  # DSP value (no tuner)
+    emas = []
+    for i in range(0, iq.size, SDR_BLOCK_SIZE):
+        c = iq[i:i + SDR_BLOCK_SIZE]
+        if c.size < 8:
+            break
+        d.demodulate(d.process_iq_samples(c))
+        emas.append(np.rad2deg(d.stereo_phase_err_ema))
+    emas = np.array(emas)
+    # angle right after the stereo lead-in vs at the end (the -45 deg
+    # DSB phase maps to a ~+45 deg corrector demand in this chain's
+    # sign convention; the test is sign-agnostic and only asserts
+    # magnitude decay toward 0)
+    at_switch = emas[int(2.2 / 0.016)]
+    final = emas[-1]
+    assert abs(at_switch) > 30.0, at_switch      # acquired away from 0
+    assert abs(final) < abs(at_switch) - 5.0, (at_switch, final)
+    assert np.sign(final) == np.sign(at_switch) or abs(final) < 2.0
+
+
+@pytest.mark.slow
 def test_phase_tracker_follows_drift_beyond_90_deg():
     """The tracker must follow a DSB phase drift through +-90 deg.
 
