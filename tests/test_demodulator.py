@@ -84,19 +84,24 @@ def test_composite_is_block_size_invariant():
 
 
 def test_discriminator_is_default_and_pll_selectable(monkeypatch):
+    # Constructed demodulators carry the hardware phase trim on top of
+    # each variant's DSP-intrinsic offset (synthetic paths override the
+    # attribute with the untrimmed DSP value).
+    trim = dm.HARDWARE_SUBCARRIER_PHASE_TRIM_DEG
     d = FMDemodulator(stereo=True)
     assert d.use_pll_demod is False
-    assert abs(np.rad2deg(d.subcarrier_phase_offset_rad) - 316.0) < 0.01
+    assert abs(np.rad2deg(d.subcarrier_phase_offset_rad) - (316.0 + trim)) < 0.01
 
     monkeypatch.setattr(dm, "MAIN_DEMOD_USE_PLL", True)
     d_pll = FMDemodulator(stereo=True)
     assert d_pll.use_pll_demod is True
-    assert abs(np.rad2deg(d_pll.subcarrier_phase_offset_rad) - 285.0) < 0.01
+    assert abs(np.rad2deg(d_pll.subcarrier_phase_offset_rad) - (285.0 + trim)) < 0.01
 
 
 def test_light_demodulator_keeps_its_operating_point():
     d = FMDemodulatorLight(stereo=True)
-    assert abs(np.rad2deg(d.subcarrier_phase_offset_rad) - 297.4) < 0.01
+    trim = dm.HARDWARE_SUBCARRIER_PHASE_TRIM_DEG
+    assert abs(np.rad2deg(d.subcarrier_phase_offset_rad) - (297.4 + trim)) < 0.01
 
 
 def test_pll_mode_produces_finite_composite(rng, monkeypatch):

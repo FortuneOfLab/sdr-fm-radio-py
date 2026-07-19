@@ -61,6 +61,7 @@ from fm_radio.constants import (
     PILOT_BANDPASS_LOW, PILOT_BANDPASS_HIGH,
     STEREO_PILOT_RESIDUAL_CENTER_HZ,
     STEREO_SUBCARRIER_PHASE_OFFSET_DEG,
+    HARDWARE_SUBCARRIER_PHASE_TRIM_DEG,
     STEREO_SUBCARRIER_PHASE_OFFSET_DEG_PLL,
     STEREO_SUBCARRIER_PHASE_OFFSET_DEG_LIGHT,
     STEREO_MONO_DELAY_SAMPLES,
@@ -229,7 +230,15 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         self._phase_acq_acc: complex = 0j
         self._phase_acq_count: int = 0
         self.pilot_residual_center_hz: float = float(STEREO_PILOT_RESIDUAL_CENTER_HZ)
-        self.subcarrier_phase_offset_rad: float = np.deg2rad(subcarrier_phase_offset_deg)
+        # The per-variant offset constants are DSP-intrinsic (tuned on
+        # synthetic IQ, which never passes through the tuner).  Real
+        # hardware adds the front-end's 19k/38k phase characteristic on
+        # top, so the hardware trim is applied here for every variant.
+        # Synthetic paths in quality_selftest override
+        # subcarrier_phase_offset_rad directly with the DSP value.
+        self.subcarrier_phase_offset_rad: float = np.deg2rad(
+            subcarrier_phase_offset_deg + HARDWARE_SUBCARRIER_PHASE_TRIM_DEG
+        )
         self.mono_delay_samples: int = max(0, int(STEREO_MONO_DELAY_SAMPLES))
         self._mono_delay_state: np.ndarray = np.zeros(self.mono_delay_samples, dtype=np.float32)
         self._pilot_phase_last: float | None = None

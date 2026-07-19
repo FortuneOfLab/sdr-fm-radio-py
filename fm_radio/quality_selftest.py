@@ -53,6 +53,7 @@ from fm_radio.constants import (
     SDR_BLOCK_SIZE,
     SDR_SAMPLE_RATE,
     SIDE_NR_ENABLE,
+    STEREO_SUBCARRIER_PHASE_OFFSET_DEG,
 )
 from fm_radio.demodulator import FMDemodulator
 
@@ -307,8 +308,12 @@ def _run_demod_from_iq(
     if mono_delay_samples is not None and int(mono_delay_samples) >= 0:
         demod.mono_delay_samples = int(mono_delay_samples)
         demod._mono_delay_state = np.zeros(demod.mono_delay_samples, dtype=np.float32)
-    if subcarrier_phase_offset_deg is not None:
-        demod.subcarrier_phase_offset_rad = np.deg2rad(float(subcarrier_phase_offset_deg))
+    # Synthetic IQ never passes through the tuner, so the hardware
+    # phase trim baked into the demod default must not apply here: use
+    # the DSP-intrinsic offset unless the caller overrides.
+    if subcarrier_phase_offset_deg is None:
+        subcarrier_phase_offset_deg = STEREO_SUBCARRIER_PHASE_OFFSET_DEG
+    demod.subcarrier_phase_offset_rad = np.deg2rad(float(subcarrier_phase_offset_deg))
     if demod_diag:
         demod.diag_enable = True
     if demod_diag_interval is not None and demod_diag_interval > 0:
@@ -480,8 +485,12 @@ def _run_demod_from_composite(
     if mono_delay_samples is not None and int(mono_delay_samples) >= 0:
         demod.mono_delay_samples = int(mono_delay_samples)
         demod._mono_delay_state = np.zeros(demod.mono_delay_samples, dtype=np.float32)
-    if subcarrier_phase_offset_deg is not None:
-        demod.subcarrier_phase_offset_rad = np.deg2rad(float(subcarrier_phase_offset_deg))
+    # Synthetic IQ never passes through the tuner, so the hardware
+    # phase trim baked into the demod default must not apply here: use
+    # the DSP-intrinsic offset unless the caller overrides.
+    if subcarrier_phase_offset_deg is None:
+        subcarrier_phase_offset_deg = STEREO_SUBCARRIER_PHASE_OFFSET_DEG
+    demod.subcarrier_phase_offset_rad = np.deg2rad(float(subcarrier_phase_offset_deg))
     if demod_diag:
         demod.diag_enable = True
     if demod_diag_interval is not None and demod_diag_interval > 0:
@@ -698,6 +707,11 @@ def _sweep_tone_gain(
         preemphasis_tau_s=preemphasis_tau_s, dsb_phase_deg=0.0,
     )
     iq = _fm_modulate_iq(mpx, fs_composite, fs_iq, freq_dev_hz, None)
+    # The sweep synthesises its IQ (no tuner), so pin the DSP-intrinsic
+    # subcarrier offset unless the caller overrides it.
+    diag_kwargs.setdefault(
+        "subcarrier_phase_offset_deg", STEREO_SUBCARRIER_PHASE_OFFSET_DEG,
+    )
     diag = _run_demod_diag_iq(iq, **diag_kwargs)
     lo, ro = diag["left"], diag["right"]
     settle = int(_SWEEP_SETTLE_S * fs_audio)

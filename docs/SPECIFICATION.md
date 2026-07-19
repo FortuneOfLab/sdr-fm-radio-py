@@ -184,8 +184,11 @@ float32 量子化により長時間セッションで劣化するため置換さ
    グリッチが原理的に発生しない）。
 3. パイロット SNR 推定（残差電力 `2·mean(|z|²)` と 2 本のノイズ帯の比）
    と適応ブレンド係数の更新
-4. サブキャリア生成 `cos/sin(2θ + φ_offset)`（φ_offset は復調方式ごと:
-   discriminator 316°、PLL 285°、Light 297.4°）
+4. サブキャリア生成 `cos/sin(2θ + φ_offset)`（φ_offset は復調方式ごとの
+   DSP 固有値 discriminator 316°/PLL 285°/Light 297.4° に、実機では
+   前段トリム `HARDWARE_SUBCARRIER_PHASE_TRIM_DEG`(+84°)を加算。
+   これにより位相トラッカーの実機需要が ±90° 境界から 0° 付近へ移り、
+   セッション間の取得枝（L/R 極性）が安定する）
 5. L−R 帯の同期復調（DSB-SC、ゲイン 2.0）と 3 バンド LPF（I/Q 並列）
 6. I/Q 位相補正 — **ゲート付き4象限トラッカー**: 主軸推定
    `½·atan2(2·Cov, Var_I−Var_Q)` は ±90° 周期の曖昧性を持つため、
@@ -433,7 +436,8 @@ IQ (250 kHz)
 | `STEREO_HF_BLEND_PILOT_SNR_DB_LO` / `_HI` | 15.0 / 35.0 | HF ブレンド上限の SNR ランプ |
 | `LR_HIGH_MAX_GAIN` / `LR_SUPER_HIGH_MAX_GAIN` | 1.00 / 1.00 | HF 減衰上限（既定は中立） |
 | `STEREO_PHASE_ANISO_GATE` | 0.2 | 位相トラッカー更新に要する共分散異方性（音楽 p5=0.55 / ノイズ p99=0.05 の間） |
-| `STEREO_SUBCARRIER_PHASE_OFFSET_DEG` | 316.0 | サブキャリア位相オフセット（discriminator） |
+| `STEREO_SUBCARRIER_PHASE_OFFSET_DEG` | 316.0 | サブキャリア位相オフセット（discriminator、DSP固有値） |
+| `HARDWARE_SUBCARRIER_PHASE_TRIM_DEG` | 84.0 | 実機前段（チューナ IF）の位相トリム。全変種の DSP 値に加算（合成経路は非適用）。実測: アンテナ2局+光伝送の全実録音が同一の ~±85-90° 需要を示し、マルチパスではなく前段特性と同定 |
 | `STEREO_SUBCARRIER_PHASE_OFFSET_DEG_PLL` | 285.0 | 同（PLL 選択時） |
 | `STEREO_SUBCARRIER_PHASE_OFFSET_DEG_LIGHT` | 297.4 | 同（軽量モード） |
 | `STEREO_MONO_DELAY_SAMPLES` | 18 | モノ遅延補償 |
