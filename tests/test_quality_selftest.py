@@ -184,3 +184,34 @@ def test_main_rejects_duration_not_exceeding_warmup(monkeypatch):
     ])
     with pytest.raises(SystemExit):
         qs.main()
+
+
+def test_synthetic_runner_uses_variant_dsp_offset(monkeypatch):
+    """Synthetic runners must pick the variant's DSP offset, untrimmed.
+
+    Codex repro from the PR #24 review: with MAIN_DEMOD_USE_PLL=True
+    the synthetic default was overwritten with the discriminator's
+    316 deg instead of the PLL chain's 285 deg, breaking the PLL A/B
+    semantics.  The default must be variant-aware and must never
+    include the hardware phase trim (synthetic IQ has no tuner).
+    """
+    import fm_radio.demodulator as dmod
+    import fm_radio.quality_selftest as qs
+
+    captured = {}
+
+    class Spy(qs.FMDemodulator):
+        def demodulate(self, composite):
+            captured["deg"] = float(
+                np.rad2deg(self.subcarrier_phase_offset_rad)
+            )
+            return super().demodulate(composite)
+
+    monkeypatch.setattr(qs, "FMDemodulator", Spy)
+    iq = np.exp(1j * 0.001 * np.arange(40_000)).astype(np.complex64)
+
+    for use_pll, expect in ((False, 316.0), (True, 285.0)):
+        monkeypatch.setattr(dmod, "MAIN_DEMOD_USE_PLL", use_pll)
+        captured.clear()
+        qs._run_demod_from_iq(iq)
+        assert abs(captured["deg"] - expect) < 0.01, (use_pll, captured)

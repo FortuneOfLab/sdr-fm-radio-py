@@ -54,8 +54,23 @@ from fm_radio.constants import (
     SDR_SAMPLE_RATE,
     SIDE_NR_ENABLE,
     STEREO_SUBCARRIER_PHASE_OFFSET_DEG,
+    STEREO_SUBCARRIER_PHASE_OFFSET_DEG_PLL,
 )
+import fm_radio.demodulator as _demod_mod
 from fm_radio.demodulator import FMDemodulator
+
+
+def _dsp_subcarrier_offset_deg(use_pll: bool) -> float:
+    """DSP-intrinsic (untrimmed) subcarrier offset for the main-demod variant.
+
+    Synthetic IQ never passes through the tuner, so the hardware phase
+    trim baked into the constructed demodulator's default must be
+    replaced by the variant's own DSP value (the PLL chain has a
+    different 19k/38k phase characteristic than the discriminator).
+    """
+    if use_pll:
+        return STEREO_SUBCARRIER_PHASE_OFFSET_DEG_PLL
+    return STEREO_SUBCARRIER_PHASE_OFFSET_DEG
 
 
 EPS = 1e-12
@@ -308,11 +323,14 @@ def _run_demod_from_iq(
     if mono_delay_samples is not None and int(mono_delay_samples) >= 0:
         demod.mono_delay_samples = int(mono_delay_samples)
         demod._mono_delay_state = np.zeros(demod.mono_delay_samples, dtype=np.float32)
-    # Synthetic IQ never passes through the tuner, so the hardware
-    # phase trim baked into the demod default must not apply here: use
-    # the DSP-intrinsic offset unless the caller overrides.
+    # Synthetic source: replace the hardware-trimmed default with the
+    # variant's DSP-intrinsic offset unless the caller overrides (see
+    # _dsp_subcarrier_offset_deg; also applies to the composite-direct
+    # runner so pre-trim semantics are preserved for both variants).
     if subcarrier_phase_offset_deg is None:
-        subcarrier_phase_offset_deg = STEREO_SUBCARRIER_PHASE_OFFSET_DEG
+        subcarrier_phase_offset_deg = _dsp_subcarrier_offset_deg(
+            getattr(demod, "use_pll_demod", False)
+        )
     demod.subcarrier_phase_offset_rad = np.deg2rad(float(subcarrier_phase_offset_deg))
     if demod_diag:
         demod.diag_enable = True
@@ -485,11 +503,14 @@ def _run_demod_from_composite(
     if mono_delay_samples is not None and int(mono_delay_samples) >= 0:
         demod.mono_delay_samples = int(mono_delay_samples)
         demod._mono_delay_state = np.zeros(demod.mono_delay_samples, dtype=np.float32)
-    # Synthetic IQ never passes through the tuner, so the hardware
-    # phase trim baked into the demod default must not apply here: use
-    # the DSP-intrinsic offset unless the caller overrides.
+    # Synthetic source: replace the hardware-trimmed default with the
+    # variant's DSP-intrinsic offset unless the caller overrides (see
+    # _dsp_subcarrier_offset_deg; also applies to the composite-direct
+    # runner so pre-trim semantics are preserved for both variants).
     if subcarrier_phase_offset_deg is None:
-        subcarrier_phase_offset_deg = STEREO_SUBCARRIER_PHASE_OFFSET_DEG
+        subcarrier_phase_offset_deg = _dsp_subcarrier_offset_deg(
+            getattr(demod, "use_pll_demod", False)
+        )
     demod.subcarrier_phase_offset_rad = np.deg2rad(float(subcarrier_phase_offset_deg))
     if demod_diag:
         demod.diag_enable = True
@@ -708,9 +729,11 @@ def _sweep_tone_gain(
     )
     iq = _fm_modulate_iq(mpx, fs_composite, fs_iq, freq_dev_hz, None)
     # The sweep synthesises its IQ (no tuner), so pin the DSP-intrinsic
-    # subcarrier offset unless the caller overrides it.
+    # subcarrier offset unless the caller overrides it.  Variant-aware:
+    # matches the main-demod flavour the diag runner will construct.
     diag_kwargs.setdefault(
-        "subcarrier_phase_offset_deg", STEREO_SUBCARRIER_PHASE_OFFSET_DEG,
+        "subcarrier_phase_offset_deg",
+        _dsp_subcarrier_offset_deg(bool(_demod_mod.MAIN_DEMOD_USE_PLL)),
     )
     diag = _run_demod_diag_iq(iq, **diag_kwargs)
     lo, ro = diag["left"], diag["right"]
