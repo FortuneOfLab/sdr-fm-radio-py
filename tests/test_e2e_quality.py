@@ -2,8 +2,8 @@
 
 Runs the full MPX -> FM IQ -> demodulator chain and asserts conservative
 floors for the objective metrics.  The floors sit well below the
-measured values (clean run at CNR=35: Sep ~30/30.5 dB, THD+N ~-37 dB,
-SNR ~35/37.5 dB with pre-emphasis on) so they are robust across
+measured values (clean run at CNR=35: Sep ~43/57 dB, THD+N ~-37 dB,
+SNR ~35 dB with pre-emphasis on) so they are robust across
 platforms and RNG noise draws while still catching structural
 regressions.  See the FLOORS comment below for the measurement
 history across tuning changes.
@@ -50,8 +50,12 @@ SCENARIOS = {
 }
 
 # Measured values (2026-07, windowed-median metrics, neutral HF
-# ceilings, analog-exact pre-emphasis + analog-fitted de-emphasis):
-# clean Sep 30.2/30.5, THD -37.4, SNR 34.9/37.5.  History: with the
+# ceilings AND neutral blend-stability term, analog-exact pre-emphasis
+# + analog-fitted de-emphasis): clean Sep ~43/57, THD -36.9, SNR 34.9.
+# History: before the blend-stability neutralisation the same chain
+# measured clean Sep 30.2/30.5 - the blend itself (0.95-0.997 on
+# synthetic) capped separation at 20*log10((1+b)/(1-b)).  Earlier
+# still: with the
 # bilinear pre-emphasis + matched-Z de-emphasis mismatch these were
 # Sep 29.3/30.7, THD -32.8, SNR 32.7; with the earlier 0.85/0.50 HF
 # damping ceilings Sep 24.4/28.4, THD -31..-32.5, SNR 30.9-34.2.
@@ -63,6 +67,46 @@ FLOORS = {
     "tuning-30kHz": dict(sep=18.0, thd=-20.0, snr=24.0),
     "multipath": dict(sep=16.0, thd=-20.0, snr=24.0),
 }
+
+
+@pytest.mark.slow
+def test_blend_snr_ramp_protects_weak_signal():
+    """The pilot-SNR ramp must still open/close the blend correctly.
+
+    With the jitter stability term neutral (PR #27) the SNR ramp is
+    the ONLY weak-signal protection, so its behaviour is pinned:
+    blend ~1 on a good signal, small under sustained weak signal, and
+    closing within a bounded time after a good->weak SNR step.
+    Statistics: per-block blend over 16384-sample IQ blocks, first
+    0.5 s of each segment excluded as settling.
+    """
+    from fm_radio.demodulator import FMDemodulator
+    from fm_radio.quality_selftest import _synthesize_iq_tone, _apply_channel
+    from fm_radio.constants import SDR_SAMPLE_RATE, SDR_BLOCK_SIZE
+    fs = int(SDR_SAMPLE_RATE)
+    np.random.seed(0)
+    clean = _synthesize_iq_tone(8.0, fs, 1000.0, 0.6, 0.6, 0.10, 75_000.0)
+    half = int(4.0 * fs)
+    good = _apply_channel(clean[:half], fs, 35.0)
+    weak = _apply_channel(clean[half:], fs, 0.0)
+    iq = np.concatenate([good, weak])
+    d = FMDemodulator(stereo=True)
+    blends = []
+    for i in range(0, iq.size, SDR_BLOCK_SIZE):
+        c = iq[i:i + SDR_BLOCK_SIZE]
+        if c.size < 8:
+            break
+        d.demodulate(d.process_iq_samples(c))
+        blends.append(d.blend_factor)
+    blends = np.array(blends)
+    blk_s = SDR_BLOCK_SIZE / fs
+    good_tail = blends[int(3.0 / blk_s):int(4.0 / blk_s)]
+    weak_tail = blends[int(7.0 / blk_s):]
+    assert np.median(good_tail) > 0.95, np.median(good_tail)   # opens
+    assert np.median(weak_tail) < 0.2, np.median(weak_tail)    # closes
+    # closing speed: within 1.5 s of the step, blend below 0.5
+    after = blends[int(5.5 / blk_s):int(6.0 / blk_s)]
+    assert np.max(after) < 0.5, np.max(after)
 
 
 @pytest.mark.slow

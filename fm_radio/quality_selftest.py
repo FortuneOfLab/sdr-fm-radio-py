@@ -274,8 +274,11 @@ def _synthesize_iq_tone(
 
     The legacy path (audio 48 kHz -> _build_mpx at 192 kHz ->
     _fm_modulate_iq resampling to the IQ rate) passes through TWO
-    resample_poly stages in float32, whose filter images set the
-    measurement floor of every synthetic metric.  This synthesizer
+    resample_poly stages in float32.  (The historic ~30 dB separation
+    floor turned out to be the blend stability term, not these
+    images; this synthesizer removes TX-side resampling artefacts so
+    the post-neutralisation high-dynamic-range measurements can
+    attribute what remains to the receiver.)  This synthesizer
     builds every MPX component ANALYTICALLY at the IQ rate in float64
     - no resampling anywhere - applies the exact analog pre-emphasis
     to the tone in closed form (gain sqrt(1+(wt)^2), phase atan(wt)),
