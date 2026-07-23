@@ -1090,8 +1090,11 @@ def _parser() -> argparse.ArgumentParser:
         "--iq-wav", type=str, default="",
         help="Measured IQ WAV (I=ch0,Q=ch1). Runs diagnostics-only path.",
     )
-    p.add_argument("--cnr-db", type=float, default=40.0,
-                   help="Carrier-to-noise ratio in dB (set <0 to disable noise)")
+    p.add_argument("--cnr-db", type=float, default=None,
+                   help="Carrier-to-noise ratio in dB (set <0 to disable "
+                        "noise).  Default: 40 dB for the normal evaluation; "
+                        "NOISELESS for --sep-sweep (the canonical filter/"
+                        "separation characterisation)")
     p.add_argument("--pilot-amp", type=float, default=0.10, help="Pilot amplitude in MPX")
     p.add_argument("--freq-dev-hz", type=float, default=75_000.0, help="FM frequency deviation")
     p.add_argument(
@@ -1186,7 +1189,9 @@ def _parser() -> argparse.ArgumentParser:
         "--sep-sweep", action="store_true",
         help="Measure separation/THD vs tone frequency using the "
              "high-fidelity analytic reference modulator (no resampling "
-             "in the TX path).  Honours --duration / --cnr-db.",
+             "in the TX path).  Honours --duration, --clock-ppm and "
+             "--cnr-db (default when omitted: NOISELESS - the canonical "
+             "characterisation; pass an explicit value to add noise).",
     )
     p.add_argument(
         "--sep-freqs", type=str,
@@ -1284,7 +1289,14 @@ def _parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = _parser().parse_args()
-    cnr_db = None if args.cnr_db < 0 else float(args.cnr_db)
+    # --cnr-db uses a sentinel default so each mode can pick its own
+    # canonical value: 40 dB for the normal evaluation, noiseless for
+    # --sep-sweep.  An explicit value (including <0 = noiseless) always
+    # wins.
+    if args.cnr_db is None:
+        cnr_db = 40.0
+    else:
+        cnr_db = None if float(args.cnr_db) < 0 else float(args.cnr_db)
     fixed_blend = None if args.fixed_blend < 0.0 else float(args.fixed_blend)
 
     # Reject configurations that would produce zero post-warmup samples.
@@ -1316,6 +1328,7 @@ def main() -> None:
         demod_diag=bool(args.demod_diag),
         demod_diag_interval=(None if int(args.demod_diag_interval) <= 0 else int(args.demod_diag_interval)),
         clock_ppm=float(args.clock_ppm),
+        hifi_tx=bool(args.hifi_tx),
         carrier_offset_hz=float(args.carrier_offset_hz),
         multipath_delay_us=float(args.multipath_delay_us),
         multipath_gain=float(args.multipath_gain),
@@ -1485,18 +1498,29 @@ def main() -> None:
 
     if args.sep_sweep:
         freqs = [float(x) for x in args.sep_freqs.split(",") if x.strip()]
+        # Canonical filter/separation characterisation is NOISELESS
+        # (constant-modulation tones are level-reduced at HF, so any
+        # channel noise dominates the measurement there); an explicit
+        # --cnr-db still wins.
+        if args.cnr_db is None:
+            sweep_cnr = None
+        else:
+            sweep_cnr = None if float(args.cnr_db) < 0 else float(args.cnr_db)
         print("FM Quality Self-Test (Separation vs Frequency, hifi TX)")
-        print(f"duration={float(args.duration)}s cnr={args.cnr_db}")
+        print(f"duration={float(args.duration)}s "
+              f"cnr={'noiseless' if sweep_cnr is None else sweep_cnr} "
+              f"clock_ppm={float(args.clock_ppm)}")
         print("freq_hz,sep_l2r_db,sep_r2l_db,thdn_l_db,snr_l_db")
         for fhz in freqs:
             np.random.seed(0)
             m = evaluate_quality(
                 duration_s=float(args.duration), tone_hz=fhz,
-                cnr_db=(None if float(args.cnr_db) < 0 else float(args.cnr_db)),
+                cnr_db=sweep_cnr,
                 pilot_amp=float(args.pilot_amp),
                 freq_dev_hz=float(args.freq_dev_hz),
                 warmup_s=float(args.warmup_s), hifi_tx=True,
                 hifi_constant_mod=True,
+                clock_ppm=float(args.clock_ppm),
             )
             print(f"{fhz:.0f},{m.separation_l_to_r_db:.2f},"
                   f"{m.separation_r_to_l_db:.2f},{m.thdn_left_db:.2f},"
