@@ -255,21 +255,79 @@ def _build_mpx(
     return mpx.astype(np.float32)
 
 
-def _fm_modulate_iq(
-    mpx: np.ndarray,
-    fs_composite: int,
+def _synthesize_iq_tone(
+    duration_s: float,
     fs_iq: int,
+    tone_hz: float,
+    left_amp: float,
+    right_amp: float,
+    pilot_amp: float,
     freq_dev_hz: float,
+    enable_preemphasis: bool = True,
+    preemphasis_tau_s: float = 50e-6,
+    dsb_phase_deg: float = 0.0,
+    clock_ppm: float = 0.0,
+    dsb_phase_drift_deg_per_s: float = 0.0,
+    constant_modulation: bool = False,
+) -> np.ndarray:
+    """High-fidelity reference modulator for single-tone programme.
+
+    The legacy path (audio 48 kHz -> _build_mpx at 192 kHz ->
+    _fm_modulate_iq resampling to the IQ rate) passes through TWO
+    resample_poly stages in float32, whose filter images set the
+    measurement floor of every synthetic metric.  This synthesizer
+    builds every MPX component ANALYTICALLY at the IQ rate in float64
+    - no resampling anywhere - applies the exact analog pre-emphasis
+    to the tone in closed form (gain sqrt(1+(wt)^2), phase atan(wt)),
+    and integrates the instantaneous frequency with the trapezoidal
+    rule.  Channel impairments (noise, tuning offset, multipath) are
+    applied afterwards by the same _apply_channel used by the legacy
+    modulator, so impairment semantics are identical.
+    """
+    n = int(duration_s * fs_iq)
+    t = np.arange(n, dtype=np.float64) / fs_iq
+    if enable_preemphasis:
+        wt = 2.0 * np.pi * tone_hz * preemphasis_tau_s
+        gain = np.sqrt(1.0 + wt * wt)
+        ph = np.arctan(wt)
+    else:
+        gain, ph = 1.0, 0.0
+    if constant_modulation:
+        # Broadcast practice: the LIMITER holds post-pre-emphasis
+        # modulation constant, so a legal transmitter never sends a
+        # full-scale pre-emphasised HF tone.  Dividing the audio by
+        # the pre-emphasis gain keeps the MPX level (and deviation)
+        # frequency-independent - without this, tones above ~5 kHz
+        # overdeviate (x4.5 at 14 kHz) and measure TX overdrive, not
+        # the receiver.
+        gain = 1.0
+    tone = gain * np.sin(2.0 * np.pi * tone_hz * t + ph)
+    left = left_amp * tone
+    right = right_amp * tone
+    lpr = 0.45 * (left + right)
+    lmr = 0.45 * (left - right)
+    scale = 1.0 + clock_ppm * 1e-6
+    pilot = pilot_amp * np.cos(2.0 * np.pi * 19_000.0 * scale * t)
+    dsb_phase_rad = np.deg2rad(dsb_phase_deg + dsb_phase_drift_deg_per_s * t)
+    dsb = lmr * np.cos(2.0 * np.pi * 38_000.0 * scale * t + dsb_phase_rad)
+    mpx = lpr + dsb + pilot
+    inst = 2.0 * np.pi * freq_dev_hz * mpx / fs_iq
+    # Trapezoidal phase integration: sum((x[i]+x[i-1])/2).
+    phase = np.cumsum(inst) - 0.5 * inst - 0.5 * inst[0]
+    return np.exp(1j * phase)
+
+
+def _apply_channel(
+    iq: np.ndarray,
+    fs_iq: int,
     cnr_db: float | None,
     carrier_offset_hz: float = 0.0,
     multipath_delay_us: float = 0.0,
     multipath_gain: float = 0.0,
     multipath_phase_deg: float = 0.0,
 ) -> np.ndarray:
-    mpx_iq = _resample(mpx, fs_composite, fs_iq).astype(np.float64)
-    k = 2.0 * np.pi * freq_dev_hz / fs_iq
-    phase = np.cumsum(k * mpx_iq, dtype=np.float64)
-    iq = np.exp(1j * phase).astype(np.complex64)
+    """Apply tuning offset, two-ray multipath and AWGN to clean IQ."""
+    iq = np.asarray(iq)
 
     # Receiver tuning error: shifts the whole FM signal inside the IQ
     # lowpass passband (appears as a DC term in the demodulated
@@ -298,12 +356,36 @@ def _fm_modulate_iq(
         iq = (iq + coeff * echo).astype(np.complex64)
 
     if cnr_db is None:
-        return iq
+        return iq.astype(np.complex64)
     signal_power = float(np.mean(np.abs(iq) ** 2))
     noise_power = signal_power / (10.0 ** (cnr_db / 10.0))
     sigma = np.sqrt(noise_power / 2.0)
     noise = (np.random.randn(iq.size) + 1j * np.random.randn(iq.size)) * sigma
     return (iq + noise.astype(np.complex64)).astype(np.complex64)
+
+
+def _fm_modulate_iq(
+    mpx: np.ndarray,
+    fs_composite: int,
+    fs_iq: int,
+    freq_dev_hz: float,
+    cnr_db: float | None,
+    carrier_offset_hz: float = 0.0,
+    multipath_delay_us: float = 0.0,
+    multipath_gain: float = 0.0,
+    multipath_phase_deg: float = 0.0,
+) -> np.ndarray:
+    mpx_iq = _resample(mpx, fs_composite, fs_iq).astype(np.float64)
+    k = 2.0 * np.pi * freq_dev_hz / fs_iq
+    phase = np.cumsum(k * mpx_iq, dtype=np.float64)
+    iq = np.exp(1j * phase).astype(np.complex64)
+    return _apply_channel(
+        iq, fs_iq, cnr_db,
+        carrier_offset_hz=carrier_offset_hz,
+        multipath_delay_us=multipath_delay_us,
+        multipath_gain=multipath_gain,
+        multipath_phase_deg=multipath_phase_deg,
+    )
 
 
 def _run_demod_from_iq(
@@ -814,6 +896,8 @@ def evaluate_quality(
     preemphasis_tau_s: float = 50e-6,
     dsb_phase_deg: float = 0.0,
     dsb_phase_drift_deg_per_s: float = 0.0,
+    hifi_tx: bool = False,
+    hifi_constant_mod: bool = False,
     source_lr: tuple[np.ndarray, np.ndarray] | None = None,
     disable_iq_phase_correction: bool = False,
     mono_delay_samples: int | None = None,
@@ -850,12 +934,29 @@ def evaluate_quality(
         multipath_phase_deg=multipath_phase_deg,
     )
 
+    if hifi_tx and (source_lr is not None or path == "composite"):
+        raise ValueError(
+            "hifi_tx supports tone sources on the IQ path only"
+        )
     if source_lr is None:
         left_ref, right_ref = _make_stereo_tone(duration_s, fs_audio, tone_hz, 0.6, 0.6)
         calc_thdn = True
     else:
         left_ref, right_ref = source_lr
         calc_thdn = False
+
+    def _hifi_iq(l_amp: float, r_amp: float) -> np.ndarray:
+        clean = _synthesize_iq_tone(
+            duration_s, fs_iq, tone_hz, l_amp, r_amp, pilot_amp,
+            freq_dev_hz,
+            enable_preemphasis=enable_preemphasis,
+            preemphasis_tau_s=preemphasis_tau_s,
+            dsb_phase_deg=dsb_phase_deg, clock_ppm=clock_ppm,
+            dsb_phase_drift_deg_per_s=dsb_phase_drift_deg_per_s,
+            constant_modulation=hifi_constant_mod,
+        )
+        return _apply_channel(clean, fs_iq, cnr_db, **impairments)
+
     mpx = _build_mpx(
         left_ref, right_ref, fs_audio, fs_composite, pilot_amp,
         enable_preemphasis=enable_preemphasis, preemphasis_tau_s=preemphasis_tau_s,
@@ -871,8 +972,11 @@ def evaluate_quality(
             demod_diag=demod_diag, demod_diag_interval=demod_diag_interval,
         )
     else:
-        iq = _fm_modulate_iq(mpx, fs_composite, fs_iq, freq_dev_hz, cnr_db,
-                               **impairments)
+        if hifi_tx:
+            iq = _hifi_iq(0.6, 0.6)
+        else:
+            iq = _fm_modulate_iq(mpx, fs_composite, fs_iq, freq_dev_hz,
+                                 cnr_db, **impairments)
         left_out, right_out, blend_hist = _run_demod_from_iq(
             iq, fixed_blend=fixed_blend,
             disable_iq_phase_correction=disable_iq_phase_correction,
@@ -917,8 +1021,11 @@ def evaluate_quality(
             demod_diag=demod_diag, demod_diag_interval=demod_diag_interval,
         )
     else:
-        iq_l = _fm_modulate_iq(mpx_l, fs_composite, fs_iq, freq_dev_hz, cnr_db,
-                               **impairments)
+        if hifi_tx:
+            iq_l = _hifi_iq(0.7, 0.0)
+        else:
+            iq_l = _fm_modulate_iq(mpx_l, fs_composite, fs_iq, freq_dev_hz,
+                                   cnr_db, **impairments)
         l_main, r_leak, _ = _run_demod_from_iq(
             iq_l, fixed_blend=fixed_blend,
             disable_iq_phase_correction=disable_iq_phase_correction,
@@ -944,8 +1051,11 @@ def evaluate_quality(
             demod_diag=demod_diag, demod_diag_interval=demod_diag_interval,
         )
     else:
-        iq_r = _fm_modulate_iq(mpx_r, fs_composite, fs_iq, freq_dev_hz, cnr_db,
-                               **impairments)
+        if hifi_tx:
+            iq_r = _hifi_iq(0.0, 0.7)
+        else:
+            iq_r = _fm_modulate_iq(mpx_r, fs_composite, fs_iq, freq_dev_hz,
+                                   cnr_db, **impairments)
         l_leak, r_main, _ = _run_demod_from_iq(
             iq_r, fixed_blend=fixed_blend,
             disable_iq_phase_correction=disable_iq_phase_correction,
@@ -980,8 +1090,11 @@ def _parser() -> argparse.ArgumentParser:
         "--iq-wav", type=str, default="",
         help="Measured IQ WAV (I=ch0,Q=ch1). Runs diagnostics-only path.",
     )
-    p.add_argument("--cnr-db", type=float, default=40.0,
-                   help="Carrier-to-noise ratio in dB (set <0 to disable noise)")
+    p.add_argument("--cnr-db", type=float, default=None,
+                   help="Carrier-to-noise ratio in dB (set <0 to disable "
+                        "noise).  Default: 40 dB for the normal evaluation; "
+                        "NOISELESS for --sep-sweep (the canonical filter/"
+                        "separation characterisation)")
     p.add_argument("--pilot-amp", type=float, default=0.10, help="Pilot amplitude in MPX")
     p.add_argument("--freq-dev-hz", type=float, default=75_000.0, help="FM frequency deviation")
     p.add_argument(
@@ -1073,6 +1186,24 @@ def _parser() -> argparse.ArgumentParser:
         help="Comma-separated DSB phase candidates in degrees for sweep mode",
     )
     p.add_argument(
+        "--sep-sweep", action="store_true",
+        help="Measure separation/THD vs tone frequency using the "
+             "high-fidelity analytic reference modulator (no resampling "
+             "in the TX path).  Honours --duration, --clock-ppm and "
+             "--cnr-db (default when omitted: NOISELESS - the canonical "
+             "characterisation; pass an explicit value to add noise).",
+    )
+    p.add_argument(
+        "--sep-freqs", type=str,
+        default="100,300,1000,3000,6000,9000,12000,14000",
+        help="Comma-separated tone frequencies (Hz) for --sep-sweep",
+    )
+    p.add_argument(
+        "--hifi-tx", action="store_true",
+        help="Use the analytic reference modulator for the main "
+             "synthetic evaluation (tone sources, IQ path only)",
+    )
+    p.add_argument(
         "--sweep-response", action="store_true",
         help="Measure the mono/side audio magnitude response (single-tone "
              "sweep, noiseless) and print a dB table.  Honours --preemphasis "
@@ -1158,7 +1289,14 @@ def _parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = _parser().parse_args()
-    cnr_db = None if args.cnr_db < 0 else float(args.cnr_db)
+    # --cnr-db uses a sentinel default so each mode can pick its own
+    # canonical value: 40 dB for the normal evaluation, noiseless for
+    # --sep-sweep.  An explicit value (including <0 = noiseless) always
+    # wins.
+    if args.cnr_db is None:
+        cnr_db = 40.0
+    else:
+        cnr_db = None if float(args.cnr_db) < 0 else float(args.cnr_db)
     fixed_blend = None if args.fixed_blend < 0.0 else float(args.fixed_blend)
 
     # Reject configurations that would produce zero post-warmup samples.
@@ -1190,6 +1328,7 @@ def main() -> None:
         demod_diag=bool(args.demod_diag),
         demod_diag_interval=(None if int(args.demod_diag_interval) <= 0 else int(args.demod_diag_interval)),
         clock_ppm=float(args.clock_ppm),
+        hifi_tx=bool(args.hifi_tx),
         carrier_offset_hz=float(args.carrier_offset_hz),
         multipath_delay_us=float(args.multipath_delay_us),
         multipath_gain=float(args.multipath_gain),
@@ -1355,6 +1494,37 @@ def main() -> None:
                     ["cmd", "/c", "start", "", play_path],
                     check=False,
                 )
+        return
+
+    if args.sep_sweep:
+        freqs = [float(x) for x in args.sep_freqs.split(",") if x.strip()]
+        # Canonical filter/separation characterisation is NOISELESS
+        # (constant-modulation tones are level-reduced at HF, so any
+        # channel noise dominates the measurement there); an explicit
+        # --cnr-db still wins.
+        if args.cnr_db is None:
+            sweep_cnr = None
+        else:
+            sweep_cnr = None if float(args.cnr_db) < 0 else float(args.cnr_db)
+        print("FM Quality Self-Test (Separation vs Frequency, hifi TX)")
+        print(f"duration={float(args.duration)}s "
+              f"cnr={'noiseless' if sweep_cnr is None else sweep_cnr} "
+              f"clock_ppm={float(args.clock_ppm)}")
+        print("freq_hz,sep_l2r_db,sep_r2l_db,thdn_l_db,snr_l_db")
+        for fhz in freqs:
+            np.random.seed(0)
+            m = evaluate_quality(
+                duration_s=float(args.duration), tone_hz=fhz,
+                cnr_db=sweep_cnr,
+                pilot_amp=float(args.pilot_amp),
+                freq_dev_hz=float(args.freq_dev_hz),
+                warmup_s=float(args.warmup_s), hifi_tx=True,
+                hifi_constant_mod=True,
+                clock_ppm=float(args.clock_ppm),
+            )
+            print(f"{fhz:.0f},{m.separation_l_to_r_db:.2f},"
+                  f"{m.separation_r_to_l_db:.2f},{m.thdn_left_db:.2f},"
+                  f"{m.snr_left_db:.2f}")
         return
 
     if args.sweep_response:

@@ -215,3 +215,116 @@ def test_synthetic_runner_uses_variant_dsp_offset(monkeypatch):
         captured.clear()
         qs._run_demod_from_iq(iq)
         assert abs(captured["deg"] - expect) < 0.01, (use_pll, captured)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("cnr_db", [35.0, None])
+def test_hifi_tx_matches_legacy_floors_at_1k(cnr_db):
+    """The analytic reference modulator reproduces the legacy floors.
+
+    The hifi TX synthesizes every MPX component at the IQ rate with no
+    resampling; measuring the same scenario (noisy AND noiseless)
+    within ~2 dB of the legacy two-stage-resampled TX proves the
+    measurement floor (Sep ~30 dB, THD ~-38 dB at 1 kHz) belongs to
+    the RECEIVER, not to resampler images in the test transmitter -
+    the fact that unlocked the separation-vs-frequency analysis.
+    Both separation directions and both channels' THD+N are held.
+    """
+    from fm_radio.quality_selftest import evaluate_quality
+    np.random.seed(0)
+    legacy = evaluate_quality(duration_s=3.0, tone_hz=1000.0, cnr_db=cnr_db,
+                              pilot_amp=0.10, freq_dev_hz=75_000.0,
+                              warmup_s=0.8)
+    np.random.seed(0)
+    hifi = evaluate_quality(duration_s=3.0, tone_hz=1000.0, cnr_db=cnr_db,
+                            pilot_amp=0.10, freq_dev_hz=75_000.0,
+                            warmup_s=0.8, hifi_tx=True)
+    assert abs(hifi.separation_l_to_r_db - legacy.separation_l_to_r_db) < 2.5
+    assert abs(hifi.separation_r_to_l_db - legacy.separation_r_to_l_db) < 2.5
+    assert abs(hifi.thdn_left_db - legacy.thdn_left_db) < 3.0
+    assert abs(hifi.thdn_right_db - legacy.thdn_right_db) < 3.0
+    assert hifi.separation_l_to_r_db > 24.0
+    assert hifi.separation_r_to_l_db > 24.0
+
+
+def test_hifi_tx_rejects_unsupported_modes():
+    from fm_radio.quality_selftest import evaluate_quality
+    import pytest as _pytest
+    with _pytest.raises(ValueError):
+        evaluate_quality(duration_s=1.0, tone_hz=1000.0, cnr_db=None,
+                         pilot_amp=0.10, freq_dev_hz=75_000.0,
+                         warmup_s=0.3, hifi_tx=True, path="composite")
+
+
+
+def _spy_eval(monkeypatch, captured):
+    """Replace evaluate_quality with a capture stub (no DSP runs)."""
+    import types
+    import fm_radio.quality_selftest as qs
+
+    def fake(**kwargs):
+        captured.append(kwargs)
+        return types.SimpleNamespace(
+            thdn_left_db=0.0, thdn_right_db=0.0,
+            snr_left_db=0.0, snr_right_db=0.0,
+            separation_l_to_r_db=0.0, separation_r_to_l_db=0.0,
+            blend_mean=1.0, blend_min=1.0, blend_max=1.0,
+        )
+
+    monkeypatch.setattr(qs, "evaluate_quality", fake)
+
+
+def test_cli_passes_hifi_tx_to_evaluate_quality(monkeypatch):
+    """Codex P1 repro: --hifi-tx must reach evaluate_quality via main().
+
+    The flag existed but was missing from eval_kwargs, so the CLI
+    silently ran the legacy TX.  Verified at the CLI boundary with the
+    evaluation stubbed out (no DSP execution).
+    """
+    import sys
+    import fm_radio.quality_selftest as qs
+    captured = []
+    _spy_eval(monkeypatch, captured)
+    monkeypatch.setattr(sys, "argv", [
+        "quality_selftest", "--duration", "1", "--cnr-db", "-1", "--hifi-tx",
+    ])
+    qs.main()
+    assert len(captured) == 1
+    assert captured[0]["hifi_tx"] is True
+    assert captured[0]["cnr_db"] is None  # -1 -> noiseless
+
+    captured.clear()
+    monkeypatch.setattr(sys, "argv", [
+        "quality_selftest", "--duration", "1",
+    ])
+    qs.main()
+    assert captured[0]["hifi_tx"] is False
+    assert captured[0]["cnr_db"] == 40.0  # sentinel default resolves to 40
+
+
+def test_cli_sep_sweep_passes_clock_ppm_and_noiseless_default(monkeypatch):
+    """Codex P1 repro: --sep-sweep must honour --clock-ppm, and its
+    omitted-cnr default must be NOISELESS (normal eval keeps 40 dB)."""
+    import sys
+    import fm_radio.quality_selftest as qs
+    captured = []
+    _spy_eval(monkeypatch, captured)
+    monkeypatch.setattr(sys, "argv", [
+        "quality_selftest", "--sep-sweep", "--sep-freqs", "1000,3000",
+        "--duration", "1", "--clock-ppm", "200",
+    ])
+    qs.main()
+    assert len(captured) == 2
+    for kw in captured:
+        assert kw["clock_ppm"] == 200.0
+        assert kw["cnr_db"] is None       # omitted -> noiseless for sweep
+        assert kw["hifi_tx"] is True
+        assert kw["hifi_constant_mod"] is True
+
+    captured.clear()
+    monkeypatch.setattr(sys, "argv", [
+        "quality_selftest", "--sep-sweep", "--sep-freqs", "1000",
+        "--duration", "1", "--cnr-db", "40",
+    ])
+    qs.main()
+    assert captured[0]["cnr_db"] == 40.0  # explicit value wins
