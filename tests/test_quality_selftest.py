@@ -215,3 +215,37 @@ def test_synthetic_runner_uses_variant_dsp_offset(monkeypatch):
         captured.clear()
         qs._run_demod_from_iq(iq)
         assert abs(captured["deg"] - expect) < 0.01, (use_pll, captured)
+
+
+@pytest.mark.slow
+def test_hifi_tx_matches_legacy_floors_at_1k():
+    """The analytic reference modulator reproduces the legacy floors.
+
+    The hifi TX synthesizes every MPX component at the IQ rate with no
+    resampling; measuring the same clean scenario within ~2 dB of the
+    legacy two-stage-resampled TX proves the measurement floor (Sep
+    ~30 dB, THD ~-38 dB at 1 kHz) belongs to the RECEIVER, not to
+    resampler images in the test transmitter - the fact that unlocked
+    the separation-vs-frequency analysis.
+    """
+    from fm_radio.quality_selftest import evaluate_quality
+    np.random.seed(0)
+    legacy = evaluate_quality(duration_s=3.0, tone_hz=1000.0, cnr_db=35.0,
+                              pilot_amp=0.10, freq_dev_hz=75_000.0,
+                              warmup_s=0.8)
+    np.random.seed(0)
+    hifi = evaluate_quality(duration_s=3.0, tone_hz=1000.0, cnr_db=35.0,
+                            pilot_amp=0.10, freq_dev_hz=75_000.0,
+                            warmup_s=0.8, hifi_tx=True)
+    assert abs(hifi.separation_l_to_r_db - legacy.separation_l_to_r_db) < 2.5
+    assert abs(hifi.thdn_left_db - legacy.thdn_left_db) < 3.0
+    assert hifi.separation_l_to_r_db > 24.0
+
+
+def test_hifi_tx_rejects_unsupported_modes():
+    from fm_radio.quality_selftest import evaluate_quality
+    import pytest as _pytest
+    with _pytest.raises(ValueError):
+        evaluate_quality(duration_s=1.0, tone_hz=1000.0, cnr_db=None,
+                         pilot_amp=0.10, freq_dev_hz=75_000.0,
+                         warmup_s=0.3, hifi_tx=True, path="composite")
