@@ -697,11 +697,12 @@ class BaseFMDemodulator(FMDemodulatorInterface):
                 phase_jitter = float(np.std(phase_step - np.mean(phase_step))) if phase_step.size else 0.0
                 self.logger.info(
                     "StereoDiag snr=%.2fdB blend=%.3f pilotP=%.6g noiseP=%.6g "
-                    "phJit=%.6g lrBandRMS=%.6g lrBaseRMS=%.6g phaseIQ=%.3fdeg aniso=%.2f sideNoise=%.1fdB conf=%.2f "
+                    "phJit=%.6g snrJit=%.2fdB lrBandRMS=%.6g lrBaseRMS=%.6g phaseIQ=%.3fdeg aniso=%.2f sideNoise=%.1fdB conf=%.2f "
                     "iqCorr=%s "
                     "monoDelay=%d scOff=%.1fdeg sideCap=%.3f",
                     snr_db, self.blend_factor, pilot_power, noise_power,
                     phase_jitter,
+                    self.pilot_jitter_ema,
                     float(np.sqrt(np.mean(lr_band ** 2) + 1e-12)),
                     float(np.sqrt(np.mean(lr_baseband ** 2) + 1e-12)),
                     float(np.rad2deg(self.stereo_phase_err_ema)),

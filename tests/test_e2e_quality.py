@@ -70,6 +70,46 @@ FLOORS = {
 
 
 @pytest.mark.slow
+def test_blend_snr_ramp_protects_weak_signal():
+    """The pilot-SNR ramp must still open/close the blend correctly.
+
+    With the jitter stability term neutral (PR #27) the SNR ramp is
+    the ONLY weak-signal protection, so its behaviour is pinned:
+    blend ~1 on a good signal, small under sustained weak signal, and
+    closing within a bounded time after a good->weak SNR step.
+    Statistics: per-block blend over 16384-sample IQ blocks, first
+    0.5 s of each segment excluded as settling.
+    """
+    from fm_radio.demodulator import FMDemodulator
+    from fm_radio.quality_selftest import _synthesize_iq_tone, _apply_channel
+    from fm_radio.constants import SDR_SAMPLE_RATE, SDR_BLOCK_SIZE
+    fs = int(SDR_SAMPLE_RATE)
+    np.random.seed(0)
+    clean = _synthesize_iq_tone(8.0, fs, 1000.0, 0.6, 0.6, 0.10, 75_000.0)
+    half = int(4.0 * fs)
+    good = _apply_channel(clean[:half], fs, 35.0)
+    weak = _apply_channel(clean[half:], fs, 0.0)
+    iq = np.concatenate([good, weak])
+    d = FMDemodulator(stereo=True)
+    blends = []
+    for i in range(0, iq.size, SDR_BLOCK_SIZE):
+        c = iq[i:i + SDR_BLOCK_SIZE]
+        if c.size < 8:
+            break
+        d.demodulate(d.process_iq_samples(c))
+        blends.append(d.blend_factor)
+    blends = np.array(blends)
+    blk_s = SDR_BLOCK_SIZE / fs
+    good_tail = blends[int(3.0 / blk_s):int(4.0 / blk_s)]
+    weak_tail = blends[int(7.0 / blk_s):]
+    assert np.median(good_tail) > 0.95, np.median(good_tail)   # opens
+    assert np.median(weak_tail) < 0.2, np.median(weak_tail)    # closes
+    # closing speed: within 1.5 s of the step, blend below 0.5
+    after = blends[int(5.5 / blk_s):int(6.0 / blk_s)]
+    assert np.max(after) < 0.5, np.max(after)
+
+
+@pytest.mark.slow
 def test_phase_corrector_recovers_large_static_error():
     """A -75 deg static subcarrier error must be FULLY corrected.
 
