@@ -2,8 +2,8 @@
 
 Runs the full MPX -> FM IQ -> demodulator chain and asserts conservative
 floors for the objective metrics.  The floors sit well below the
-measured values (clean run at CNR=35: Sep ~30/30.5 dB, THD+N ~-37 dB,
-SNR ~35/37.5 dB with pre-emphasis on) so they are robust across
+measured values (clean run at CNR=35: Sep ~43/57 dB, THD+N ~-37 dB,
+SNR ~35 dB with pre-emphasis on) so they are robust across
 platforms and RNG noise draws while still catching structural
 regressions.  See the FLOORS comment below for the measurement
 history across tuning changes.
@@ -50,8 +50,12 @@ SCENARIOS = {
 }
 
 # Measured values (2026-07, windowed-median metrics, neutral HF
-# ceilings, analog-exact pre-emphasis + analog-fitted de-emphasis):
-# clean Sep 30.2/30.5, THD -37.4, SNR 34.9/37.5.  History: with the
+# ceilings AND neutral blend-stability term, analog-exact pre-emphasis
+# + analog-fitted de-emphasis): clean Sep ~43/57, THD -36.9, SNR 34.9.
+# History: before the blend-stability neutralisation the same chain
+# measured clean Sep 30.2/30.5 - the blend itself (0.95-0.997 on
+# synthetic) capped separation at 20*log10((1+b)/(1-b)).  Earlier
+# still: with the
 # bilinear pre-emphasis + matched-Z de-emphasis mismatch these were
 # Sep 29.3/30.7, THD -32.8, SNR 32.7; with the earlier 0.85/0.50 HF
 # damping ceilings Sep 24.4/28.4, THD -31..-32.5, SNR 30.9-34.2.

@@ -303,7 +303,20 @@ STEREO_BLEND_PILOT_SNR_DB_LO = 7.0         # Pilot SNR below this -> full mono
 STEREO_BLEND_PILOT_SNR_EMA_ALPHA = 0.10    # EMA alpha for pilot SNR tracking
 STEREO_BLEND_PILOT_JITTER_EMA_ALPHA = 0.12  # EMA alpha for pilot SNR jitter tracking
 STEREO_BLEND_PILOT_JITTER_REF_DB = 2.5     # Jitter reference in dB (higher -> less sensitive)
-STEREO_BLEND_STABILITY_MIN_FACTOR = 0.85   # Minimum stereo factor when pilot is unstable
+STEREO_BLEND_STABILITY_MIN_FACTOR = 1.00  # Floor of the pilot-"jitter" stability factor.
+                                    # 1.0 = the stability term is NEUTRAL (blend follows
+                                    # pilot SNR alone).  History: 0.85 penalised blend by
+                                    # up to 15% via the EMA of |snr_db - snr_ema| with
+                                    # REF 2.5 dB - calibrated on synthetic tones (jitter
+                                    # 0.06-0.4 dB).  Field measurement showed real
+                                    # broadcasts sit at 1.4-4.1 dB REGARDLESS of quality
+                                    # (cleanest feed, optical SNR 42.6: jitter 4.1 =
+                                    # worst; antenna SNR 24.8: 1.9), because the pilot-
+                                    # SNR noise reference bands (16-17.5k / 20.5-22k)
+                                    # catch fluctuating PROGRAMME spill from the
+                                    # station's 15 kHz and 23 kHz band edges - the term
+                                    # measures programme dynamics, not reception.  The
+                                    # mechanism stays in place (set <1.0 to re-enable).
 STEREO_BLEND_SMOOTHING = 0.08              # EMA smoothing for blend factor (0-1)
 
 # --------------------------------------------------

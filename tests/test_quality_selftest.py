@@ -223,12 +223,14 @@ def test_hifi_tx_matches_legacy_floors_at_1k(cnr_db):
     """The analytic reference modulator reproduces the legacy floors.
 
     The hifi TX synthesizes every MPX component at the IQ rate with no
-    resampling; measuring the same scenario (noisy AND noiseless)
-    within ~2 dB of the legacy two-stage-resampled TX proves the
-    measurement floor (Sep ~30 dB, THD ~-38 dB at 1 kHz) belongs to
-    the RECEIVER, not to resampler images in the test transmitter -
-    the fact that unlocked the separation-vs-frequency analysis.
-    Both separation directions and both channels' THD+N are held.
+    resampling.  History: with the blend stability penalty active
+    (blend 0.95-0.997 on synthetic) separation was capped near 30 dB
+    BY THE BLEND ALONE (Sep_cap = 20*log10((1+b)/(1-b))) and the two
+    TX agreed within ~1 dB there.  With the stability term neutral
+    the 1 kHz floor rises to 43-57 dB, where the two TX legitimately
+    differ by a few dB - so this test asserts BOTH stay far above the
+    old 30 dB regime (neither TX is the old bottleneck) and that
+    THD+N still agrees between them.
     """
     from fm_radio.quality_selftest import evaluate_quality
     np.random.seed(0)
@@ -239,12 +241,11 @@ def test_hifi_tx_matches_legacy_floors_at_1k(cnr_db):
     hifi = evaluate_quality(duration_s=3.0, tone_hz=1000.0, cnr_db=cnr_db,
                             pilot_amp=0.10, freq_dev_hz=75_000.0,
                             warmup_s=0.8, hifi_tx=True)
-    assert abs(hifi.separation_l_to_r_db - legacy.separation_l_to_r_db) < 2.5
-    assert abs(hifi.separation_r_to_l_db - legacy.separation_r_to_l_db) < 2.5
+    for m in (legacy, hifi):
+        assert m.separation_l_to_r_db > 36.0, m
+        assert m.separation_r_to_l_db > 36.0, m
     assert abs(hifi.thdn_left_db - legacy.thdn_left_db) < 3.0
     assert abs(hifi.thdn_right_db - legacy.thdn_right_db) < 3.0
-    assert hifi.separation_l_to_r_db > 24.0
-    assert hifi.separation_r_to_l_db > 24.0
 
 
 def test_hifi_tx_rejects_unsupported_modes():
