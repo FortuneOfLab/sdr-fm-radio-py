@@ -126,11 +126,14 @@ HARDWARE_SUBCARRIER_PHASE_TRIM_DEG = 84.0  # Front-end (tuner) phase trim added 
                                     # not multipath.  Sitting at the +-90 deg boundary
                                     # also made the acquisition branch flip between
                                     # sessions (the optical capture decoded L/R-swapped
-                                    # vs the antenna ones).  With this trim (316+84 =
-                                    # 40 deg effective) the tracker settles at 0 +- 4.3
-                                    # deg on all three captures, on the same branch as
-                                    # every historical antenna session (decode total
-                                    # ~39 deg, matching the listening-approved state).
+                                    # vs the antenna ones).  With the FIR bank's DSP
+                                    # offset of 1.0 deg the total applied is 1+84 =
+                                    # 85 deg; re-validated on the FIR chain: the
+                                    # tracker settles at med -1.1 (antenna 91.6),
+                                    # -3.0 (CATV 83.7) and -3.6 deg (optical 82.5),
+                                    # on the same branch as every historical antenna
+                                    # session.  The trim itself is a front-end
+                                    # property and is NOT retuned with DSP changes.
 STEREO_SUBCARRIER_PHASE_OFFSET_DEG_PLL = 331.1  # Operating point when the legacy PLL main
                                     # demod is selected (MAIN_DEMOD_USE_PLL = True): the
                                     # PLL chain carries its own 19k/38k phase
@@ -267,6 +270,20 @@ DC_OFFSET_ALPHA = 0.01              # DC offset smoothing coefficient
 # Audio output
 # --------------------------------------------------
 AUDIO_OUTPUT_RATE = 48000           # Audio output sample rate (Hz)
+# Final audio band limit: one linear-phase FIR applied IDENTICALLY to L
+# and R after the stereo matrix (identical filters cannot degrade
+# channel separation).  Needed because the raw-composite demod's
+# equivalence to an ideal bandpass holds in the 0-15 kHz target band
+# only: through the bank FIR's 15-18.5 kHz transition, out-of-band
+# composite (20.5-22 kHz and 54-56.5 kHz noise) maps to 16-18.5 kHz
+# near-audible side content (measured +22-25 dB vs the old IIR chain
+# in the 16-17.5 kHz band; side NR does not reach above 15 kHz).  The
+# sharp 15->16.5 kHz transition at the 48 kHz audio rate costs 1/4 the
+# taps of doing it at the composite rate and crushes the leak below
+# the old chain's floor.
+AUDIO_FINAL_LP_NTAPS = 183          # At 48 kHz (Kaiser beta 9, ~-90 dB); group delay 91 samples = 1.9 ms
+AUDIO_FINAL_LP_CUTOFF_HZ = 15000.0  # Passband edge (Hz)
+AUDIO_FINAL_LP_STOP_HZ = 16500.0    # Stopband edge (Hz)
 AUDIO_FRAMES_PER_BUFFER = 1024     # Frames per audio callback
 AUDIO_QUEUE_MAXSIZE = 50            # Max queued audio blocks
 AUDIO_CHANNELS = 2                  # Stereo output channels

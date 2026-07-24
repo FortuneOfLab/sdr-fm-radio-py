@@ -26,7 +26,7 @@ flowchart TD
     %% ============================================================
     COMP --> MONO_LPF["Mono FIR LPF\nlinear phase, 321 taps\nfc = 15 kHz"]
     COMP --> PILOT_HET["Pilot Heterodyne\nmix down by 19 kHz\n(phase-continuous carrier)"]
-    COMP --> LR_DEMOD_IN["Raw composite\n(no pre-demod bandpass:\ndemod + 15 kHz FIR ≡ ideal BPF)"]
+    COMP --> LR_DEMOD_IN["Raw composite\n(no pre-demod bandpass:\ndemod + 15 kHz FIR ≡ ideal BPF\nwithin the 0–15 kHz target band;\ntransition-band images removed\nby the final audio LPF)"]
     COMP --> NB1["Noise Band 1 BPF\n16 – 17.5 kHz"]
     COMP --> NB2["Noise Band 2 BPF\n20.5 – 22 kHz"]
 
@@ -90,8 +90,11 @@ flowchart TD
     NOTCH_L --> RS2_L["StatefulResampler 1:4\n192 kHz → 48 kHz (Left)\n(grid-aligned)"]
     NOTCH_R --> RS2_R["StatefulResampler 1:4\n192 kHz → 48 kHz (Right)\n(grid-aligned)"]
 
-    RS2_L --> DEEMP_L["De-emphasis IIR\nτ = 50 μs"]
-    RS2_R --> DEEMP_R["De-emphasis IIR\nτ = 50 μs"]
+    RS2_L --> ALPF_L["Final Audio FIR LPF (Left)\n183 taps @48 kHz, 15 k / 16.5 k\nIDENTICAL taps L and R"]
+    RS2_R --> ALPF_R["Final Audio FIR LPF (Right)\n183 taps @48 kHz, 15 k / 16.5 k\nIDENTICAL taps L and R"]
+
+    ALPF_L --> DEEMP_L["De-emphasis IIR\nτ = 50 μs"]
+    ALPF_R --> DEEMP_R["De-emphasis IIR\nτ = 50 μs"]
 
     %% --- Side-channel noise reduction (mid/side) ---
     DEEMP_L --> SIDENR["Side NR (DD-Wiener STFT)\nmid=(L+R)/2 untouched\nside=(L−R)/2 denoised\nframe 1024 / hop 256 / 1.5–15 kHz"]
@@ -113,7 +116,7 @@ flowchart TD
     class COMP comp
     class PILOT_HET,PILOT_LP,PHASE_EST,SC_GEN,NB1,NB2,SNR_CALC,BLEND,HFBLEND pilot
     class LR_DEMOD_IN,MUL_I,MUL_Q,LPF15I,LPF15Q,LPF12I,LPF12Q,LPF7I,LPF7Q,IQ_CORR,SPLIT,SHAPE,SIDE_CAP lr
-    class MONO_LPF,DELAY,MATRIX,NOTCH_L,NOTCH_R,RS2_L,RS2_R,DEEMP_L,DEEMP_R,SIDENR,OUT_L,OUT_R audio
+    class MONO_LPF,DELAY,MATRIX,NOTCH_L,NOTCH_R,RS2_L,RS2_R,ALPF_L,ALPF_R,DEEMP_L,DEEMP_R,SIDENR,OUT_L,OUT_R audio
 ```
 
 ## FMDemodulatorLight (Arctan Discriminator)
@@ -127,7 +130,7 @@ flowchart TD
     RS1 --> SCALE["× 0.35\n(LIGHT_COMPOSITE_SCALE)"]
     SCALE --> COMP["Composite Signal\n192 kHz"]
 
-    COMP --> STEREO["Stereo Demodulation\n(same as Standard, order-1 filters)"]
+    COMP --> STEREO["Stereo Demodulation\n(same as Standard incl. FIR bank;\nonly the pilot LPF is order-1)"]
 
     classDef iq fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
     classDef comp fill:#fff3e0,stroke:#e65100,stroke-width:2px

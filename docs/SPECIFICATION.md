@@ -145,7 +145,7 @@ USB 制御転送で決してブロックしないよう、遅い処理はすべ�
 FMDemodulatorInterface (ABC)
   └─ BaseFMDemodulator（共通フィルタ・復調・リサンプリング）
        ├─ FMDemodulator      （標準: discriminator / PLL）
-       └─ FMDemodulatorLight （軽量: discriminator, order-1 フィルタ）
+       └─ FMDemodulatorLight （軽量: discriminator, パイロット LPF のみ order-1）
 ```
 
 #### FMDemodulator（標準）
@@ -192,12 +192,15 @@ float32 量子化により長時間セッションで劣化するため置換さ
    これにより位相トラッカーの実機需要が ±90° 境界から 0° 付近へ移り、
    セッション間の取得枝（L/R 極性）が安定する）
 5. L−R 帯の同期復調（DSB-SC、ゲイン 2.0）と 3 バンド LPF（I/Q 並列）。
-   **前置バンドパスなし** — 実信号の composite にサブキャリアを乗算する
-   と 23–53 kHz 帯がちょうど 0–15 kHz へシフトし（モノ帯は 23–53 kHz
-   へ、パイロット像は 19 kHz へ移り LPF 阻止域）、復調 + 15 kHz FIR は
-   **理想** BPF + 復調 + LPF と数学的に等価。実 Butterworth BPF の帯域
-   端特性（12–14 kHz の DSB 側波帯を削り HF セパレーションを崩壊させて
-   いた実測要因）が原理ごと除去される。mono/side/3 バンドの全 7 フィルタ
+   **前置バンドパスなし** — 理想的な 38 kHz 同期ミキサと **0–15 kHz の
+   対象帯域内**では、raw composite 復調 + 15 kHz LPF は理想 23–53 kHz
+   BPF を前置した場合と等価（モノ帯は 23–53 kHz へ、パイロット像は
+   19 kHz へ移り LPF 阻止域）。これにより実 Butterworth BPF の帯域端
+   特性（12–14 kHz の DSB 側波帯を削り HF セパレーションを崩壊させて
+   いた実測要因）が原理ごと除去される。等価性は FIR の 15–18.5 kHz
+   遷移帯には及ばず、帯域外 composite 成分（20.5–22 k / 54–56.5 kHz）
+   が 16–18.5 kHz へ写像され得るため、最終音声帯域制限（下記手順 11）
+   で抑制する。mono/side/3 バンドの全 7 フィルタ
    は同一タップ数（192 kHz で 321、群遅延 160 サンプル = 0.83 ms）の
    線形位相 FIR（Kaiser β=9、遷移 3.5 kHz、阻止域 ~−100 dB、19 kHz で
    実測 −102 dB）で、overlap-save（タップスペクトル事前計算）により
@@ -225,8 +228,13 @@ float32 量子化により長時間セッションで劣化するため置換さ
 8. ステレオマトリクス `L=Mono+Side, R=Mono−Side`
 9. パイロットノッチ ×2（19 kHz、Q=30）
 10. composite→audio リサンプル（`StatefulResampler` 1:4、L/R 独立）
-11. ディエンファシス（τ=50 μs）
-12. **Side NR**（既定 ON、下記）
+11. 最終音声帯域制限 — L/R に**同一タップ**の線形位相 FIR
+    （48 kHz で 183 taps、通過域 15 kHz / 阻止域 16.5 kHz、遅延 1.9 ms。
+    手順 5 の遷移帯写像成分を抑制。同一フィルタのため
+    セパレーションへは影響しない。モノ動作時も両インスタンスを
+    同一入力で進め、mono↔stereo 切替の連続性を保つ）
+12. ディエンファシス（τ=50 μs）
+13. **Side NR**（既定 ON、下記）
 
 #### Side チャネル雑音抑制
 
@@ -409,6 +417,7 @@ IQ (1.024 MHz)
       └ マトリクス L=M+S, R=M−S
   → パイロットノッチ ×2 (19 kHz, Q=30)
   → StatefulResampler 1:4 → audio (48 kHz)
+  → 最終音声帯域制限 (L/R 共通 FIR, 15 k/16.5 k, 183 taps)
   → ディエンファシス (τ=50 μs)
   → Side NR (mid/side DD-Wiener STFT, 既定 ON)
   → (L, R) 48 kHz
@@ -455,6 +464,7 @@ IQ (250 kHz)
 | `MONO_LOWPASS_CUTOFF` | 15 kHz | モノ / L−R ベース LPF カットオフ |
 | `PILOT_BANDPASS_ORDER` | 9 | パイロット複素 LPF 次数（軽量は 1） |
 | `STEREO_FIR_NTAPS` / `_TRANSITION_HZ` | 321 / 3.5 kHz | mono/side 線形位相 FIR バンク（タップ数は composite レート比例、全フィルタ共有） |
+| `AUDIO_FINAL_LP_NTAPS` / `_CUTOFF_HZ` / `_STOP_HZ` | 183 / 15 k / 16.5 k | 最終音声帯域制限（L/R 共通 FIR、raw composite 復調の遷移帯写像を抑制） |
 | `DEEMPHASIS_TAU` | 50e-6 | ディエンファシス時定数 |
 | `PILOT_NOTCH_FREQ` / `_Q` | 19 kHz / 30 | パイロットノッチ |
 

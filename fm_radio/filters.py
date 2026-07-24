@@ -246,7 +246,13 @@ class FIRFilter:
             )
             out[pos:pos + n_out] = y[m:m + n_out]
             pos += n_out
-        self._state = ext[ext.size - m:]
+        # Copy, not a view: a view of ext would keep the WHOLE extended
+        # block (state + input) alive via .base until the next call - an
+        # arbitrarily large hidden allocation for large input blocks.
+        if m:
+            self._state = ext[-m:].copy()
+        else:
+            self._state = np.empty(0, dtype=np.float64)
         return out
 
     def reset(self) -> None:

@@ -99,6 +99,26 @@ def test_fir_bank_shares_one_group_delay_and_no_mono_delay():
         assert d.mono_delay_samples == 0
 
 
+def test_final_audio_lowpass_is_common_and_advances_in_lockstep(rng):
+    """The final band limit must be IDENTICAL on L and R.
+
+    Identical taps guarantee the filter cannot degrade channel
+    separation; mono operation must advance both instances with the
+    same input so a mono -> stereo switch resumes with matched filter
+    states (same requirement as the audio resampler lockstep).
+    """
+    d = FMDemodulator(stereo=True)
+    assert np.array_equal(d.lp_audio_l.taps, d.lp_audio_r.taps)
+    assert d.lp_audio_l is not d.lp_audio_r
+
+    d_mono = FMDemodulator(stereo=False)
+    for _ in range(4):
+        comp = rng.standard_normal(3072).astype(np.float64) * 0.1
+        d_mono.demodulate(comp)
+    assert np.array_equal(d_mono.lp_audio_l._state, d_mono.lp_audio_r._state)
+    assert np.linalg.norm(d_mono.lp_audio_l._state) > 0
+
+
 def test_discriminator_is_default_and_pll_selectable(monkeypatch):
     # Constructed demodulators carry the hardware phase trim on top of
     # each variant's DSP-intrinsic offset (synthetic paths override the

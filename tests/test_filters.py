@@ -126,6 +126,51 @@ def test_fir_reset_gives_zero_output_for_zero_input(rng):
     assert np.allclose(out, 0.0)
 
 
+def test_fir_state_is_compact_and_owns_its_memory(rng):
+    """The carried state must be ntaps-1 samples that OWN their buffer.
+
+    A view of the extended block would pin the whole previous input
+    (state + block) alive through ``.base`` until the next call - an
+    arbitrarily large hidden allocation when large blocks are passed
+    through the arbitrary-block-size API.
+    """
+    f = FIRFilter.lowpass(321, 15000, 192000)
+    big = rng.standard_normal(500_000)
+    f.apply(big)
+    assert f._state.size == f.taps.size - 1
+    assert f._state.base is None
+
+
+def test_fir_boundary_block_sizes_match_oneshot(rng):
+    """Empty, 1-sample, sub-state-length and beyond-hop blocks are exact."""
+    f = FIRFilter.lowpass(321, 15000, 192000)
+    x = rng.standard_normal(30_000)
+    # 0 (empty), 1, < ntaps-1 (5, 100, 319), == ntaps (321), > hop
+    # (hop = nfft - 320 = 3776 for nfft 4096 -> 12_000 spans multiple
+    # transforms), remainder
+    sizes = (0, 1, 5, 100, 319, 321, 12_000, 3776)
+    segs, pos = [], 0
+    for n in sizes:
+        y = f.apply(x[pos:pos + n])
+        assert y.size == n
+        segs.append(y)
+        pos += n
+    segs.append(f.apply(x[pos:]))
+    streamed = np.concatenate(segs)
+    oneshot = sg.lfilter(f.taps, [1.0], x)
+    assert np.max(np.abs(streamed - oneshot)) < 1e-12
+
+
+def test_fir_reset_matches_fresh_instance(rng):
+    f = FIRFilter.lowpass(321, 15000, 192000)
+    f.apply(rng.standard_normal(10_000))
+    f.reset()
+    g = FIRFilter.lowpass(321, 15000, 192000)
+    x = rng.standard_normal(8_192)
+    assert np.array_equal(f.apply(x), g.apply(x))
+    assert np.array_equal(f._state, g._state)
+
+
 def test_stateful_resampler_matches_oneshot_exactly(rng):
     """Streamed output must equal one-shot resample_poly sample-for-sample.
 
