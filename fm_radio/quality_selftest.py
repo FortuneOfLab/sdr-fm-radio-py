@@ -48,6 +48,7 @@ import scipy.signal as signal
 from scipy.io import wavfile
 
 from fm_radio.constants import (
+    DC_BLOCK_CUTOFF_HZ,
     AUDIO_OUTPUT_RATE,
     COMPOSITE_RATE,
     SDR_BLOCK_SIZE,
@@ -1514,15 +1515,19 @@ def main() -> None:
               f"cnr={'noiseless' if sweep_cnr is None else sweep_cnr} "
               f"clock_ppm={float(args.clock_ppm)} "
               f"carrier_offset={float(args.carrier_offset_hz):.0f}Hz")
-        if float(args.carrier_offset_hz) == 0.0:
-            # At EXACTLY zero carrier offset the signal's own carrier
-            # line coincides with the DC blocker's notch - an
-            # unphysical condition (real tuners always carry ppm
-            # error) that reads as an 8-12 kHz separation dip.  A
-            # realistic characterisation uses an offset away from the
-            # tone/pilot comb, e.g. --carrier-offset-hz 1237.
-            print("note: offset 0 is the DC-notch worst case; pass "
-                  "--carrier-offset-hz 1237 for the realistic chart")
+        if abs(float(args.carrier_offset_hz)) <= 3.0 * DC_BLOCK_CUTOFF_HZ:
+            # Within the DC blocker's notch transition the synthetic
+            # tone's discrete carrier line is (partially) removed and
+            # reads as an 8-12 kHz separation dip - a historical
+            # DC-notch STRESS chart, not a realistic receiver
+            # characterisation (this hardware's measured residual
+            # offset is ~60 Hz, far outside the notch; 60 Hz and
+            # 1237 Hz measure alike).  A realistic characterisation
+            # uses an offset away from the tone/pilot comb, e.g.
+            # --carrier-offset-hz 1237.
+            print("note: this offset sits in the DC-blocker notch - "
+                  "historical stress chart; pass --carrier-offset-hz "
+                  "1237 for the realistic characterisation")
         print("freq_hz,sep_l2r_db,sep_r2l_db,thdn_l_db,snr_l_db")
         for fhz in freqs:
             np.random.seed(0)

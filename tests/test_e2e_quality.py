@@ -113,15 +113,17 @@ def test_blend_snr_ramp_protects_weak_signal():
 def test_front_end_separation_floor_under_realistic_conditions():
     """The 8-12 kHz region must stay clean with realistic impairments.
 
-    Root cause of the historical "8-12 kHz dip": removing the IQ DC
-    offset when the carrier offset is EXACTLY zero subtracts the
-    signal's own carrier line and intermodulates across the composite.
-    With a realistic carrier offset (tuner ppm error; 1237 Hz chosen
-    off the synthetic tone comb) and a large injected LO-leak DC, the
-    DC blocker must remove the DC with no separation cost: measured
-    47.3 dB at 10 kHz and 48.8 dB at 12 kHz (NR and corrector off,
-    fixed blend, DSP offset).  Floor at 42 dB guards the front end
-    against any DC-handling regression.
+    Root cause of the historical "8-12 kHz dip": near-zero carrier
+    offsets put the synthetic tone's discrete carrier line inside the
+    DC remover's notch; the removed component intermodulates across
+    the composite.  With a realistic carrier offset (this hardware
+    measures ~60 Hz residual; 1237 Hz chosen off the synthetic tone
+    comb) and a large injected LO-leak DC, the DC blocker must remove
+    the DC with no separation cost: measured 47.3 dB at 10 kHz and
+    48.8 dB at 12 kHz (NR and corrector off, fixed blend, DSP
+    offset).  Per-frequency floors ~1 dB under the measured values;
+    mutation-checked: bypassing _remove_dc entirely measures
+    44.96/46.98 dB, which the floors reject.
     """
     from fm_radio.demodulator import FMDemodulator
     from fm_radio.quality_selftest import (
@@ -129,6 +131,7 @@ def test_front_end_separation_floor_under_realistic_conditions():
     )
     from fm_radio.constants import SDR_BLOCK_SIZE
     fs_a = 48_000
+    floors = {10_000.0: 46.0, 12_000.0: 47.5}
     for tone in (10_000.0, 12_000.0):
         iq = _synthesize_iq_tone(
             5.0, 1_024_000, tone, 1.0, 0.0, 0.1, 75_000.0,
@@ -154,7 +157,7 @@ def test_front_end_separation_floor_under_realistic_conditions():
         left = np.concatenate(ls)[int(1.5 * fs_a):]
         right = np.concatenate(rs)[int(1.5 * fs_a):]
         sep = _stereo_separation_ls_db(left, right, max_lag=96)
-        assert sep > 42.0, (tone, sep)
+        assert sep > floors[tone], (tone, sep)
 
 
 @pytest.mark.slow

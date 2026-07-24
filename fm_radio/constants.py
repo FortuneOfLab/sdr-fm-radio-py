@@ -268,32 +268,42 @@ DC_BLOCK_CUTOFF_HZ = 0.1            # IQ DC-blocker highpass cutoff (Hz).  An LT
                                     # one-pole complex highpass replaced the old
                                     # block-mean EMA subtraction (DC_OFFSET_ALPHA=0.01).
                                     # Root cause of the "8-12 kHz separation dip":
-                                    # subtracting ANY offset c from an FM signal adds
-                                    # a phase error ~Im(c*e^{-j*phi}) that the
-                                    # discriminator spreads across the composite as
-                                    # modulation-correlated intermod, and on FM the
-                                    # block mean is modulation-dominated, so the EMA
-                                    # estimate wandered (-22 dB products at a 12 kHz
-                                    # side tone; separation capped at ~32 dB at the
-                                    # canonical ZERO carrier offset).  Any DC removal
-                                    # trades bandwidth for injected noise: whatever
-                                    # signal PSD falls inside the removal bandwidth is
-                                    # subtracted and intermodulates (measured on the
-                                    # optical capture's composite noise bands: none
-                                    # -73.8 / 0.1 Hz -72.8 / 1 Hz -71.3 / 20 Hz
-                                    # -64.4 dB).  0.1 Hz equals the old EMA's
-                                    # EFFECTIVE bandwidth (alpha 0.01 per 16 ms block
-                                    # -> tau 1.6 s), giving measured pilot-SNR parity
-                                    # to 0.01 dB on the reference captures with the
-                                    # same ~1.6 s settle, while adding what the EMA
-                                    # lacked: exact block-size invariance (stateful
-                                    # LTI), an exact null at 0 Hz, and no wandering
-                                    # estimate.  The only residual pathology is a
-                                    # carrier offset of EXACTLY zero (the signal's
-                                    # own carrier line sits in the notch) - an
-                                    # unphysical synthetic-only condition (real
-                                    # tuners: ppm error; captures measure ~60 Hz);
-                                    # the sweep tooling prints a note and offers
+                                    # to first order, removing an offset c from an FM
+                                    # signal y = exp(j*phi) - c adds a phase error
+                                    # -Im(c*e^{-j*phi}); the removed component is an
+                                    # ADDITIVE error whose phase-direction part the
+                                    # discriminator's nonlinearity turns into
+                                    # modulation-correlated products across the
+                                    # composite.  On FM the block mean is
+                                    # modulation-dominated, so the old EMA estimate
+                                    # wandered (-22 dB products at a 12 kHz side
+                                    # tone; separation capped at ~32 dB at zero
+                                    # carrier offset).  Widening the removal
+                                    # bandwidth increases the input power of that
+                                    # error (measured on the optical capture's
+                                    # composite noise bands: none -73.8 / 0.1 Hz
+                                    # -72.8 / 1 Hz -71.3 / 20 Hz -64.4 dB).  0.1 Hz
+                                    # equals the old EMA's EFFECTIVE bandwidth
+                                    # (alpha 0.01 per 16 ms block -> tau 1.6 s),
+                                    # giving measured pilot-SNR parity to 0.01 dB on
+                                    # the reference captures with the same ~1.6 s
+                                    # settle, while adding what the EMA lacked:
+                                    # exact block-size invariance (stateful LTI), an
+                                    # exact null at 0 Hz, and no wandering estimate.
+                                    # The residual pathology is CONTINUOUS across
+                                    # the notch transition - measured separation at
+                                    # a 12 kHz side tone: 32.8 dB at 0 Hz offset /
+                                    # 35.8 at 0.1 Hz / 47.4 at 0.3 Hz / 48.5 at
+                                    # 1 Hz and flat beyond - so it matters when the
+                                    # residual carrier offset falls within roughly
+                                    # 0.1-0.3 Hz of the notch.  Exact zero tuning is
+                                    # not physically impossible, but this hardware's
+                                    # measured residual offset (~60 Hz) sits far
+                                    # outside the notch; synthetic periodic tones
+                                    # show the pathology strongly because their IQ
+                                    # spectrum has DISCRETE carrier lines that can
+                                    # land exactly in the notch.  The sweep tooling
+                                    # prints a note near the notch and offers
                                     # --carrier-offset-hz for realistic charts.
 # --------------------------------------------------
 # Audio output

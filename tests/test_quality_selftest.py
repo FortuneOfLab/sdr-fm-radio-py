@@ -336,3 +336,47 @@ def test_cli_sep_sweep_passes_clock_ppm_and_noiseless_default(monkeypatch):
     ])
     qs.main()
     assert captured[0]["cnr_db"] == 40.0  # explicit value wins
+
+
+def test_cli_sep_sweep_passes_carrier_offset(monkeypatch, capsys):
+    """--carrier-offset-hz must reach evaluate_quality, and the
+    DC-notch stress note must appear ONLY near the notch.
+
+    Boundary-tested with the evaluation stubbed out (the same pattern
+    that caught the --hifi-tx and --clock-ppm no-ops)."""
+    import sys
+    import fm_radio.quality_selftest as qs
+    captured = []
+    _spy_eval(monkeypatch, captured)
+
+    # omitted -> 0 Hz propagated, note printed (0 is inside the notch)
+    monkeypatch.setattr(sys, "argv", [
+        "quality_selftest", "--sep-sweep", "--sep-freqs", "1000",
+        "--duration", "1",
+    ])
+    qs.main()
+    assert captured[0]["carrier_offset_hz"] == 0.0
+    out = capsys.readouterr().out
+    assert "DC-blocker notch" in out
+
+    # explicit 1237 -> propagated, no note
+    captured.clear()
+    monkeypatch.setattr(sys, "argv", [
+        "quality_selftest", "--sep-sweep", "--sep-freqs", "1000",
+        "--duration", "1", "--carrier-offset-hz", "1237",
+    ])
+    qs.main()
+    assert captured[0]["carrier_offset_hz"] == 1237.0
+    out = capsys.readouterr().out
+    assert "carrier_offset=1237Hz" in out
+    assert "DC-blocker notch" not in out
+
+    # explicit 0 -> propagated, note printed (historical stress rerun)
+    captured.clear()
+    monkeypatch.setattr(sys, "argv", [
+        "quality_selftest", "--sep-sweep", "--sep-freqs", "1000",
+        "--duration", "1", "--carrier-offset-hz", "0",
+    ])
+    qs.main()
+    assert captured[0]["carrier_offset_hz"] == 0.0
+    assert "DC-blocker notch" in capsys.readouterr().out

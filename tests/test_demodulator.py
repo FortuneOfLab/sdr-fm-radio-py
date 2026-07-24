@@ -81,28 +81,55 @@ def test_composite_is_block_size_invariant():
     assert np.allclose(comp_blk, comp_one, atol=1e-5)
 
 
-def test_dc_blocker_removes_static_dc():
-    """The blocker must null a static LO-leak DC.
+@pytest.mark.parametrize("cls", [FMDemodulator, FMDemodulatorLight])
+def test_dc_blocker_removes_static_dc(cls):
+    """The blocker must null a static LO-leak DC (standard AND light).
 
-    Structural: the numerator [1, -1] gives an EXACT zero at 0 Hz.
-    Behavioural: a pure DC input through the demodulator's own
-    _remove_dc decays exponentially (tau ~1.6 s at the 0.1 Hz
-    cutoff, matching the old EMA's settle) and is gone - not merely
-    attenuated - after several time constants.  Streamed in blocks to
+    Structural: the numerator [1, -1] gives an EXACT zero at 0 Hz,
+    the pole sits in (0, 1), the state stays complex128 (the pole at
+    1 - 2*pi*fc/fs is precision-critical), and the design time
+    constant is 1/(2*pi*0.1 Hz) ~ 1.59 s at each variant's own IQ
+    rate.  Behavioural: a pure DC input through the demodulator's own
+    _remove_dc decays exponentially and is gone - not merely
+    attenuated - after ~7.5 time constants.  Streamed in blocks to
     exercise the carried state.
     """
-    d = FMDemodulator(stereo=True)
+    d = cls(stereo=True)
     sos = d._dc_sos
     assert sos[0, 0] + sos[0, 1] == 0.0  # exact null at DC
+    rho = -sos[0, 4]
+    assert 0.0 < rho < 1.0
+    tau = 1.0 / ((1.0 - rho) * d.iq_sample_rate)
+    assert abs(tau - 1.5915) < 0.02, tau
+    assert d._dc_zi.dtype == np.complex128
 
     dc = np.complex64(0.05 + 0.03j)
-    block = np.full(SDR_BLOCK_SIZE, dc, dtype=np.complex64)
-    n_blocks = int(12.0 * 1.024e6 / SDR_BLOCK_SIZE)  # ~7.5 tau
+    block_n = 16384
+    block = np.full(block_n, dc, dtype=np.complex64)
+    n_blocks = int(12.0 * d.iq_sample_rate / block_n)  # ~7.5 tau
     last = None
     for _ in range(n_blocks):
         last = d._remove_dc(block)
+    assert np.all(np.isfinite(last))
+    assert np.all(np.isfinite(d._dc_zi))
     residual = float(np.mean(np.abs(last)))
     assert residual < 1e-3 * abs(dc), residual
+
+
+@pytest.mark.parametrize("cls,fs", [(FMDemodulator, 1.024e6),
+                                    (FMDemodulatorLight, 0.25e6)])
+def test_iq_path_returns_to_complex64_after_dc_blocker(cls, fs, rng):
+    """Both variants must cast back to complex64 right after the
+    blocker: the float64 blocker STATE is precision-critical, the
+    discriminator is not (composite delta of the cast: 8.9e-8 max),
+    and keeping the light chain in complex128 cost ~10% of its block
+    budget (codex P2 on PR #30)."""
+    d = cls(stereo=True)
+    x = (rng.standard_normal(4096) + 1j * rng.standard_normal(4096)
+         ).astype(np.complex64)
+    d.process_iq_samples(x)
+    assert d._disc_last is not None
+    assert d._disc_last.dtype == np.complex64
 
 
 def test_fir_bank_shares_one_group_delay_and_no_mono_delay():
@@ -250,7 +277,14 @@ def test_reset_clears_all_streaming_state(rng):
     demod.reset()
     assert np.all(demod._iq_zi == 0)
     assert np.all(demod._pilot_lp_zi == 0)
+    assert np.all(demod._dc_zi == 0)
     assert demod._disc_last is None
+
+    d_light = FMDemodulatorLight(stereo=True)
+    for _ in range(3):
+        d_light.demodulate(d_light.process_iq_samples(_random_iq(rng, 4096)))
+    d_light.reset()
+    assert np.all(d_light._dc_zi == 0)
     # Zero composite in -> zero audio out (no leakage from the warm state).
     left, right = demod.demodulate(np.zeros(3072, dtype=np.float32))
     if left.size:
