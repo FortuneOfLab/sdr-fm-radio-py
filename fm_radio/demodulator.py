@@ -304,8 +304,14 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         # lowpass applied with IDENTICAL taps to both channels removes
         # it without touching channel separation (any common filter
         # cancels in the L/R ratio).  Mono operation advances both
-        # instances in lockstep so a mono <-> stereo switch stays
-        # continuous, mirroring the resampler pattern above.
+        # instances with the same input - mirroring the resampler
+        # pattern above - which keeps the LOCAL L/R chain matched
+        # across a mono <-> stereo switch: sample counts, output grid
+        # and final-LPF state.  This is deliberately NOT an end-to-end
+        # switch-continuity guarantee; the side NR chain
+        # (SideNoiseReducer, side_nr_mid_aligner) does not advance
+        # during mono operation, a pre-existing limitation shared with
+        # main and tracked separately.
         audio_lp_ntaps = int(round(
             AUDIO_FINAL_LP_NTAPS * self.final_audio_rate / 48000.0
         ))

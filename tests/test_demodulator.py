@@ -99,24 +99,47 @@ def test_fir_bank_shares_one_group_delay_and_no_mono_delay():
         assert d.mono_delay_samples == 0
 
 
-def test_final_audio_lowpass_is_common_and_advances_in_lockstep(rng):
-    """The final band limit must be IDENTICAL on L and R.
+def test_final_audio_lowpass_is_common_and_reconverges_after_stereo(rng):
+    """LOCAL L/R chain contract of the final band limit.
 
-    Identical taps guarantee the filter cannot degrade channel
-    separation; mono operation must advance both instances with the
-    same input so a mono -> stereo switch resumes with matched filter
-    states (same requirement as the audio resampler lockstep).
+    Guarantees only: identical taps on L and R (so the filter cannot
+    degrade channel separation), and that mono operation advances the
+    audio resamplers, final LPFs and de-emphasis with the same input,
+    so L/R sample counts, output grid and filter states re-match after
+    genuinely divergent stereo history.
+
+    This test deliberately does NOT cover end-to-end mono <-> stereo
+    switch continuity (silent switching / time continuity): the side
+    NR chain (SideNoiseReducer, side_nr_mid_aligner) does not advance
+    during mono operation - a pre-existing limitation shared with main
+    and tracked separately.
     """
     d = FMDemodulator(stereo=True)
     assert np.array_equal(d.lp_audio_l.taps, d.lp_audio_r.taps)
     assert d.lp_audio_l is not d.lp_audio_r
 
-    d_mono = FMDemodulator(stereo=False)
+    # 1) Stereo blocks with random composite: the side path is nonzero,
+    #    so L != R and the per-channel states genuinely diverge.
     for _ in range(4):
-        comp = rng.standard_normal(3072).astype(np.float64) * 0.1
-        d_mono.demodulate(comp)
-    assert np.array_equal(d_mono.lp_audio_l._state, d_mono.lp_audio_r._state)
-    assert np.linalg.norm(d_mono.lp_audio_l._state) > 0
+        d.demodulate(rng.standard_normal(3072).astype(np.float64) * 0.1)
+    assert not np.array_equal(d.lp_audio_l._state, d.lp_audio_r._state)
+
+    # 2) Switch to mono, 3) process one standard block (3072 samples).
+    d.stereo = False
+    left, right = d.demodulate(rng.standard_normal(3072).astype(np.float64) * 0.1)
+
+    # 4) L/R chains re-matched.
+    rl, rr = d._audio_resampler_l, d._audio_resampler_r
+    assert rl._in_total == rr._in_total
+    assert rl._out_emitted == rr._out_emitted
+    assert np.array_equal(rl._prev_tail, rr._prev_tail)
+    assert np.array_equal(d.lp_audio_l._state, d.lp_audio_r._state)
+    assert np.linalg.norm(d.lp_audio_l._state) > 0
+    # De-emphasis is IIR: the divergent-history residue decays as
+    # pole^n (~1e-100 after one 768-sample block) - tolerance covers it.
+    assert abs(d.deemph_left.prev_input - d.deemph_right.prev_input) < 1e-12
+    assert abs(d.deemph_left.prev_output - d.deemph_right.prev_output) < 1e-12
+    assert np.array_equal(left, right)
 
 
 def test_discriminator_is_default_and_pll_selectable(monkeypatch):

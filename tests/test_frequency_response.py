@@ -75,22 +75,40 @@ def test_preemphasis_roundtrip_is_flat():
 
 
 def _run_composite_direct(mpx: np.ndarray, fs_audio: int = 48_000):
-    """Feed a synthetic composite straight into the stereo demod."""
+    """Feed a synthetic composite straight into the stereo demod.
+
+    Silences the demodulator's construction logging for the duration
+    of the call only: the previous process-wide ``logging.disable``
+    level is restored in a ``finally`` so this helper cannot leak a
+    global CRITICAL filter into later tests.
+    """
     import logging
-    logging.disable(logging.CRITICAL)
     from fm_radio.demodulator import FMDemodulator
-    d = FMDemodulator(stereo=True)
-    d.force_blend_factor = 1.0
-    d.subcarrier_phase_offset_rad = 0.0
-    ls, rs = [], []
-    for i in range(0, mpx.size - 3071, 3072):
-        l, r = d.demodulate(mpx[i:i + 3072])
-        ls.append(l)
-        rs.append(r)
-    left = np.concatenate(ls).astype(np.float64)
-    right = np.concatenate(rs).astype(np.float64)
-    n0 = int(1.5 * fs_audio)
-    return left[n0:], right[n0:]
+    prev_disable = logging.root.manager.disable
+    logging.disable(logging.CRITICAL)
+    try:
+        d = FMDemodulator(stereo=True)
+        d.force_blend_factor = 1.0
+        d.subcarrier_phase_offset_rad = 0.0
+        ls, rs = [], []
+        for i in range(0, mpx.size - 3071, 3072):
+            l, r = d.demodulate(mpx[i:i + 3072])
+            ls.append(l)
+            rs.append(r)
+        left = np.concatenate(ls).astype(np.float64)
+        right = np.concatenate(rs).astype(np.float64)
+        n0 = int(1.5 * fs_audio)
+        return left[n0:], right[n0:]
+    finally:
+        logging.disable(prev_disable)
+
+
+def test_composite_direct_helper_restores_logging_disable_level():
+    """The helper must not leak its CRITICAL filter process-wide."""
+    import logging
+    prev = logging.root.manager.disable
+    _run_composite_direct(np.zeros(3072, dtype=np.float64))
+    assert logging.root.manager.disable == prev
 
 
 def _tone_power_dbfs(x: np.ndarray, f0: float, fs: int = 48_000,

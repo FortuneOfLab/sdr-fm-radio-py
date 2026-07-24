@@ -186,12 +186,16 @@ class BandpassFilter:
 class FIRFilter:
     """Streaming linear-phase FIR filter (overlap-save, exact).
 
-    All filters in the stereo decoder's mono/side bank share one tap
-    LENGTH, so every path has the identical group delay of
-    (ntaps-1)/2 samples and the mono/side matrix alignment is exact
-    by construction - no per-filter delay compensation.  The streamed
-    output equals the one-shot ``lfilter(taps, 1, x)`` sample for
-    sample for arbitrary block sizes.
+    General-purpose stateful FIR with ``reset()``; the streamed output
+    equals the one-shot ``lfilter(taps, 1, x)`` sample for sample for
+    arbitrary block sizes.  Used twice in the receiver:
+
+    - The stereo decoder's mono/side filter bank, where every filter
+      shares one tap LENGTH so all paths have the identical group
+      delay of (ntaps-1)/2 samples and the mono/side matrix alignment
+      is exact by construction (no per-filter delay compensation).
+    - The final audio band limit after the stereo matrix, applied with
+      IDENTICAL taps to the left and right channels.
     """
 
     def __init__(self, taps: np.ndarray) -> None:

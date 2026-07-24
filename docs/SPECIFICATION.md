@@ -232,7 +232,11 @@ float32 量子化により長時間セッションで劣化するため置換さ
     （48 kHz で 183 taps、通過域 15 kHz / 阻止域 16.5 kHz、遅延 1.9 ms。
     手順 5 の遷移帯写像成分を抑制。同一フィルタのため
     セパレーションへは影響しない。モノ動作時も両インスタンスを
-    同一入力で進め、mono↔stereo 切替の連続性を保つ）
+    同一入力で進め、L/R のサンプル数・出力グリッド・LPF state の
+    不整合を防ぐ。これは局所的な整合の保証であり、Side NR 連鎖
+    （`SideNoiseReducer` / mid アライナ）はモノ動作中に前進しない
+    ため、end-to-end の mono↔stereo 切替連続性は保証しない —
+    main にも存在する既存制約）
 12. ディエンファシス（τ=50 μs）
 13. **Side NR**（既定 ON、下記）
 
@@ -257,7 +261,7 @@ float32 量子化により長時間セッションで劣化するため置換さ
 | クラス | 種別 | 備考 |
 |--------|------|------|
 | `LowpassFilter` | Butterworth LPF（SOS） | ストリーミング、状態保持、`reset()` |
-| `FIRFilter` | 線形位相 FIR（overlap-save） | mono/side フィルタバンク用。タップスペクトル事前計算、任意ブロック長でワンショットと厳密一致 |
+| `FIRFilter` | 線形位相 FIR（overlap-save） | mono/side フィルタバンクと、マトリクス後の L/R 共通・最終音声 LPF の両方で使用。タップスペクトル事前計算、ストリーミング状態保持、`reset()` 対応、任意ブロック長でワンショットと厳密一致 |
 | `BandpassFilter` | Butterworth BPF（SOS） | 同上 |
 | `NotchFilter` | IIR ノッチ | 同上 |
 | `DeemphasisIIRFilter` | ディエンファシス IIR | Numba 最適化 |
