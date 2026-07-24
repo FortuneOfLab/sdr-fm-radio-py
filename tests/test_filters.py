@@ -12,8 +12,8 @@ import pytest
 import scipy.signal as sg
 
 from fm_radio.filters import (
-    LowpassFilter, BandpassFilter, NotchFilter, DeemphasisIIRFilter,
-    StatefulResampler, SideNoiseReducer, StreamAligner,
+    LowpassFilter, BandpassFilter, FIRFilter, NotchFilter,
+    DeemphasisIIRFilter, StatefulResampler, SideNoiseReducer, StreamAligner,
 )
 
 
@@ -84,6 +84,46 @@ def test_lowpass_streaming_matches_oneshot(rng):
     )
     y_ref = lp_ref.apply(x)
     assert np.allclose(y_stream, y_ref, atol=1e-10)
+
+
+def test_fir_streaming_matches_oneshot_for_arbitrary_blocks(rng):
+    """Overlap-save streaming must equal lfilter(taps, 1, x) exactly.
+
+    The stereo matrix relies on the FIR bank being sample-exact across
+    block boundaries; block sizes include tiny (< ntaps) chunks.
+    """
+    f = FIRFilter.lowpass(321, 15000, 192000, stop=18500)
+    x = rng.standard_normal(50_000)
+    segs, pos = [], 0
+    for n in (3072, 1000, 7, 8000, 3072, 30_000):
+        segs.append(f.apply(x[pos:pos + n]))
+        pos += n
+    streamed = np.concatenate(segs)
+    oneshot = sg.lfilter(f.taps, [1.0], x[:pos])
+    assert streamed.size == pos
+    assert np.max(np.abs(streamed - oneshot)) < 1e-12
+
+
+def test_fir_bank_response_passband_flat_pilot_dead(rng):
+    """15 kHz bank filter: flat to 15 k, ~-100 dB at the 19 kHz pilot."""
+    f = FIRFilter.lowpass(321, 15000, 192000, stop=18500)
+    w, h = sg.freqz(f.taps, worN=8192, fs=192000)
+
+    def at(freq):
+        return 20 * np.log10(np.abs(h[int(np.argmin(np.abs(w - freq)))]))
+
+    assert abs(at(15000)) < 0.1     # passband edge still flat
+    assert at(19000) < -95.0        # pilot image dead
+    assert f.group_delay_samples == 160
+
+
+def test_fir_reset_gives_zero_output_for_zero_input(rng):
+    f = FIRFilter.lowpass(321, 15000, 192000)
+    _warm(f.apply, rng)
+    assert np.linalg.norm(f._state) > 0
+    f.reset()
+    out = f.apply(np.zeros(1024, dtype=np.float32))
+    assert np.allclose(out, 0.0)
 
 
 def test_stateful_resampler_matches_oneshot_exactly(rng):

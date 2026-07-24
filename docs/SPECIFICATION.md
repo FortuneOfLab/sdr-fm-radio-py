@@ -169,7 +169,7 @@ discriminator は全帯域で平坦・純遅延。合成 IQ でステレオセ�
 `process_iq_samples()` は標準モードと同じ arctan discriminator
 （`angle(x[n]·conj(x[n-1]))`）で FM 復調し、`StatefulResampler` 96:125 で
 250 kHz→192 kHz に変換、`LIGHT_COMPOSITE_SCALE=0.35` を乗じます。以降の
-ステレオ復調は標準モードと共通（フィルタ次数のみ order-1）。旧実装の
+ステレオ復調は標準モードと共通（mono/side FIR バンクも同一タップ数を共有。パイロット複素 LPF のみ order-1）。旧実装の
 `angle→unwrap→diff` は unwrap 位相が搬送波オフセット下で無限成長し、
 float32 量子化により長時間セッションで劣化するため置換されました
 （伝達特性は同一）。
@@ -177,7 +177,9 @@ float32 量子化により長時間セッションで劣化するため置換さ
 #### ステレオ復調（`_demodulate_stereo`）
 
 `BaseFMDemodulator` の共通処理:
-1. モノ抽出（15 kHz LPF）+ グループ遅延補償（18 サンプル）
+1. モノ抽出（15 kHz 線形位相 FIR、下記フィルタバンク）。mono/side の
+   全フィルタが同一タップ数を共有するため両経路の群遅延は構造的に
+   一致し、遅延補償は不要（`STEREO_MONO_DELAY_SAMPLES=0`）
 2. パイロット抽出 — **ヘテロダイン方式**: composite を 19 kHz で位相
    連続にミックスダウンし、複素ローパス（Butterworth N=9、SOS、状態
    保持）で複素残差を得る。FFT Hilbert を用いない（ブロック端の位相
@@ -185,17 +187,27 @@ float32 量子化により長時間セッションで劣化するため置換さ
 3. パイロット SNR 推定（残差電力 `2·mean(|z|²)` と 2 本のノイズ帯の比）
    と適応ブレンド係数の更新
 4. サブキャリア生成 `cos/sin(2θ + φ_offset)`（φ_offset は復調方式ごとの
-   DSP 固有値 discriminator 316°/PLL 285°/Light 297.4° に、実機では
+   DSP 固有値 discriminator 1.0°/PLL 331.1°/Light 0.3° に、実機では
    前段トリム `HARDWARE_SUBCARRIER_PHASE_TRIM_DEG`(+84°)を加算。
    これにより位相トラッカーの実機需要が ±90° 境界から 0° 付近へ移り、
    セッション間の取得枝（L/R 極性）が安定する）
-5. L−R 帯の同期復調（DSB-SC、ゲイン 2.0）と 3 バンド LPF（I/Q 並列）
+5. L−R 帯の同期復調（DSB-SC、ゲイン 2.0）と 3 バンド LPF（I/Q 並列）。
+   **前置バンドパスなし** — 実信号の composite にサブキャリアを乗算する
+   と 23–53 kHz 帯がちょうど 0–15 kHz へシフトし（モノ帯は 23–53 kHz
+   へ、パイロット像は 19 kHz へ移り LPF 阻止域）、復調 + 15 kHz FIR は
+   **理想** BPF + 復調 + LPF と数学的に等価。実 Butterworth BPF の帯域
+   端特性（12–14 kHz の DSB 側波帯を削り HF セパレーションを崩壊させて
+   いた実測要因）が原理ごと除去される。mono/side/3 バンドの全 7 フィルタ
+   は同一タップ数（192 kHz で 321、群遅延 160 サンプル = 0.83 ms）の
+   線形位相 FIR（Kaiser β=9、遷移 3.5 kHz、阻止域 ~−100 dB、19 kHz で
+   実測 −102 dB）で、overlap-save（タップスペクトル事前計算）により
+   任意ブロック長でワンショット畳み込みと厳密一致
 6. I/Q 位相補正 — **ゲート付き4象限トラッカー**: 主軸推定
    `½·atan2(2·Cov, Var_I−Var_Q)` は ±90° 周期の曖昧性を持つため、
    (a) 共分散異方性 ≥ `STEREO_PHASE_ANISO_GATE`(0.2)、
    (b) side 電力 ≥ mono 電力 × `STEREO_PHASE_SIDE_GATE_DB`(-18 dB)、
    (c) side 電力 ≥ ノイズ推定 × `STEREO_PHASE_SIDE_OVER_NOISE_DB`
-   (24 dB — FM ノイズは f² スペクトルにより side 帯で mono 帯より
+   (26 dB — FM ノイズは f² スペクトルにより side 帯で mono 帯より
    強く、かつ帯域非対称性で異方的な**疑似軸**を成すため、pilot ノイズ
    帯からの予測値で本物の side 成分と弁別)の全条件を満たすブロック
    のみで、π 周期族のうち現追跡値に最も近い候補への差分で EMA を更新
@@ -237,6 +249,7 @@ float32 量子化により長時間セッションで劣化するため置換さ
 | クラス | 種別 | 備考 |
 |--------|------|------|
 | `LowpassFilter` | Butterworth LPF（SOS） | ストリーミング、状態保持、`reset()` |
+| `FIRFilter` | 線形位相 FIR（overlap-save） | mono/side フィルタバンク用。タップスペクトル事前計算、任意ブロック長でワンショットと厳密一致 |
 | `BandpassFilter` | Butterworth BPF（SOS） | 同上 |
 | `NotchFilter` | IIR ノッチ | 同上 |
 | `DeemphasisIIRFilter` | ディエンファシス IIR | Numba 最適化 |
@@ -386,11 +399,12 @@ IQ (1.024 MHz)
   → FM 復調 (arctan discriminator 既定 / PLL 選択可)
   → StatefulResampler 3:16 (Kaiser β=10) → composite (192 kHz)
   → ステレオ復調:
-      ├ モノ LPF (N=15, 15 kHz) + 遅延 18 サンプル
+      ├ モノ: 線形位相 FIR (321 taps, 15 kHz)
       ├ パイロット: 19 kHz ヘテロダイン + 複素 LPF (N=9) → 位相 θ
       ├ サブキャリア cos/sin(2θ + φ_offset)
-      ├ L−R BPF (N=15, 23–53 kHz) × サブキャリア × 2.0
-      ├ 3 バンド LPF (I/Q) → IQ 位相補正 (異方性ゲート付き4象限トラッカー)
+      ├ composite × サブキャリア × 2.0 (前置 BPF なし)
+      ├ 3 バンド線形位相 FIR (I/Q, モノと同一タップ数=同一群遅延)
+      ├ IQ 位相補正 (異方性ゲート付き4象限トラッカー)
       ├ 3 バンド整形 + 適応ブレンド + HF ブレンド上限
       └ マトリクス L=M+S, R=M−S
   → パイロットノッチ ×2 (19 kHz, Q=30)
@@ -407,7 +421,7 @@ IQ (250 kHz)
   → DC 除去
   → FM 復調 (arctan discriminator, 標準と同一)
   → StatefulResampler 96:125 → × 0.35 → composite (192 kHz)
-  → ステレオ復調 (標準と共通, order-1 フィルタ)
+  → ステレオ復調 (標準と共通の FIR バンク; パイロット LPF のみ order-1)
 ```
 
 ---
@@ -438,9 +452,9 @@ IQ (250 kHz)
 | 定数 | 値 | 説明 |
 |------|-----|------|
 | `IQ_LOWPASS_ORDER` / `IQ_LOWPASS_CUTOFF` | 5 / 200 kHz | IQ ローパス |
-| `MONO_LOWPASS_ORDER` / `_CUTOFF` | 15 / 15 kHz | モノ LPF（軽量は order 1） |
+| `MONO_LOWPASS_CUTOFF` | 15 kHz | モノ / L−R ベース LPF カットオフ |
 | `PILOT_BANDPASS_ORDER` | 9 | パイロット複素 LPF 次数（軽量は 1） |
-| `LR_BANDPASS_ORDER` / `LOW` / `HIGH` | 15 / 23k / 53k | L−R BPF（軽量は order 1） |
+| `STEREO_FIR_NTAPS` / `_TRANSITION_HZ` | 321 / 3.5 kHz | mono/side 線形位相 FIR バンク（タップ数は composite レート比例、全フィルタ共有） |
 | `DEEMPHASIS_TAU` | 50e-6 | ディエンファシス時定数 |
 | `PILOT_NOTCH_FREQ` / `_Q` | 19 kHz / 30 | パイロットノッチ |
 
@@ -452,11 +466,11 @@ IQ (250 kHz)
 | `STEREO_HF_BLEND_PILOT_SNR_DB_LO` / `_HI` | 15.0 / 35.0 | HF ブレンド上限の SNR ランプ |
 | `LR_HIGH_MAX_GAIN` / `LR_SUPER_HIGH_MAX_GAIN` | 1.00 / 1.00 | HF 減衰上限（既定は中立） |
 | `STEREO_PHASE_ANISO_GATE` | 0.2 | 位相トラッカー更新に要する共分散異方性（音楽 p5=0.55 / ノイズ p99=0.05 の間） |
-| `STEREO_SUBCARRIER_PHASE_OFFSET_DEG` | 316.0 | サブキャリア位相オフセット（discriminator、DSP固有値） |
+| `STEREO_SUBCARRIER_PHASE_OFFSET_DEG` | 1.0 | サブキャリア位相オフセット（discriminator、DSP固有値。FIR バンク + 前置 BPF 撤去で旧 316° の大半が不要となりほぼ 0 に） |
 | `HARDWARE_SUBCARRIER_PHASE_TRIM_DEG` | 84.0 | 実機前段（チューナ IF）の位相トリム。全変種の DSP 値に加算（合成経路は非適用）。実測: アンテナ2局+光伝送の全実録音が同一の ~±85-90° 需要を示し、マルチパスではなく前段特性と同定 |
-| `STEREO_SUBCARRIER_PHASE_OFFSET_DEG_PLL` | 285.0 | 同（PLL 選択時） |
-| `STEREO_SUBCARRIER_PHASE_OFFSET_DEG_LIGHT` | 297.4 | 同（軽量モード） |
-| `STEREO_MONO_DELAY_SAMPLES` | 18 | モノ遅延補償 |
+| `STEREO_SUBCARRIER_PHASE_OFFSET_DEG_PLL` | 331.1 | 同（PLL 選択時） |
+| `STEREO_SUBCARRIER_PHASE_OFFSET_DEG_LIGHT` | 0.3 | 同（軽量モード） |
+| `STEREO_MONO_DELAY_SAMPLES` | 0 | モノ遅延補償（FIR バンクの群遅延一致により不要） |
 
 ### 6.5 Side NR 設定
 

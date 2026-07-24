@@ -83,6 +83,22 @@ def test_composite_is_block_size_invariant():
     assert np.allclose(comp_blk, comp_one, atol=1e-5)
 
 
+def test_fir_bank_shares_one_group_delay_and_no_mono_delay():
+    """Every mono/side bank filter must have the identical tap count.
+
+    The stereo matrix subtracts the side from the mono path sample for
+    sample; the linear-phase bank guarantees alignment ONLY if all
+    seven filters share one group delay, in which case no mono delay
+    compensation may remain.
+    """
+    for d in (FMDemodulator(stereo=True), FMDemodulatorLight(stereo=True)):
+        bank = (d.lp_mono, d.lp_lr_base, d.lp_lr_base_q,
+                d.lp_lr_low, d.lp_lr_low_q, d.lp_lr_mid, d.lp_lr_mid_q)
+        sizes = {f.taps.size for f in bank}
+        assert len(sizes) == 1, sizes
+        assert d.mono_delay_samples == 0
+
+
 def test_discriminator_is_default_and_pll_selectable(monkeypatch):
     # Constructed demodulators carry the hardware phase trim on top of
     # each variant's DSP-intrinsic offset (synthetic paths override the
@@ -90,18 +106,21 @@ def test_discriminator_is_default_and_pll_selectable(monkeypatch):
     trim = dm.HARDWARE_SUBCARRIER_PHASE_TRIM_DEG
     d = FMDemodulator(stereo=True)
     assert d.use_pll_demod is False
-    assert abs(np.rad2deg(d.subcarrier_phase_offset_rad) - (316.0 + trim)) < 0.01
+    assert abs(np.rad2deg(d.subcarrier_phase_offset_rad)
+               - (dm.STEREO_SUBCARRIER_PHASE_OFFSET_DEG + trim)) < 0.01
 
     monkeypatch.setattr(dm, "MAIN_DEMOD_USE_PLL", True)
     d_pll = FMDemodulator(stereo=True)
     assert d_pll.use_pll_demod is True
-    assert abs(np.rad2deg(d_pll.subcarrier_phase_offset_rad) - (285.0 + trim)) < 0.01
+    assert abs(np.rad2deg(d_pll.subcarrier_phase_offset_rad)
+               - (dm.STEREO_SUBCARRIER_PHASE_OFFSET_DEG_PLL + trim)) < 0.01
 
 
 def test_light_demodulator_keeps_its_operating_point():
     d = FMDemodulatorLight(stereo=True)
     trim = dm.HARDWARE_SUBCARRIER_PHASE_TRIM_DEG
-    assert abs(np.rad2deg(d.subcarrier_phase_offset_rad) - (297.4 + trim)) < 0.01
+    assert abs(np.rad2deg(d.subcarrier_phase_offset_rad)
+               - (dm.STEREO_SUBCARRIER_PHASE_OFFSET_DEG_LIGHT + trim)) < 0.01
 
 
 def test_pll_mode_produces_finite_composite(rng, monkeypatch):

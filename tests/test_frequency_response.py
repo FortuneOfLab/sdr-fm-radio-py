@@ -36,9 +36,11 @@ def test_mono_path_deemphasis_and_lowpass():
     db = _db(resp["mono"], freqs, 1000.0)
     # 50 us de-emphasis: -3 dB near 3.2 kHz, so 3 kHz is a few dB down.
     assert -4.0 < _at(freqs, db, 3000) < -1.0
-    # 15 kHz lowpass edge: still within a few dB at 15 k, deep past 18 k.
-    assert _at(freqs, db, 16000) < -12.0
-    assert _at(freqs, db, 18000) < -25.0
+    # 15 kHz FIR lowpass: the passband is FLAT through 15 k (the old
+    # Butterworth was already -3 dB there), the 15->18.5 kHz transition
+    # has begun by 16 k, and 18 k is deep in the Kaiser stopband slope.
+    assert _at(freqs, db, 16000) < -10.5
+    assert _at(freqs, db, 18000) < -40.0
     # Pilot notch: 19 kHz must be crushed.
     assert _at(freqs, db, 19000) < -60.0
 
