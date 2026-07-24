@@ -63,8 +63,6 @@ PILOT_PLL_KI = 0.00008             # Pilot PLL integral gain (reduced jitter)
 IQ_LOWPASS_ORDER = 5                # IQ lowpass filter order
 IQ_LOWPASS_CUTOFF = 200e3           # IQ lowpass cutoff frequency (Hz)
 
-MONO_LOWPASS_ORDER = 15             # Mono lowpass filter order (standard)
-MONO_LOWPASS_ORDER_LIGHT = 1        # Mono lowpass filter order (light)
 MONO_LOWPASS_CUTOFF = 15000.0       # Mono/baseband lowpass cutoff (Hz)
 LR_BASE_LOWPASS_CUTOFF = 15000.0    # L-R baseband lowpass cutoff (Hz)
 LR_HIGH_SPLIT_CUTOFF = 7000.0       # L-R split frequency for high-band damping (Hz)
@@ -96,7 +94,7 @@ PILOT_NOISE_BAND1_HIGH = 17500.0    # Pilot SNR noise band 1 upper edge (Hz)
 PILOT_NOISE_BAND2_LOW = 20500.0     # Pilot SNR noise band 2 lower edge (Hz)
 PILOT_NOISE_BAND2_HIGH = 22000.0    # Pilot SNR noise band 2 upper edge (Hz)
 STEREO_PILOT_RESIDUAL_CENTER_HZ = 19000.0  # Center frequency used by residual pilot tracking
-STEREO_SUBCARRIER_PHASE_OFFSET_DEG = 316.0  # Fixed phase offset for 38k subcarrier generation
+STEREO_SUBCARRIER_PHASE_OFFSET_DEG = 1.0  # Fixed phase offset for 38k subcarrier generation
                                     # (standard demodulator).  History of the value:
                                     #   300.0  original tuning (PLL demod + real order-9
                                     #          pilot bandpass + FFT Hilbert; the bandpass
@@ -107,9 +105,16 @@ STEREO_SUBCARRIER_PHASE_OFFSET_DEG = 316.0  # Fixed phase offset for 38k subcarr
                                     #          closed loop had a -30.7 deg phase
                                     #          inconsistency between 19 kHz and 38 kHz
                                     #          which the discriminator does not
-                                    #          (285 + 30.7 = 315.7).  Synthetic sweep
-                                    #          confirms a broad optimum at 315-320 with
-                                    #          separation improving to ~26/33 dB.
+                                    #          (285 + 30.7 = 315.7)
+                                    #   1.0    linear-phase FIR bank + raw-composite
+                                    #          demod: the old value was almost entirely
+                                    #          compensating the removed 23-53k Butterworth
+                                    #          bandpass's group delay at 38 kHz.  With the
+                                    #          matched FIR bank the chain is intrinsically
+                                    #          phase-true; the synthetic sweep (hifi TX,
+                                    #          noiseless, corrector off, 0.1 deg steps)
+                                    #          peaks at 1.0 deg with 47.6 dB separation
+                                    #          at 1 kHz, flat within 0.1 dB of 0 deg.
 HARDWARE_SUBCARRIER_PHASE_TRIM_DEG = 84.0  # Front-end (tuner) phase trim added to every
                                     # variant's DSP-intrinsic subcarrier offset for real
                                     # hardware.  Discovery: ALL real captures - antenna
@@ -121,23 +126,30 @@ HARDWARE_SUBCARRIER_PHASE_TRIM_DEG = 84.0  # Front-end (tuner) phase trim added 
                                     # not multipath.  Sitting at the +-90 deg boundary
                                     # also made the acquisition branch flip between
                                     # sessions (the optical capture decoded L/R-swapped
-                                    # vs the antenna ones).  With this trim (316+84 =
-                                    # 40 deg effective) the tracker settles at 0 +- 4.3
-                                    # deg on all three captures, on the same branch as
-                                    # every historical antenna session (decode total
-                                    # ~39 deg, matching the listening-approved state).
-STEREO_SUBCARRIER_PHASE_OFFSET_DEG_PLL = 285.0  # Operating point when the legacy PLL main
+                                    # vs the antenna ones).  With the FIR bank's DSP
+                                    # offset of 1.0 deg the total applied is 1+84 =
+                                    # 85 deg; re-validated on the FIR chain: the
+                                    # tracker settles at med -1.1 (antenna 91.6),
+                                    # -3.0 (CATV 83.7) and -3.6 deg (optical 82.5),
+                                    # on the same branch as every historical antenna
+                                    # session.  The trim itself is a front-end
+                                    # property and is NOT retuned with DSP changes.
+STEREO_SUBCARRIER_PHASE_OFFSET_DEG_PLL = 331.1  # Operating point when the legacy PLL main
                                     # demod is selected (MAIN_DEMOD_USE_PLL = True): the
-                                    # PLL chain includes the -30.7 deg 19k/38k phase
-                                    # inconsistency, so it keeps the pre-discriminator
-                                    # value.  FMDemodulator picks the matching offset
+                                    # PLL chain carries its own 19k/38k phase
+                                    # inconsistency, so its optimum stays far from the
+                                    # discriminator's.  Re-swept for the FIR bank
+                                    # (was 285.0 with the IIR bank + 23-53k bandpass);
+                                    # the PLL chain itself caps separation at ~26 dB.
+                                    # FMDemodulator picks the matching offset
                                     # automatically based on MAIN_DEMOD_USE_PLL.
-STEREO_SUBCARRIER_PHASE_OFFSET_DEG_LIGHT = 297.4  # Same operating-point preservation for
-                                    # the light demodulator: its old pilot bandpass was
-                                    # order 1 with only -1.31 deg phase at 19 kHz
-                                    # (-2.62 deg at the subcarrier), so the old effective
-                                    # offset was 300 - 2.62 = 297.4 deg.
-STEREO_MONO_DELAY_SAMPLES = 18      # Delay mono path to match LR path group delay (at COMPOSITE_RATE)
+STEREO_SUBCARRIER_PHASE_OFFSET_DEG_LIGHT = 0.3  # Light demodulator operating point,
+                                    # re-swept for the FIR bank (was 297.4 with the
+                                    # order-1 IIR bank): like the standard variant it
+                                    # lands near 0 deg once the bandpass group delay is
+                                    # out of the chain; the light pilot path (order-1
+                                    # lowpass) caps separation at ~24 dB.
+STEREO_MONO_DELAY_SAMPLES = 0       # Mono-path delay compensation; 0 because the FIR bank's shared tap count matches mono/side group delays by construction
 STEREO_LR_SIDE_RATIO_CAP_ENABLE = False     # Enable limiting of |L-R|/|L+R| ratio for stability
 STEREO_LR_SIDE_RATIO_CAP_TARGET = 0.35     # Target upper bound of |L-R|/|L+R| before limiting
 STEREO_LR_SIDE_RATIO_CAP_MIN_GAIN = 0.35   # Lower bound of side-cap gain to avoid mono-collapse
@@ -187,7 +199,7 @@ STEREO_PHASE_ACQUIRE_BLOCKS = 6     # Consecutive informative blocks (~100 ms) r
                                     # a permanent L/R swap - with the probability of one
                                     # raw estimate wrapping, ~20% on the reference
                                     # station).
-STEREO_PHASE_SIDE_OVER_NOISE_DB = 24.0  # Minimum demodulated side power above the
+STEREO_PHASE_SIDE_OVER_NOISE_DB = 26.0  # Minimum demodulated side power above the
                                     # pilot-band noise estimate (dB) for a tracker
                                     # update.  FM discriminator noise rises as f^2, so
                                     # the side band's own noise sits ABOVE the mono band
@@ -195,15 +207,24 @@ STEREO_PHASE_SIDE_OVER_NOISE_DB = 24.0  # Minimum demodulated side power above t
                                     # is anisotropic (band asymmetry about 38 kHz plus
                                     # deterministic FM products), forming a stable
                                     # pseudo-axis at aniso ~0.5 that overlaps genuine
-                                    # content.  Measured through the real demod path:
-                                    # noise-only sits at med 22.1 (synthetic silence,
-                                    # CNR 35; p95 23.4), 16.5 (CNR 20), 4-11 dB
-                                    # (hardware); genuine stereo content p5 = 24.6
-                                    # (91.6 music).  24.0 blocks all noise regimes to
-                                    # the ~1% level - the residual trickle is mopped up
-                                    # by the confidence weighting and the gate-closed
-                                    # leak - while music tracks on its strong majority
-                                    # of blocks.
+                                    # content.  Recalibrated for the FIR bank (its flat
+                                    # passband passes ~0.5 dB more side-band noise than
+                                    # the old droopy Butterworth cascade, and without a
+                                    # gate margin the 20 s silence leak test wandered to
+                                    # the pseudo-axis instead of decaying home).
+                                    # Measured through the FIR demod path: noise-only
+                                    # med 22.6 / p95 23.9 / MAX 25.2 (synthetic silence,
+                                    # CNR 35), max 24.4 (CNR 20), max 23.5 (CNR 10);
+                                    # genuine stereo content (aniso > 0.6 blocks) p5 /
+                                    # med: 23.9 / 31.4 (antenna 91.6 music, pilot SNR
+                                    # 24.7), 26.0 / 36.5 (CATV 83.7 music), 27.2 med
+                                    # (optical 82.5).  26.0 sits 0.8 dB above the worst
+                                    # observed noise block - silence now decays purely -
+                                    # while music still updates on its strong majority
+                                    # of blocks; the blocked weak-station tail falls
+                                    # back to the hardware-trim prior of 0, which the
+                                    # real-capture check confirms (tracker med -1.1 to
+                                    # -3.6 deg on all three reference captures).
 STEREO_PHASE_NOISE_CONF_RAMP_DB = 6.0  # Confidence ramp above the side-over-noise
                                     # gate: an update's weight scales linearly from 0
                                     # at the gate to 1 at gate + this, multiplied with
@@ -232,10 +253,12 @@ STEREO_PHASE_LEAK_DEG_PER_SEC = 0.5 # Decay rate of the tracked angle toward 0 (
                                     # confident content returning.
 STEREO_IQ_PHASE_CORRECTION_ENABLE = True   # Enable I/Q rotation correction in LR demod
 
-LR_BANDPASS_ORDER = 15              # L-R bandpass filter order (standard)
-LR_BANDPASS_ORDER_LIGHT = 1         # L-R bandpass filter order (light)
-LR_BANDPASS_LOW = 23000.0           # L-R bandpass lower edge (Hz)
-LR_BANDPASS_HIGH = 53000.0          # L-R bandpass upper edge (Hz)
+# Linear-phase FIR mono/side filter bank (see BaseFMDemodulator).  One
+# shared tap count keeps every path's group delay identical; the L-R
+# path demodulates the raw composite (no pre-demod bandpass), so the
+# post-demod 15 kHz lowpass IS the side channel's band limit.
+STEREO_FIR_NTAPS = 321              # Bank FIR length at 192 kHz composite (group delay 160 samples / 0.83 ms)
+STEREO_FIR_TRANSITION_HZ = 3500.0   # Bank FIR transition width (15k passband edge -> ~-100 dB by 18.5k; pilot at 19k)
 STEREO_LR_DEMOD_GAIN = 2.0          # Gain compensation for DSB-SC synchronous demod
 STEREO_DIAG_ENABLE = False                  # Enable stereo demod diagnostics logging
 STEREO_DIAG_LOG_INTERVAL_BLOCKS = 120       # Log interval (composite blocks) for diagnostics
@@ -247,6 +270,20 @@ DC_OFFSET_ALPHA = 0.01              # DC offset smoothing coefficient
 # Audio output
 # --------------------------------------------------
 AUDIO_OUTPUT_RATE = 48000           # Audio output sample rate (Hz)
+# Final audio band limit: one linear-phase FIR applied IDENTICALLY to L
+# and R after the stereo matrix (identical filters cannot degrade
+# channel separation).  Needed because the raw-composite demod's
+# equivalence to an ideal bandpass holds in the 0-15 kHz target band
+# only: through the bank FIR's 15-18.5 kHz transition, out-of-band
+# composite (20.5-22 kHz and 54-56.5 kHz noise) maps to 16-18.5 kHz
+# near-audible side content (measured +22-25 dB vs the old IIR chain
+# in the 16-17.5 kHz band; side NR does not reach above 15 kHz).  The
+# sharp 15->16.5 kHz transition at the 48 kHz audio rate costs 1/4 the
+# taps of doing it at the composite rate and crushes the leak below
+# the old chain's floor.
+AUDIO_FINAL_LP_NTAPS = 183          # At 48 kHz (Kaiser beta 9, ~-90 dB); group delay 91 samples = 1.9 ms
+AUDIO_FINAL_LP_CUTOFF_HZ = 15000.0  # Passband edge (Hz)
+AUDIO_FINAL_LP_STOP_HZ = 16500.0    # Stopband edge (Hz)
 AUDIO_FRAMES_PER_BUFFER = 1024     # Frames per audio callback
 AUDIO_QUEUE_MAXSIZE = 50            # Max queued audio blocks
 AUDIO_CHANNELS = 2                  # Stereo output channels

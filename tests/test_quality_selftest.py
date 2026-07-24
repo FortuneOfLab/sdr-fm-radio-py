@@ -191,9 +191,9 @@ def test_synthetic_runner_uses_variant_dsp_offset(monkeypatch):
 
     Codex repro from the PR #24 review: with MAIN_DEMOD_USE_PLL=True
     the synthetic default was overwritten with the discriminator's
-    316 deg instead of the PLL chain's 285 deg, breaking the PLL A/B
-    semantics.  The default must be variant-aware and must never
-    include the hardware phase trim (synthetic IQ has no tuner).
+    offset instead of the PLL chain's, breaking the PLL A/B semantics.
+    The default must be variant-aware and must never include the
+    hardware phase trim (synthetic IQ has no tuner).
     """
     import fm_radio.demodulator as dmod
     import fm_radio.quality_selftest as qs
@@ -210,7 +210,14 @@ def test_synthetic_runner_uses_variant_dsp_offset(monkeypatch):
     monkeypatch.setattr(qs, "FMDemodulator", Spy)
     iq = np.exp(1j * 0.001 * np.arange(40_000)).astype(np.complex64)
 
-    for use_pll, expect in ((False, 316.0), (True, 285.0)):
+    from fm_radio.constants import (
+        STEREO_SUBCARRIER_PHASE_OFFSET_DEG,
+        STEREO_SUBCARRIER_PHASE_OFFSET_DEG_PLL,
+    )
+    for use_pll, expect in (
+        (False, STEREO_SUBCARRIER_PHASE_OFFSET_DEG),
+        (True, STEREO_SUBCARRIER_PHASE_OFFSET_DEG_PLL),
+    ):
         monkeypatch.setattr(dmod, "MAIN_DEMOD_USE_PLL", use_pll)
         captured.clear()
         qs._run_demod_from_iq(iq)

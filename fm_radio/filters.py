@@ -183,6 +183,87 @@ class BandpassFilter:
         self.zi = signal.sosfilt_zi(self.sos) * 0.0
 
 
+class FIRFilter:
+    """Streaming linear-phase FIR filter (overlap-save, exact).
+
+    General-purpose stateful FIR with ``reset()``; the streamed output
+    equals the one-shot ``lfilter(taps, 1, x)`` sample for sample for
+    arbitrary block sizes.  Used twice in the receiver:
+
+    - The stereo decoder's mono/side filter bank, where every filter
+      shares one tap LENGTH so all paths have the identical group
+      delay of (ntaps-1)/2 samples and the mono/side matrix alignment
+      is exact by construction (no per-filter delay compensation).
+    - The final audio band limit after the stereo matrix, applied with
+      IDENTICAL taps to the left and right channels.
+    """
+
+    def __init__(self, taps: np.ndarray) -> None:
+        self.taps: np.ndarray = np.asarray(taps, dtype=np.float64)
+        self._state: np.ndarray = np.zeros(self.taps.size - 1,
+                                           dtype=np.float64)
+        # Overlap-save with a PRECOMPUTED taps spectrum: fftconvolve
+        # would re-transform the taps on every block (measured 2x the
+        # bank cost).  nfft >= 2*ntaps keeps the per-transform overlap
+        # fraction small; >= 4096 covers the 16 ms composite block
+        # (3072 + ntaps-1 samples) in a single transform pair.
+        self._nfft: int = 1 << max(12, (2 * self.taps.size - 1).bit_length())
+        self._hop: int = self._nfft - (self.taps.size - 1)
+        self._taps_f: np.ndarray = np.fft.rfft(self.taps, self._nfft)
+
+    @classmethod
+    def lowpass(cls, ntaps: int, cutoff: float, sample_rate: float,
+                stop: float | None = None) -> "FIRFilter":
+        """Kaiser-window lowpass.  ``cutoff``..``stop`` is the
+        transition band (default stop = cutoff * 1.2)."""
+        if stop is None:
+            stop = cutoff * 1.2
+        taps = signal.firwin(
+            ntaps, 0.5 * (cutoff + stop), fs=sample_rate,
+            window=("kaiser", 9.0),
+        )
+        return cls(taps)
+
+    @property
+    def group_delay_samples(self) -> int:
+        return (self.taps.size - 1) // 2
+
+    def apply(self, data: np.ndarray) -> np.ndarray:
+        """Filter a streaming chunk, preserving state across calls.
+
+        Overlap-save: each transform sees the last ntaps-1 samples of
+        history plus up to ``_hop`` new samples; circular-convolution
+        aliasing only touches the first ntaps-1 outputs of a segment,
+        which are always discarded, so the streamed result is the
+        exact linear convolution for arbitrary block sizes.
+        """
+        x = np.asarray(data, dtype=np.float64)
+        m = self.taps.size - 1
+        ext = np.concatenate([self._state, x])
+        out = np.empty(x.size, dtype=np.float64)
+        pos = 0
+        while pos + m < ext.size:
+            seg = ext[pos:pos + self._nfft]
+            n_out = min(self._hop, ext.size - (pos + m))
+            y = np.fft.irfft(
+                np.fft.rfft(seg, self._nfft) * self._taps_f, self._nfft,
+            )
+            out[pos:pos + n_out] = y[m:m + n_out]
+            pos += n_out
+        # Copy, not a view: a view of ext would keep the WHOLE extended
+        # block (state + input) alive via .base until the next call - an
+        # arbitrarily large hidden allocation for large input blocks.
+        if m:
+            self._state = ext[-m:].copy()
+        else:
+            self._state = np.empty(0, dtype=np.float64)
+        return out
+
+    def reset(self) -> None:
+        """Clear the filter's running state."""
+        self._state = np.zeros(self.taps.size - 1, dtype=np.float64)
+
+
 class NotchFilter:
     """IIR notch (band-reject) filter (streaming using lfilter with state)."""
 

@@ -44,7 +44,7 @@ import scipy.signal as signal
 from fm_radio.interfaces import FMDemodulatorInterface
 from fm_radio.exceptions import DemodulationError
 from fm_radio.filters import (
-    LowpassFilter, BandpassFilter, NotchFilter, DeemphasisIIRFilter,
+    BandpassFilter, FIRFilter, NotchFilter, DeemphasisIIRFilter,
     StatefulResampler, SideNoiseReducer, StreamAligner,
 )
 from fm_radio.pll import PLL
@@ -53,7 +53,7 @@ from fm_radio.constants import (
     MAIN_DEMOD_USE_PLL,
     MAIN_PLL_KP, MAIN_PLL_KI, PILOT_PLL_KP, PILOT_PLL_KI,
     IQ_LOWPASS_ORDER, IQ_LOWPASS_CUTOFF,
-    MONO_LOWPASS_ORDER, MONO_LOWPASS_ORDER_LIGHT, MONO_LOWPASS_CUTOFF,
+    MONO_LOWPASS_CUTOFF,
     LR_BASE_LOWPASS_CUTOFF, LR_HIGH_SPLIT_CUTOFF, LR_HIGH_SUPER_SPLIT_CUTOFF,
     LR_HIGH_MIN_GAIN, LR_HIGH_MAX_GAIN,
     LR_SUPER_HIGH_MIN_GAIN, LR_SUPER_HIGH_MAX_GAIN,
@@ -76,8 +76,8 @@ from fm_radio.constants import (
     STEREO_IQ_PHASE_CORRECTION_ENABLE,
     PILOT_NOISE_BAND1_LOW, PILOT_NOISE_BAND1_HIGH,
     PILOT_NOISE_BAND2_LOW, PILOT_NOISE_BAND2_HIGH,
-    LR_BANDPASS_ORDER, LR_BANDPASS_ORDER_LIGHT,
-    LR_BANDPASS_LOW, LR_BANDPASS_HIGH,
+    STEREO_FIR_NTAPS, STEREO_FIR_TRANSITION_HZ,
+    AUDIO_FINAL_LP_NTAPS, AUDIO_FINAL_LP_CUTOFF_HZ, AUDIO_FINAL_LP_STOP_HZ,
     STEREO_LR_DEMOD_GAIN,
     STEREO_DIAG_ENABLE, STEREO_DIAG_LOG_INTERVAL_BLOCKS,
     DEEMPHASIS_TAU, DC_OFFSET_ALPHA,
@@ -103,8 +103,8 @@ class BaseFMDemodulator(FMDemodulatorInterface):
     """Base class for FM demodulators.
 
     Consolidates the shared logic of FMDemodulator and FMDemodulatorLight:
-      - Filter initialisation (mono lowpass, pilot bandpass, L-R bandpass,
-        de-emphasis) with configurable filter orders.
+      - Filter initialisation (linear-phase FIR mono/side bank, pilot
+        lowpass, de-emphasis).
       - Resampling ratio calculation (IQ -> composite, composite -> audio).
       - Stereo/mono demodulation from the composite signal.
       - DC offset tracking.
@@ -116,7 +116,7 @@ class BaseFMDemodulator(FMDemodulatorInterface):
 
     def __init__(self, iq_sample_rate: float, composite_rate: float,
                  final_audio_rate: float, stereo: bool,
-                 mono_order: int, pilot_order: int, lr_order: int,
+                 pilot_order: int,
                  logger_name: str,
                  subcarrier_phase_offset_deg: float = STEREO_SUBCARRIER_PHASE_OFFSET_DEG):
         self.logger = logging.getLogger(logger_name)
@@ -128,35 +128,37 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         # --- Pilot PLL (shared by both standard and light) ---
         self.pilot_pll = PLL(Kp=PILOT_PLL_KP, Ki=PILOT_PLL_KI, return_phase=True)
 
-        # --- Filters (order varies between standard and light) ---
-        self.lp_mono = LowpassFilter(
-            order=mono_order, cutoff=MONO_LOWPASS_CUTOFF,
-            sample_rate=self.composite_rate,
-        )
-        self.lp_lr_base = LowpassFilter(
-            order=mono_order, cutoff=LR_BASE_LOWPASS_CUTOFF,
-            sample_rate=self.composite_rate,
-        )
-        self.lp_lr_base_q = LowpassFilter(
-            order=mono_order, cutoff=LR_BASE_LOWPASS_CUTOFF,
-            sample_rate=self.composite_rate,
-        )
-        self.lp_lr_low = LowpassFilter(
-            order=mono_order, cutoff=LR_HIGH_SPLIT_CUTOFF,
-            sample_rate=self.composite_rate,
-        )
-        self.lp_lr_mid = LowpassFilter(
-            order=mono_order, cutoff=LR_HIGH_SUPER_SPLIT_CUTOFF,
-            sample_rate=self.composite_rate,
-        )
-        self.lp_lr_mid_q = LowpassFilter(
-            order=mono_order, cutoff=LR_HIGH_SUPER_SPLIT_CUTOFF,
-            sample_rate=self.composite_rate,
-        )
-        self.lp_lr_low_q = LowpassFilter(
-            order=mono_order, cutoff=LR_HIGH_SPLIT_CUTOFF,
-            sample_rate=self.composite_rate,
-        )
+        # --- Mono/side filter bank: linear-phase FIRs, identical length ---
+        # Every filter in this bank shares one tap count, so every path
+        # has the identical group delay of (ntaps-1)/2 samples and the
+        # mono/side matrix is sample- and phase-aligned by construction
+        # (the old IIR bank needed a hand-tuned 18-sample mono delay
+        # that was only exact near one frequency, and its nonlinear
+        # phase near the band edges was the dominant cause of the
+        # measured 12-14 kHz separation collapse).  Kaiser beta 9.0
+        # puts the stopband at ~-100 dB, so the 19 kHz pilot image
+        # after subcarrier demod is filtered to inaudibility by the
+        # 15 kHz lowpass itself (measured -102 dB at 19 kHz); composite
+        # content that maps into the 15-18.5 kHz FIR transition is
+        # handled by the final audio band limit (lp_audio_l/r).  The
+        # tap count scales with the composite rate to keep the
+        # transition width in Hz constant.
+        ntaps = int(round(STEREO_FIR_NTAPS * self.composite_rate / 192000.0))
+        ntaps = max(63, ntaps | 1)
+
+        def _bank_lowpass(cutoff: float) -> FIRFilter:
+            return FIRFilter.lowpass(
+                ntaps, cutoff, self.composite_rate,
+                stop=cutoff + STEREO_FIR_TRANSITION_HZ,
+            )
+
+        self.lp_mono = _bank_lowpass(MONO_LOWPASS_CUTOFF)
+        self.lp_lr_base = _bank_lowpass(LR_BASE_LOWPASS_CUTOFF)
+        self.lp_lr_base_q = _bank_lowpass(LR_BASE_LOWPASS_CUTOFF)
+        self.lp_lr_low = _bank_lowpass(LR_HIGH_SPLIT_CUTOFF)
+        self.lp_lr_low_q = _bank_lowpass(LR_HIGH_SPLIT_CUTOFF)
+        self.lp_lr_mid = _bank_lowpass(LR_HIGH_SUPER_SPLIT_CUTOFF)
+        self.lp_lr_mid_q = _bank_lowpass(LR_HIGH_SUPER_SPLIT_CUTOFF)
         # --- Analytic pilot extraction (heterodyne + lowpass) ---
         # The pilot is extracted by mixing the composite down by the
         # pilot centre frequency with a phase-continuous carrier, then
@@ -186,11 +188,6 @@ class BaseFMDemodulator(FMDemodulatorInterface):
             order=pilot_order, lowcut=PILOT_NOISE_BAND2_LOW,
             highcut=PILOT_NOISE_BAND2_HIGH, sample_rate=self.composite_rate,
         )
-        self.bp_lr = BandpassFilter(
-            order=lr_order, lowcut=LR_BANDPASS_LOW,
-            highcut=LR_BANDPASS_HIGH, sample_rate=self.composite_rate,
-        )
-
         # --- De-emphasis ---
         self.deemph_left = DeemphasisIIRFilter(
             sample_rate=self.final_audio_rate, tau=DEEMPHASIS_TAU,
@@ -297,6 +294,35 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         )
         self._audio_resampler_r = StatefulResampler(
             self._resample_up, self._resample_down,
+        )
+        # --- Final audio band limit (COMMON to L and R) ---
+        # The raw-composite demod is equivalent to an ideal bandpass in
+        # the 0-15 kHz target band only; through the bank FIR's
+        # 15-18.5 kHz transition, out-of-band composite (20.5-22 kHz /
+        # 54-56.5 kHz noise) maps to 16-18.5 kHz near-audible content
+        # (see AUDIO_FINAL_LP_* in constants).  One sharp linear-phase
+        # lowpass applied with IDENTICAL taps to both channels removes
+        # it without touching channel separation (any common filter
+        # cancels in the L/R ratio).  Mono operation advances both
+        # instances with the same input - mirroring the resampler
+        # pattern above - which keeps the LOCAL L/R chain matched
+        # across a mono <-> stereo switch: sample counts, output grid
+        # and final-LPF state.  This is deliberately NOT an end-to-end
+        # switch-continuity guarantee; the side NR chain
+        # (SideNoiseReducer, side_nr_mid_aligner) does not advance
+        # during mono operation, a pre-existing limitation shared with
+        # main and tracked separately.
+        audio_lp_ntaps = int(round(
+            AUDIO_FINAL_LP_NTAPS * self.final_audio_rate / 48000.0
+        ))
+        audio_lp_ntaps = max(63, audio_lp_ntaps | 1)
+        self.lp_audio_l = FIRFilter.lowpass(
+            audio_lp_ntaps, AUDIO_FINAL_LP_CUTOFF_HZ, self.final_audio_rate,
+            stop=AUDIO_FINAL_LP_STOP_HZ,
+        )
+        self.lp_audio_r = FIRFilter.lowpass(
+            audio_lp_ntaps, AUDIO_FINAL_LP_CUTOFF_HZ, self.final_audio_rate,
+            stop=AUDIO_FINAL_LP_STOP_HZ,
         )
 
     # ------------------------------------------------------------------
@@ -441,9 +467,19 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         sub_phase = 2.0 * pilot_phase + self.subcarrier_phase_offset_rad
         subcarrier_i = np.cos(sub_phase)
         subcarrier_q = np.sin(sub_phase)
-        lr_band = self.bp_lr.apply(composite)
-        lr_demod_i = lr_band * subcarrier_i * STEREO_LR_DEMOD_GAIN
-        lr_demod_q = lr_band * subcarrier_q * STEREO_LR_DEMOD_GAIN
+        # Demodulate the RAW composite - no 23-53 kHz bandpass.  With
+        # an ideal 38 kHz synchronous mixer and within the 0-15 kHz
+        # TARGET band, multiplying by cos/sin(2*pilot) + the 15 kHz
+        # lowpass equals an ideal 23-53 kHz bandpass + demod + lowpass
+        # (mono audio maps to 23-53k, the pilot image to 19k - both in
+        # the lowpass stopband) - while a real bandpass's band edges
+        # were measurably chewing the 12-14 kHz DSB sidebands.  The
+        # equivalence does NOT extend through the FIR's 15-18.5 kHz
+        # transition: out-of-band composite (20.5-22k / 54-56.5k) maps
+        # to 16-18.5 kHz there and is suppressed by the final audio
+        # band limit (lp_audio_l/r, see ctor).
+        lr_demod_i = composite * subcarrier_i * STEREO_LR_DEMOD_GAIN
+        lr_demod_q = composite * subcarrier_q * STEREO_LR_DEMOD_GAIN
         lr_base_full_i = self.lp_lr_base.apply(lr_demod_i)
         lr_base_full_q = self.lp_lr_base_q.apply(lr_demod_q)
         cov_iq = float(np.mean(lr_base_full_i * lr_base_full_q))
@@ -478,14 +514,16 @@ class BaseFMDemodulator(FMDemodulatorInterface):
             # asymmetric about 38 kHz), presenting a stable pseudo-axis
             # at aniso ~0.5 that overlaps genuine content.  The pilot
             # noise-band estimate predicts the side-band noise via a
-            # chain constant.  Measured through THIS path (see the
-            # constant's comment for the full table): noise-only med
-            # 22.1 dB (synthetic silence, CNR 35) / 4-11 dB (hardware),
-            # genuine stereo content p5 = 24.6 dB, so requiring
-            # STEREO_PHASE_SIDE_OVER_NOISE_DB (24 dB) blocks the
-            # pseudo-axis in both regimes while passing real content;
-            # the thin margins are compensated by the weight ramp
-            # below (barely-passing blocks are nearly weightless).
+            # chain constant.  Measured through the FIR-bank path
+            # (see the constant's comment for the full table):
+            # noise-only med 22.6 / max 25.2 dB (synthetic silence,
+            # CNR 35), genuine stereo content med 31-37 dB on the
+            # reference captures, so requiring
+            # STEREO_PHASE_SIDE_OVER_NOISE_DB (26 dB) blocks every
+            # observed noise block while music updates on its strong
+            # majority; the margins are further compensated by the
+            # weight ramp below (barely-passing blocks are nearly
+            # weightless).
             noise_ref = noise_power * (
                 10.0 ** (STEREO_PHASE_SIDE_OVER_NOISE_DB / 10.0)
             )
@@ -703,7 +741,7 @@ class BaseFMDemodulator(FMDemodulatorInterface):
                     snr_db, self.blend_factor, pilot_power, noise_power,
                     phase_jitter,
                     self.pilot_jitter_ema,
-                    float(np.sqrt(np.mean(lr_band ** 2) + 1e-12)),
+                    float(np.sqrt(np.mean(lr_base_full ** 2) + 1e-12)),
                     float(np.sqrt(np.mean(lr_baseband ** 2) + 1e-12)),
                     float(np.rad2deg(self.stereo_phase_err_ema)),
                     self.stereo_phase_aniso,
@@ -728,6 +766,9 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         right_48 = self._audio_resampler_r.process(
             right_channel.astype(np.float32),
         )
+        # Final band limit, identical taps on both channels (see ctor).
+        left_48 = self.lp_audio_l.apply(left_48).astype(np.float32)
+        right_48 = self.lp_audio_r.apply(right_48).astype(np.float32)
         left_48 = self.deemph_left.process(left_48)
         right_48 = self.deemph_right.process(right_48)
 
@@ -767,6 +808,9 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         # block would return mismatched L/R lengths (breaking the
         # mid/side recombination downstream).
         right_48 = self._audio_resampler_r.process(mono_f32)
+        # Final band limit; both instances advance for the same reason.
+        mono_48 = self.lp_audio_l.apply(mono_48).astype(np.float32)
+        right_48 = self.lp_audio_r.apply(right_48).astype(np.float32)
         mono_48 = self.deemph_left.process(mono_48)
         self.deemph_right.process(right_48)
         return mono_48, mono_48
@@ -809,9 +853,9 @@ class BaseFMDemodulator(FMDemodulatorInterface):
             self.lp_lr_low, self.lp_lr_low_q,
             self.lp_lr_mid, self.lp_lr_mid_q,
             self.bp_pilot_noise_1, self.bp_pilot_noise_2,
-            self.bp_lr,
             self.notch_pilot_l, self.notch_pilot_l2,
             self.notch_pilot_r, self.notch_pilot_r2,
+            self.lp_audio_l, self.lp_audio_r,
             self.deemph_left, self.deemph_right,
         ):
             filt.reset()
@@ -850,9 +894,7 @@ class FMDemodulator(BaseFMDemodulator):
             composite_rate=composite_rate,
             final_audio_rate=final_audio_rate,
             stereo=stereo,
-            mono_order=MONO_LOWPASS_ORDER,
             pilot_order=PILOT_BANDPASS_ORDER,
-            lr_order=LR_BANDPASS_ORDER,
             logger_name='fm_receiver.FMDemodulator',
             # The subcarrier operating point depends on the main demod:
             # the PLL chain carries a -30.7 deg 19k/38k phase
@@ -974,9 +1016,7 @@ class FMDemodulatorLight(BaseFMDemodulator):
             composite_rate=composite_rate,
             final_audio_rate=final_audio_rate,
             stereo=stereo,
-            mono_order=MONO_LOWPASS_ORDER_LIGHT,
             pilot_order=PILOT_BANDPASS_ORDER_LIGHT,
-            lr_order=LR_BANDPASS_ORDER_LIGHT,
             logger_name='fm_receiver.FMDemodulatorLight',
             # The light demodulator's old pilot bandpass (order 1) had a
             # different static phase than the standard order-9 one, so its

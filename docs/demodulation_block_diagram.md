@@ -24,19 +24,19 @@ flowchart TD
     %% ============================================================
     %% Stage 2: Stereo Demodulation (at 192 kHz)
     %% ============================================================
-    COMP --> MONO_LPF["Mono LPF\nButterworth N=15\nfc = 15 kHz"]
+    COMP --> MONO_LPF["Mono FIR LPF\nlinear phase, 321 taps\nfc = 15 kHz"]
     COMP --> PILOT_HET["Pilot Heterodyne\nmix down by 19 kHz\n(phase-continuous carrier)"]
-    COMP --> LR_BPF["L−R BPF\nButterworth N=15\n23 – 53 kHz"]
+    COMP --> LR_DEMOD_IN["Raw composite\n(no pre-demod bandpass:\ndemod + 15 kHz FIR ≡ ideal BPF\nwithin the 0–15 kHz target band;\ntransition-band images removed\nby the final audio LPF)"]
     COMP --> NB1["Noise Band 1 BPF\n16 – 17.5 kHz"]
     COMP --> NB2["Noise Band 2 BPF\n20.5 – 22 kHz"]
 
     %% --- Mono path ---
-    MONO_LPF --> DELAY["Mono Delay\n(18 samples)"]
+    MONO_LPF --> DELAY["(no mono delay:\nFIR bank group delays match)"]
 
     %% --- Pilot path (analytic, no Hilbert) ---
     PILOT_HET --> PILOT_LP["Pilot Complex LPF\nButterworth N=9, SOS + carried state\nfc = 1 kHz (half old BPF width)"]
     PILOT_LP --> PHASE_EST["Pilot Phase\n(residual PLL + mix phase)\nθ, and residual for SNR"]
-    PHASE_EST --> SC_GEN["Subcarrier Generation\nI = cos(2θ + φ_offset)\nQ = sin(2θ + φ_offset)\nφ_offset = 316° (disc) / 285° (PLL)"]
+    PHASE_EST --> SC_GEN["Subcarrier Generation\nI = cos(2θ + φ_offset)\nQ = sin(2θ + φ_offset)\nφ_offset = 1.0° (disc) / 331.1° (PLL)"]
 
     %% --- Pilot SNR ---
     PILOT_LP --> SNR_CALC["Pilot SNR\n2·mean(|residual|²) vs noise bands"]
@@ -46,18 +46,19 @@ flowchart TD
     SNR_CALC --> HFBLEND["HF Blend Ceiling ramp\nSNR 15–35 dB → MAX_GAIN…1.0\n(neutral by default: MAX_GAIN=1.0)"]
 
     %% --- L−R synchronous demodulation ---
-    LR_BPF --> MUL_I["× I_sub × 2.0\n(DSB-SC demod)"]
-    LR_BPF --> MUL_Q["× Q_sub × 2.0"]
+    LR_DEMOD_IN --> MUL_I["× I_sub × 2.0\n(DSB-SC demod)"]
+    LR_DEMOD_IN --> MUL_Q["× Q_sub × 2.0"]
     SC_GEN --> MUL_I
     SC_GEN --> MUL_Q
 
     %% --- 3-band LPF (I/Q parallel) ---
-    MUL_I --> LPF15I["LPF 15 kHz (I)"]
-    MUL_Q --> LPF15Q["LPF 15 kHz (Q)"]
-    MUL_I --> LPF12I["LPF 12 kHz (I)"]
-    MUL_Q --> LPF12Q["LPF 12 kHz (Q)"]
-    MUL_I --> LPF7I["LPF 7 kHz (I)"]
-    MUL_Q --> LPF7Q["LPF 7 kHz (Q)"]
+    MUL_I --> LPF15I["FIR LPF 15 kHz (I)"]
+    MUL_Q --> LPF15Q["FIR LPF 15 kHz (Q)"]
+    MUL_I --> LPF12I["FIR LPF 12 kHz (I)"]
+    MUL_Q --> LPF12Q["FIR LPF 12 kHz (Q)"]
+    MUL_I --> LPF7I["FIR LPF 7 kHz (I)"]
+    MUL_Q --> LPF7Q["FIR LPF 7 kHz (Q)"]
+    %% all seven bank FIRs (incl. mono) share one tap count -> equal group delay
 
     %% --- IQ Phase Correction ---
     LPF15I --> IQ_CORR["IQ Phase Correction\n4-quadrant tracker\nφ_pa = ½ atan2(2·Cov, Var_I − Var_Q)\nanisotropy-gated, branch by continuity\nout = I·cos(φ) + Q·sin(φ)"]
@@ -89,8 +90,11 @@ flowchart TD
     NOTCH_L --> RS2_L["StatefulResampler 1:4\n192 kHz → 48 kHz (Left)\n(grid-aligned)"]
     NOTCH_R --> RS2_R["StatefulResampler 1:4\n192 kHz → 48 kHz (Right)\n(grid-aligned)"]
 
-    RS2_L --> DEEMP_L["De-emphasis IIR\nτ = 50 μs"]
-    RS2_R --> DEEMP_R["De-emphasis IIR\nτ = 50 μs"]
+    RS2_L --> ALPF_L["Final Audio FIR LPF (Left)\n183 taps @48 kHz, 15 k / 16.5 k\nIDENTICAL taps L and R"]
+    RS2_R --> ALPF_R["Final Audio FIR LPF (Right)\n183 taps @48 kHz, 15 k / 16.5 k\nIDENTICAL taps L and R"]
+
+    ALPF_L --> DEEMP_L["De-emphasis IIR\nτ = 50 μs"]
+    ALPF_R --> DEEMP_R["De-emphasis IIR\nτ = 50 μs"]
 
     %% --- Side-channel noise reduction (mid/side) ---
     DEEMP_L --> SIDENR["Side NR (DD-Wiener STFT)\nmid=(L+R)/2 untouched\nside=(L−R)/2 denoised\nframe 1024 / hop 256 / 1.5–15 kHz"]
@@ -111,8 +115,8 @@ flowchart TD
     class IQ,DC,IQLPF,DEMOD,RS1 iq
     class COMP comp
     class PILOT_HET,PILOT_LP,PHASE_EST,SC_GEN,NB1,NB2,SNR_CALC,BLEND,HFBLEND pilot
-    class LR_BPF,MUL_I,MUL_Q,LPF15I,LPF15Q,LPF12I,LPF12Q,LPF7I,LPF7Q,IQ_CORR,SPLIT,SHAPE,SIDE_CAP lr
-    class MONO_LPF,DELAY,MATRIX,NOTCH_L,NOTCH_R,RS2_L,RS2_R,DEEMP_L,DEEMP_R,SIDENR,OUT_L,OUT_R audio
+    class LR_DEMOD_IN,MUL_I,MUL_Q,LPF15I,LPF15Q,LPF12I,LPF12Q,LPF7I,LPF7Q,IQ_CORR,SPLIT,SHAPE,SIDE_CAP lr
+    class MONO_LPF,DELAY,MATRIX,NOTCH_L,NOTCH_R,RS2_L,RS2_R,ALPF_L,ALPF_R,DEEMP_L,DEEMP_R,SIDENR,OUT_L,OUT_R audio
 ```
 
 ## FMDemodulatorLight (Arctan Discriminator)
@@ -126,7 +130,7 @@ flowchart TD
     RS1 --> SCALE["× 0.35\n(LIGHT_COMPOSITE_SCALE)"]
     SCALE --> COMP["Composite Signal\n192 kHz"]
 
-    COMP --> STEREO["Stereo Demodulation\n(same as Standard, order-1 filters)"]
+    COMP --> STEREO["Stereo Demodulation\n(same as Standard incl. FIR bank;\nonly the pilot LPF is order-1)"]
 
     classDef iq fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
     classDef comp fill:#fff3e0,stroke:#e65100,stroke-width:2px
@@ -157,6 +161,7 @@ one-shot `resample_poly`.
 | Pilot PLL (residual) | `PLL` (return_phase=True) | `pll.py` |
 | Resampling (all ratios) | `StatefulResampler` (grid-aligned) | `filters.py` |
 | Lowpass / Bandpass / Notch | `LowpassFilter`, `BandpassFilter`, `NotchFilter` | `filters.py` |
+| Linear-phase FIR bank | `FIRFilter` (overlap-save) | `filters.py` |
 | De-emphasis | `DeemphasisIIRFilter` (Numba) | `filters.py` |
 | Side-channel NR | `SideNoiseReducer` (DD-Wiener STFT) | `filters.py` |
 | Stereo Demod Pipeline | `BaseFMDemodulator._demodulate_stereo()` | `demodulator.py` |

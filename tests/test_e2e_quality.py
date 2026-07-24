@@ -110,6 +110,27 @@ def test_blend_snr_ramp_protects_weak_signal():
 
 
 @pytest.mark.slow
+def test_hf_separation_maintained_at_14k():
+    """The FIR bank's headline win must not regress.
+
+    Canonical sweep conditions (hifi TX, constant modulation,
+    noiseless): the IIR chain measured -3.7 dB at 14 kHz, the FIR
+    bank 34.0/35.2 dB.  Floor at 30 dB keeps the structural
+    improvement while tolerating measurement scatter; it also guards
+    the final audio lowpass (a band limit encroaching below 15 kHz
+    would show up here first).
+    """
+    np.random.seed(0)
+    m = evaluate_quality(
+        duration_s=4.0, tone_hz=14_000.0, cnr_db=None,
+        pilot_amp=0.10, freq_dev_hz=75_000.0, warmup_s=0.8,
+        hifi_tx=True, hifi_constant_mod=True,
+    )
+    assert m.separation_l_to_r_db > 30.0, m
+    assert m.separation_r_to_l_db > 30.0, m
+
+
+@pytest.mark.slow
 def test_phase_corrector_recovers_large_static_error():
     """A -75 deg static subcarrier error must be FULLY corrected.
 
@@ -128,8 +149,12 @@ def test_phase_corrector_recovers_large_static_error():
     The floors keep the pre-tracker discrimination (fail at clamp 60)
     and the tracker clears them by ~4-7 dB.
     """
+    from fm_radio.constants import STEREO_SUBCARRIER_PHASE_OFFSET_DEG
     np.random.seed(0)
-    m = evaluate_quality(**BASE_KWARGS, subcarrier_phase_offset_deg=241.0)
+    m = evaluate_quality(
+        **BASE_KWARGS,
+        subcarrier_phase_offset_deg=STEREO_SUBCARRIER_PHASE_OFFSET_DEG - 75.0,
+    )
     assert m.separation_l_to_r_db > 23.5, m
     assert m.separation_r_to_l_db > 26.5, m
 
@@ -181,8 +206,12 @@ def test_phase_tracker_acquires_correct_branch_at_boundary():
     The doubled-angle circular mean over the acquisition streak is
     invariant to the wrap, so separation stays high and positive.
     """
+    from fm_radio.constants import STEREO_SUBCARRIER_PHASE_OFFSET_DEG
     np.random.seed(0)
-    m = evaluate_quality(**BASE_KWARGS, subcarrier_phase_offset_deg=228.0)
+    m = evaluate_quality(
+        **BASE_KWARGS,
+        subcarrier_phase_offset_deg=STEREO_SUBCARRIER_PHASE_OFFSET_DEG - 88.0,
+    )
     assert m.separation_l_to_r_db > 24.0, m
     assert m.separation_r_to_l_db > 24.0, m
 
@@ -199,7 +228,10 @@ def test_phase_tracker_branch_guard_blocks_then_admits():
     the confidence EMA builds (first ~dozen blocks) the guard must park
     the angle at the boundary; once confidence exceeds
     STEREO_PHASE_BRANCH_CONF it must ADMIT the crossing and converge
-    past +100 deg - exercising both the block and the admit paths.
+    past +95 deg toward the true axis near +99 (the phase-true FIR
+    chain maps a -100 deg TX dsb phase to ~+99; seeds 0-4 measure
+    final ~99.0 / max ~101.1) - exercising both the block and the
+    admit paths.
     """
     from fm_radio.demodulator import FMDemodulator
     from fm_radio.quality_selftest import _build_mpx, _fm_modulate_iq
@@ -212,15 +244,18 @@ def test_phase_tracker_branch_guard_blocks_then_admits():
     tone = 0.25 * np.sin(2 * np.pi * 1000.0 * t)
     left = tone.astype(np.float32)
     right = (-tone).astype(np.float32)
-    # dsb phase -45 deg maps to a ~+50 deg corrector demand in this
-    # chain (see the leak test); -100 deg lands the axis near +110.
+    # dsb phase -45 deg maps to a ~+45 deg corrector demand in the
+    # phase-true FIR chain (see the leak test); -100 deg lands the
+    # axis just past +95.
     mpx = _build_mpx(left, right, fs, int(COMPOSITE_RATE), 0.10, True,
                      50e-6, -100.0)
     np.random.seed(0)
     iq = _fm_modulate_iq(mpx, int(COMPOSITE_RATE), int(SDR_SAMPLE_RATE),
                          75_000.0, 35.0)
     d = FMDemodulator(stereo=True)
-    d.subcarrier_phase_offset_rad = np.deg2rad(316.0)  # DSP value
+    from fm_radio.constants import STEREO_SUBCARRIER_PHASE_OFFSET_DEG
+    d.subcarrier_phase_offset_rad = np.deg2rad(
+        STEREO_SUBCARRIER_PHASE_OFFSET_DEG)  # DSP value
     d._phase_acquired = True
     d.stereo_phase_err_ema = float(np.deg2rad(89.9))
     d._phase_conf = 0.0
@@ -234,7 +269,7 @@ def test_phase_tracker_branch_guard_blocks_then_admits():
     emas = np.array(emas)
     parked = np.sum((emas > 89.0) & (emas <= 90.05))
     assert parked >= 5, f"guard never parked at the boundary ({parked})"
-    assert emas[-1] > 100.0, emas[-1]  # admitted after confidence built
+    assert emas[-1] > 95.0, emas[-1]  # admitted after confidence built
 
 
 @pytest.mark.slow
@@ -271,7 +306,9 @@ def test_phase_tracker_leaks_home_when_uninformed():
     iq = _fm_modulate_iq(mpx, int(COMPOSITE_RATE), int(SDR_SAMPLE_RATE),
                          75_000.0, 35.0)
     d = FMDemodulator(stereo=True)
-    d.subcarrier_phase_offset_rad = np.deg2rad(316.0)  # DSP value (no tuner)
+    from fm_radio.constants import STEREO_SUBCARRIER_PHASE_OFFSET_DEG
+    d.subcarrier_phase_offset_rad = np.deg2rad(
+        STEREO_SUBCARRIER_PHASE_OFFSET_DEG)  # DSP value (no tuner)
     emas = []
     for i in range(0, iq.size, SDR_BLOCK_SIZE):
         c = iq[i:i + SDR_BLOCK_SIZE]

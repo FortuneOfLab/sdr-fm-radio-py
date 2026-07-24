@@ -83,6 +83,65 @@ def test_composite_is_block_size_invariant():
     assert np.allclose(comp_blk, comp_one, atol=1e-5)
 
 
+def test_fir_bank_shares_one_group_delay_and_no_mono_delay():
+    """Every mono/side bank filter must have the identical tap count.
+
+    The stereo matrix subtracts the side from the mono path sample for
+    sample; the linear-phase bank guarantees alignment ONLY if all
+    seven filters share one group delay, in which case no mono delay
+    compensation may remain.
+    """
+    for d in (FMDemodulator(stereo=True), FMDemodulatorLight(stereo=True)):
+        bank = (d.lp_mono, d.lp_lr_base, d.lp_lr_base_q,
+                d.lp_lr_low, d.lp_lr_low_q, d.lp_lr_mid, d.lp_lr_mid_q)
+        sizes = {f.taps.size for f in bank}
+        assert len(sizes) == 1, sizes
+        assert d.mono_delay_samples == 0
+
+
+def test_final_audio_lowpass_is_common_and_reconverges_after_stereo(rng):
+    """LOCAL L/R chain contract of the final band limit.
+
+    Guarantees only: identical taps on L and R (so the filter cannot
+    degrade channel separation), and that mono operation advances the
+    audio resamplers, final LPFs and de-emphasis with the same input,
+    so L/R sample counts, output grid and filter states re-match after
+    genuinely divergent stereo history.
+
+    This test deliberately does NOT cover end-to-end mono <-> stereo
+    switch continuity (silent switching / time continuity): the side
+    NR chain (SideNoiseReducer, side_nr_mid_aligner) does not advance
+    during mono operation - a pre-existing limitation shared with main
+    and tracked separately.
+    """
+    d = FMDemodulator(stereo=True)
+    assert np.array_equal(d.lp_audio_l.taps, d.lp_audio_r.taps)
+    assert d.lp_audio_l is not d.lp_audio_r
+
+    # 1) Stereo blocks with random composite: the side path is nonzero,
+    #    so L != R and the per-channel states genuinely diverge.
+    for _ in range(4):
+        d.demodulate(rng.standard_normal(3072).astype(np.float64) * 0.1)
+    assert not np.array_equal(d.lp_audio_l._state, d.lp_audio_r._state)
+
+    # 2) Switch to mono, 3) process one standard block (3072 samples).
+    d.stereo = False
+    left, right = d.demodulate(rng.standard_normal(3072).astype(np.float64) * 0.1)
+
+    # 4) L/R chains re-matched.
+    rl, rr = d._audio_resampler_l, d._audio_resampler_r
+    assert rl._in_total == rr._in_total
+    assert rl._out_emitted == rr._out_emitted
+    assert np.array_equal(rl._prev_tail, rr._prev_tail)
+    assert np.array_equal(d.lp_audio_l._state, d.lp_audio_r._state)
+    assert np.linalg.norm(d.lp_audio_l._state) > 0
+    # De-emphasis is IIR: the divergent-history residue decays as
+    # pole^n (~1e-100 after one 768-sample block) - tolerance covers it.
+    assert abs(d.deemph_left.prev_input - d.deemph_right.prev_input) < 1e-12
+    assert abs(d.deemph_left.prev_output - d.deemph_right.prev_output) < 1e-12
+    assert np.array_equal(left, right)
+
+
 def test_discriminator_is_default_and_pll_selectable(monkeypatch):
     # Constructed demodulators carry the hardware phase trim on top of
     # each variant's DSP-intrinsic offset (synthetic paths override the
@@ -90,18 +149,21 @@ def test_discriminator_is_default_and_pll_selectable(monkeypatch):
     trim = dm.HARDWARE_SUBCARRIER_PHASE_TRIM_DEG
     d = FMDemodulator(stereo=True)
     assert d.use_pll_demod is False
-    assert abs(np.rad2deg(d.subcarrier_phase_offset_rad) - (316.0 + trim)) < 0.01
+    assert abs(np.rad2deg(d.subcarrier_phase_offset_rad)
+               - (dm.STEREO_SUBCARRIER_PHASE_OFFSET_DEG + trim)) < 0.01
 
     monkeypatch.setattr(dm, "MAIN_DEMOD_USE_PLL", True)
     d_pll = FMDemodulator(stereo=True)
     assert d_pll.use_pll_demod is True
-    assert abs(np.rad2deg(d_pll.subcarrier_phase_offset_rad) - (285.0 + trim)) < 0.01
+    assert abs(np.rad2deg(d_pll.subcarrier_phase_offset_rad)
+               - (dm.STEREO_SUBCARRIER_PHASE_OFFSET_DEG_PLL + trim)) < 0.01
 
 
 def test_light_demodulator_keeps_its_operating_point():
     d = FMDemodulatorLight(stereo=True)
     trim = dm.HARDWARE_SUBCARRIER_PHASE_TRIM_DEG
-    assert abs(np.rad2deg(d.subcarrier_phase_offset_rad) - (297.4 + trim)) < 0.01
+    assert abs(np.rad2deg(d.subcarrier_phase_offset_rad)
+               - (dm.STEREO_SUBCARRIER_PHASE_OFFSET_DEG_LIGHT + trim)) < 0.01
 
 
 def test_pll_mode_produces_finite_composite(rng, monkeypatch):

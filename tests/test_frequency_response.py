@@ -36,9 +36,11 @@ def test_mono_path_deemphasis_and_lowpass():
     db = _db(resp["mono"], freqs, 1000.0)
     # 50 us de-emphasis: -3 dB near 3.2 kHz, so 3 kHz is a few dB down.
     assert -4.0 < _at(freqs, db, 3000) < -1.0
-    # 15 kHz lowpass edge: still within a few dB at 15 k, deep past 18 k.
-    assert _at(freqs, db, 16000) < -12.0
-    assert _at(freqs, db, 18000) < -25.0
+    # 15 kHz FIR lowpass: the passband is FLAT through 15 k (the old
+    # Butterworth was already -3 dB there), the 15->18.5 kHz transition
+    # has begun by 16 k, and 18 k is deep in the Kaiser stopband slope.
+    assert _at(freqs, db, 16000) < -10.5
+    assert _at(freqs, db, 18000) < -40.0
     # Pilot notch: 19 kHz must be crushed.
     assert _at(freqs, db, 19000) < -60.0
 
@@ -70,6 +72,100 @@ def test_preemphasis_roundtrip_is_flat():
     )
     db = _db(resp["mono"], freqs, 1000.0)
     assert np.max(np.abs(db)) < 0.5, db
+
+
+def _run_composite_direct(mpx: np.ndarray, fs_audio: int = 48_000):
+    """Feed a synthetic composite straight into the stereo demod.
+
+    Silences the demodulator's construction logging for the duration
+    of the call only: the previous process-wide ``logging.disable``
+    level is restored in a ``finally`` so this helper cannot leak a
+    global CRITICAL filter into later tests.
+    """
+    import logging
+    from fm_radio.demodulator import FMDemodulator
+    prev_disable = logging.root.manager.disable
+    logging.disable(logging.CRITICAL)
+    try:
+        d = FMDemodulator(stereo=True)
+        d.force_blend_factor = 1.0
+        d.subcarrier_phase_offset_rad = 0.0
+        ls, rs = [], []
+        for i in range(0, mpx.size - 3071, 3072):
+            l, r = d.demodulate(mpx[i:i + 3072])
+            ls.append(l)
+            rs.append(r)
+        left = np.concatenate(ls).astype(np.float64)
+        right = np.concatenate(rs).astype(np.float64)
+        n0 = int(1.5 * fs_audio)
+        return left[n0:], right[n0:]
+    finally:
+        logging.disable(prev_disable)
+
+
+def test_composite_direct_helper_restores_logging_disable_level():
+    """The helper must not leak its CRITICAL filter process-wide."""
+    import logging
+    prev = logging.root.manager.disable
+    _run_composite_direct(np.zeros(3072, dtype=np.float64))
+    assert logging.root.manager.disable == prev
+
+
+def _tone_power_dbfs(x: np.ndarray, f0: float, fs: int = 48_000,
+                     bw: float = 60.0) -> float:
+    win = np.hanning(x.size)
+    sp = np.abs(np.fft.rfft(x * win)) ** 2
+    fr = np.fft.rfftfreq(x.size, 1.0 / fs)
+    m = (fr > f0 - bw) & (fr < f0 + bw)
+    return float(10 * np.log10(
+        sp[m].sum() / (win.sum() / 2) ** 2 * 2 + 1e-30
+    ))
+
+
+@pytest.mark.slow
+def test_out_of_band_composite_never_reaches_audio():
+    """Composite 20.5-22 k / 54-56.5 k content must not reach the audio.
+
+    The raw-composite demod's ideal-bandpass equivalence holds in the
+    0-15 kHz target band only: through the bank FIR's 15-18.5 kHz
+    transition, composite tones at 38 -/+ 17 kHz (21 k and 55 k - the
+    codex-identified leak regions) demodulate to 17 kHz side content.
+    The final common audio lowpass must crush them (measured
+    -130 dBFS for a 0.2-amplitude composite tone).
+    """
+    fs_c = 192_000
+    n = int(3.0 * fs_c)
+    t = np.arange(n) / fs_c
+    pilot = 0.1 * np.cos(2 * np.pi * 19_000.0 * t)
+    for fc in (21_000.0, 55_000.0):
+        mpx = pilot + 0.2 * np.cos(2 * np.pi * fc * t)
+        left, right = _run_composite_direct(mpx)
+        side = 0.5 * (left - right)
+        leak = _tone_power_dbfs(side, 17_000.0)
+        assert leak < -90.0, (fc, leak)
+
+
+@pytest.mark.slow
+def test_side_response_above_15k_is_suppressed_at_full_blend():
+    """Direct side response at 16/17 kHz vs the 14 kHz reference.
+
+    16 kHz sits at the start of the final lowpass transition (measured
+    -17.8 dB rel 14 k), 17 kHz is deep in its stopband (measured
+    -107.9 dB rel 14 k).  Guards the audio band limit end to end at
+    fixed blend = 1.
+    """
+    fs_c = 192_000
+    n = int(3.0 * fs_c)
+    t = np.arange(n) / fs_c
+    pilot = 0.1 * np.cos(2 * np.pi * 19_000.0 * t)
+    levels = {}
+    for fa in (14_000.0, 16_000.0, 17_000.0):
+        lmr = 0.45 * np.sin(2 * np.pi * fa * t)
+        mpx = pilot + lmr * np.cos(2 * np.pi * 38_000.0 * t)
+        left, right = _run_composite_direct(mpx)
+        levels[fa] = _tone_power_dbfs(0.5 * (left - right), fa)
+    assert levels[16_000.0] - levels[14_000.0] < -12.0, levels
+    assert levels[17_000.0] - levels[14_000.0] < -60.0, levels
 
 
 @pytest.mark.slow
