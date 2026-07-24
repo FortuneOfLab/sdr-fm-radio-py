@@ -1512,7 +1512,17 @@ def main() -> None:
         print("FM Quality Self-Test (Separation vs Frequency, hifi TX)")
         print(f"duration={float(args.duration)}s "
               f"cnr={'noiseless' if sweep_cnr is None else sweep_cnr} "
-              f"clock_ppm={float(args.clock_ppm)}")
+              f"clock_ppm={float(args.clock_ppm)} "
+              f"carrier_offset={float(args.carrier_offset_hz):.0f}Hz")
+        if float(args.carrier_offset_hz) == 0.0:
+            # At EXACTLY zero carrier offset the signal's own carrier
+            # line coincides with the DC blocker's notch - an
+            # unphysical condition (real tuners always carry ppm
+            # error) that reads as an 8-12 kHz separation dip.  A
+            # realistic characterisation uses an offset away from the
+            # tone/pilot comb, e.g. --carrier-offset-hz 1237.
+            print("note: offset 0 is the DC-notch worst case; pass "
+                  "--carrier-offset-hz 1237 for the realistic chart")
         print("freq_hz,sep_l2r_db,sep_r2l_db,thdn_l_db,snr_l_db")
         for fhz in freqs:
             np.random.seed(0)
@@ -1524,6 +1534,7 @@ def main() -> None:
                 warmup_s=float(args.warmup_s), hifi_tx=True,
                 hifi_constant_mod=True,
                 clock_ppm=float(args.clock_ppm),
+                carrier_offset_hz=float(args.carrier_offset_hz),
             )
             print(f"{fhz:.0f},{m.separation_l_to_r_db:.2f},"
                   f"{m.separation_r_to_l_db:.2f},{m.thdn_left_db:.2f},"

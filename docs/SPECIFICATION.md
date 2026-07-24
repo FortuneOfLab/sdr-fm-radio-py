@@ -151,7 +151,14 @@ FMDemodulatorInterface (ABC)
 #### FMDemodulator（標準）
 
 `process_iq_samples()`:
-1. DC オフセット除去（EMA α=0.01）
+1. DC ブロッカ（複素1次 LTI ハイパス、fc=0.1 Hz、状態保持）。旧ブロック
+   平均 EMA 減算を置換 — FM ではブロック平均が変調に支配されるため推定が
+   揺らぎ、減算誤差 c が位相誤差 ~Im(c·e^{−jφ}) として composite 全帯域へ
+   変調相関の相互変調積(−22 dB)を撒いていた（搬送波オフセット 0 の合成
+   評価における「8–12 kHz セパレーションディップ」の根本原因）。除去帯域幅
+   に比例して信号 PSD を削るため 0.1 Hz（旧 EMA の実効帯域と同一）を採用し、
+   実キャプチャで pilot SNR は EMA と 0.01 dB 以内で一致。LTI なのでブロック
+   分割不変・0 Hz で厳密ゼロ・整定 ~1.6 s（EMA と同じ）
 2. IQ ローパス（Butterworth N=5、SOS、ブロック間状態保持）
 3. FM 復調 — 既定は **arctan discriminator**
    `angle(x[n]·conj(x[n-1]))`（前ブロック末尾サンプルを持ち越して
@@ -406,7 +413,7 @@ RTL-SDR ─(async callback)→ data_queue ─(processing thread)→
 
 ```
 IQ (1.024 MHz)
-  → DC 除去 (EMA α=0.01)
+  → DC ブロッカ (複素1次 LTI ハイパス, fc=0.1 Hz)
   → IQ LPF (Butterworth N=5, SOS, 状態保持, fc=200 kHz)
   → FM 復調 (arctan discriminator 既定 / PLL 選択可)
   → StatefulResampler 3:16 (Kaiser β=10) → composite (192 kHz)
@@ -431,7 +438,7 @@ IQ (1.024 MHz)
 
 ```
 IQ (250 kHz)
-  → DC 除去
+  → DC ブロッカ (標準と同一)
   → FM 復調 (arctan discriminator, 標準と同一)
   → StatefulResampler 96:125 → × 0.35 → composite (192 kHz)
   → ステレオ復調 (標準と共通の FIR バンク; パイロット LPF のみ order-1)

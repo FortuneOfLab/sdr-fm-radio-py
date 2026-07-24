@@ -65,15 +65,13 @@ def test_composite_is_block_size_invariant():
     n = SDR_BLOCK_SIZE * 4
     x = _fm_iq(n)
 
-    # Disable the DC-offset EMA for the comparison: it updates once per
-    # process_iq_samples call by design, so one-shot and block-wise runs
-    # legitimately compute different DC corrections.
+    # The DC blocker is a stateful LTI filter, so - unlike the old
+    # per-block EMA - it is exactly block-size invariant and stays
+    # ACTIVE for this comparison.
     d_one = FMDemodulator(stereo=True)
-    d_one.dc_alpha = 0.0
     comp_one = d_one.process_iq_samples(x)
 
     d_blk = FMDemodulator(stereo=True)
-    d_blk.dc_alpha = 0.0
     comp_blk = np.concatenate([
         d_blk.process_iq_samples(x[i:i + SDR_BLOCK_SIZE])
         for i in range(0, n, SDR_BLOCK_SIZE)
@@ -81,6 +79,30 @@ def test_composite_is_block_size_invariant():
 
     assert comp_blk.size == comp_one.size
     assert np.allclose(comp_blk, comp_one, atol=1e-5)
+
+
+def test_dc_blocker_removes_static_dc():
+    """The blocker must null a static LO-leak DC.
+
+    Structural: the numerator [1, -1] gives an EXACT zero at 0 Hz.
+    Behavioural: a pure DC input through the demodulator's own
+    _remove_dc decays exponentially (tau ~1.6 s at the 0.1 Hz
+    cutoff, matching the old EMA's settle) and is gone - not merely
+    attenuated - after several time constants.  Streamed in blocks to
+    exercise the carried state.
+    """
+    d = FMDemodulator(stereo=True)
+    sos = d._dc_sos
+    assert sos[0, 0] + sos[0, 1] == 0.0  # exact null at DC
+
+    dc = np.complex64(0.05 + 0.03j)
+    block = np.full(SDR_BLOCK_SIZE, dc, dtype=np.complex64)
+    n_blocks = int(12.0 * 1.024e6 / SDR_BLOCK_SIZE)  # ~7.5 tau
+    last = None
+    for _ in range(n_blocks):
+        last = d._remove_dc(block)
+    residual = float(np.mean(np.abs(last)))
+    assert residual < 1e-3 * abs(dc), residual
 
 
 def test_fir_bank_shares_one_group_delay_and_no_mono_delay():
@@ -310,7 +332,6 @@ def test_light_demod_immune_to_accumulated_phase():
     t = np.arange(n) / fs
     x = np.exp(1j * 2 * np.pi * 50e3 * t).astype(np.complex64)
     d = FMDemodulatorLight(stereo=False)
-    d.dc_alpha = 0.0
     comp = np.concatenate([
         d.process_iq_samples(x[i:i + 16384]) for i in range(0, n, 16384)
     ])
@@ -335,11 +356,9 @@ def test_light_composite_is_block_size_invariant():
     x = np.exp(1j * np.cumsum(mpx)).astype(np.complex64)
 
     d_one = FMDemodulatorLight(stereo=True)
-    d_one.dc_alpha = 0.0
     comp_one = d_one.process_iq_samples(x)
 
     d_blk = FMDemodulatorLight(stereo=True)
-    d_blk.dc_alpha = 0.0
     comp_blk = np.concatenate([
         d_blk.process_iq_samples(x[i:i + n_block])
         for i in range(0, n, n_block)
