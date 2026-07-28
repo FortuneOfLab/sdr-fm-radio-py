@@ -486,12 +486,14 @@ class SideNoiseReducer:
         self.in_buf: np.ndarray = np.zeros(0, dtype=np.float32)
         # Leading in_buf samples of NON-adaptive origin (fed with
         # adapt=False).  Any STFT frame that still contains one of
-        # them is processed as unity OLA without touching the model:
-        # the first frame after a mono -> stereo switch would
-        # otherwise be almost entirely mono-era silence (measured
-        # in_buf 1014 of frame 1024) and, on an untrained reducer,
-        # would INITIALISE the noise floor from that silence
-        # (floor -93 dB, NR pinned at unity for ~12 s).
+        # them must not touch the LEARNED model: a trained reducer
+        # keeps applying its frozen floor (freeze mode), an untrained
+        # one falls back to unity (no model to apply, and no
+        # initialisation) - the first frame after a mono -> stereo
+        # switch would otherwise be almost entirely mono-era silence
+        # (measured in_buf 1014 of frame 1024) and would INITIALISE
+        # the noise floor from that silence (floor -93 dB, NR pinned
+        # at unity for ~12 s).
         self._nonadapt_pending: int = 0
         self.synth_overlap: np.ndarray = np.zeros(
             self.frame - self.hop, dtype=np.float32,
@@ -570,10 +572,12 @@ class SideNoiseReducer:
             frame = self.in_buf[:n]
             self.in_buf = self.in_buf[h:]
             # Sample-provenance rule: a frame that contains even ONE
-            # non-adaptive sample must not touch the model.  The
-            # counter tracks how many LEADING in_buf samples came from
-            # adapt=False calls; each consumed hop retires h of them,
-            # so adaptation resumes exactly at the first frame whose
+            # non-adaptive sample must not update (or initialise) the
+            # LEARNED floor - it is still filtered normally against
+            # the frozen model when one exists.  The counter tracks
+            # how many LEADING in_buf samples came from adapt=False
+            # calls; each consumed hop retires h of them, so
+            # adaptation resumes exactly at the first frame whose
             # window is fully adaptive-origin (with in_buf up to
             # frame-1 = 1023 residual samples and hop 256, switch-era
             # samples span up to ~4 hops).

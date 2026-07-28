@@ -443,9 +443,10 @@ SIDE_NR_TONE_PROTECT_MED_BINS = 33  # Median window (bins) for the tonal-protect
 # amplitude - a pre-existing light characteristic, so the gate must
 # open BELOW that saturation or light would never train.  ON = 0.25
 # clears light's 0.31 ceiling with margin while the untrained
-# initialisation error at forced blend 0.25 measures -14.8 dB vs the
-# blend-1 steady floor (-25.0 dB) and heals at the 6 dB/s upward leak
-# in ~2.5 s; for light, whose blend STAYS at ~0.31, the floor learned
+# initialisation error at forced blend 0.25 measures -17.3 dB
+# (floor -42.3 vs the blend-1 steady -25.0 dB; 3 s synthetic stereo,
+# broadband side noise 0.02) and heals at the 6 dB/s upward leak in
+# ~2.9 s; for light, whose blend STAYS at ~0.31, the floor learned
 # there matches the side it actually processes, so no healing is
 # needed at all.  OFF = 0.15 keeps a hysteresis band wider than the
 # blend EMA's block-to-block jitter (flap-tested) and still closes

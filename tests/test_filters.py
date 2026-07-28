@@ -280,10 +280,13 @@ def test_side_nr_passthrough_is_exact(rng):
     assert np.allclose(y[lat:lat + m], x[lat:lat + m], atol=1e-5)
 
 
-def test_side_nr_adapt_false_is_exact_passthrough(rng):
-    """adapt=False must be a unity-gain OLA passthrough from stream
-    start, independent of block sizes (same contract as the
-    alpha_floor=1 case, but with NO FFT and NO model updates)."""
+def test_side_nr_untrained_freeze_is_exact_passthrough(rng):
+    """UNTRAINED freeze (adapt=False, floor None) must be a unity-gain
+    OLA passthrough from stream start, independent of block sizes:
+    with no learned model there is nothing to apply, and nothing may
+    be initialised.  (A TRAINED reducer in freeze mode keeps applying
+    its frozen model instead - see
+    test_side_nr_freeze_mode_keeps_suppressing.)"""
     nr = SideNoiseReducer(sample_rate=48000, frame=1024, hop=256)
     n = 48000
     x = rng.standard_normal(n).astype(np.float32) * 0.3
