@@ -517,7 +517,23 @@ class SideNoiseReducer:
         self.prev_gain = None
         self.prev_gamma = None
 
-    def process(self, x: np.ndarray) -> np.ndarray:
+    def process(self, x: np.ndarray, adapt: bool = True) -> np.ndarray:
+        """Denoise a streaming chunk.
+
+        ``adapt=False`` advances ONLY the temporal machinery - input
+        buffer, STFT/OLA timeline and output emission schedule - as an
+        EXACT unity-gain passthrough, leaving the spectral adaptation
+        state (``power_smooth``, ``noise_floor``, ``prev_gain``,
+        ``prev_gamma``) untouched.  The mono demodulation path uses
+        this (issue #29 review): mono streams an artificial
+        side ~ 0, and the minimum-statistics tracker would collapse
+        the noise floor within seconds (measured -35 dB after 1 s,
+        -144 dB after 4 s, -289 dB after 8 s of mono), pinning the NR
+        at unity gain for 30-50 s after stereo re-entry because
+        recovery is bounded by SIDE_NR_NOISE_DECAY_DB_PER_SEC.
+        Freezing the model preserves the learned floor across mono
+        stretches while the latency and mid alignment stay exact.
+        """
         x = np.asarray(x, dtype=np.float32)
         if x.size == 0:
             return x
@@ -529,6 +545,25 @@ class SideNoiseReducer:
             self.in_buf = self.in_buf[h:]
 
             windowed = frame * self.window
+            if not adapt:
+                # Unity gain: irfft(rfft(w)) * window == w * window,
+                # so the FFT round-trip is skipped entirely.  Frames
+                # straddling a mode switch (residual real side in the
+                # buffer) pass un-denoised for those ~2 frames, which
+                # keeps the flush smooth without teaching the model
+                # anything about the artificial silence.
+                out_frame = windowed * self.window
+                out_hop = (
+                    self.synth_overlap[:h] + out_frame[:h]
+                ) / self.cola_norm
+                new_overlap = np.zeros(n - h, dtype=np.float32)
+                n_carry = max(0, n - 2 * h)
+                if n_carry > 0:
+                    new_overlap[:n_carry] = self.synth_overlap[h:h + n_carry]
+                new_overlap += out_frame[h:n]
+                self.synth_overlap = new_overlap
+                out_chunks.append(out_hop)
+                continue
             spec = np.fft.rfft(windowed)
             power = spec.real * spec.real + spec.imag * spec.imag
 

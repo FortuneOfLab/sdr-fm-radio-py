@@ -264,9 +264,14 @@ stereo・mono 両経路で共有され（`_apply_side_nr`。モノでは side=(L
 `_reset_stereo_side_state` が stereo 専用状態（L−R FIR バンク、パイロット
 ヘテロダイン/PLL、ノイズ帯 BPF、blend/トラッカーの取得状態）を初期同調と
 同じ再取得semanticsでクリアし、復帰 block 0 から stale side なし（最悪
-条件 blend 強制 1 で実測 4e-4、適応 blend では ~5e-5）。長いモノ区間中は
-NR のノイズ床が無音 side に向けて減衰するため、復帰後数秒は NR が
-定常より弱め（`SIDE_NR_NOISE_DECAY_DB_PER_SEC` で有界）— 無害な方向。
+条件 blend 強制 1 で実測 4e-4、適応 blend では ~5e-5）。モノ動作中の NR は
+`adapt=False`（時間機構のみ前進する厳密パススルー）で駆動され、
+スペクトル適応状態（noise floor / power_smooth / DD state）は凍結される —
+人工的な side≈0 に最小統計を適応させると床が数秒で崩壊し
+（実測: モノ 4 秒で −144 dB）、復帰後 30–50 秒 NR が実質無効になるため。
+凍結によりモノ区間の長さに関係なく学習済みモデルが保存され、復帰直後から
+NR が有効。残渣は切替を跨ぐ ~2 フレームの床ディップのみ（power smoothing
+EMA で有界、上方リークで 1 秒以内に回復）。
 
 ### 3.4 音声出力（audio_output.py）
 

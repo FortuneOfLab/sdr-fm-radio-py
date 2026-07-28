@@ -271,6 +271,82 @@ def test_mono_stereo_switches_are_continuous():
     assert n_st == n_mo
 
 
+@pytest.mark.parametrize("cls", [FMDemodulator, FMDemodulatorLight])
+def test_mono_and_stereo_share_emission_schedule(cls):
+    """Per-block audio emission must be identical in mono and stereo.
+
+    Mode-independent output latency (issue #29): for 3072-sample
+    composite blocks the expected schedule is [0, 512, 768, 768, ...]
+    with the shared NR tail priming, for BOTH variants and BOTH
+    modes.  Compared per block, not just in total.
+    """
+    fs_c = 192_000
+    n_blk = 3072
+    t = np.arange(n_blk * 8) / fs_c
+    comp = (0.3 * np.sin(2 * np.pi * 1000.0 * t)
+            + 0.1 * np.cos(2 * np.pi * 19_000.0 * t))
+    d_st = cls(stereo=True)
+    d_st.subcarrier_phase_offset_rad = 0.0
+    d_mo = cls(stereo=False)
+    sched_st = [d_st.demodulate(comp[i:i + n_blk])[0].size
+                for i in range(0, comp.size, n_blk)]
+    sched_mo = [d_mo.demodulate(comp[i:i + n_blk])[0].size
+                for i in range(0, comp.size, n_blk)]
+    assert sched_st == sched_mo, (sched_st, sched_mo)
+    assert sched_st[:3] == [0, 512, 768], sched_st
+    assert all(s == 768 for s in sched_st[2:]), sched_st
+
+
+def test_mode_transition_flag_edge_cases(rng):
+    """_reset_stereo_side_state runs exactly when stereo processing
+    resumes after ACTUAL mono processing - once per transition, not
+    after reset(), and not on attribute toggles without intervening
+    mono demodulation."""
+    calls = []
+
+    def make(stereo):
+        dm = FMDemodulator(stereo=stereo)
+        orig = dm._reset_stereo_side_state
+
+        def spy():
+            calls.append(1)
+            orig()
+        dm._reset_stereo_side_state = spy
+        return dm
+
+    comp = rng.standard_normal(3072) * 0.1
+
+    # constructed mono -> mono blocks -> stereo: re-acquire exactly once
+    dm = make(stereo=False)
+    dm.demodulate(comp)
+    dm.demodulate(comp)
+    dm.stereo = True
+    calls.clear()
+    dm.demodulate(comp)
+    assert calls == [1]
+    dm.demodulate(comp)
+    assert calls == [1]
+
+    # mono -> reset() -> stereo: reset cleared everything, no re-acquire
+    dm2 = make(stereo=True)
+    dm2.stereo = False
+    dm2.demodulate(comp)
+    dm2.reset()
+    dm2.stereo = True
+    calls.clear()
+    dm2.demodulate(comp)
+    assert calls == []
+
+    # attribute toggling with no mono demodulation in between
+    dm3 = make(stereo=True)
+    dm3.demodulate(comp)
+    dm3.stereo = False
+    dm3.stereo = True
+    calls.clear()
+    dm3.demodulate(comp)
+    assert calls == []
+
+
 def test_discriminator_is_default_and_pll_selectable(monkeypatch):
     # Constructed demodulators carry the hardware phase trim on top of
     # each variant's DSP-intrinsic offset (synthetic paths override the
@@ -376,7 +452,9 @@ def test_mono_audio_is_block_size_invariant():
     """The composite->audio path must be stateful end to end (B1).
 
     The mono path (mono lowpass -> notches -> audio decimation ->
-    de-emphasis) contains no per-call adaptive state, so block-wise
+    de-emphasis -> shared NR tail) contains only block-invariant
+    streaming state (stateful filters plus the NR's temporal STFT/OLA
+    machinery, which runs adapt-frozen in mono), so block-wise
     processing must match one-shot processing sample-for-sample.  The
     pre-B1 stateless per-block resample_poly failed this with zero-pad
     edge transients at every 16 ms block boundary.

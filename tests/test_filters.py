@@ -280,6 +280,77 @@ def test_side_nr_passthrough_is_exact(rng):
     assert np.allclose(y[lat:lat + m], x[lat:lat + m], atol=1e-5)
 
 
+def test_side_nr_adapt_false_is_exact_passthrough(rng):
+    """adapt=False must be a unity-gain OLA passthrough from stream
+    start, independent of block sizes (same contract as the
+    alpha_floor=1 case, but with NO FFT and NO model updates)."""
+    nr = SideNoiseReducer(sample_rate=48000, frame=1024, hop=256)
+    n = 48000
+    x = rng.standard_normal(n).astype(np.float32) * 0.3
+    out = []
+    i = 0
+    while i < n:
+        step = int(rng.integers(50, 500))
+        y = nr.process(x[i:i + step], adapt=False)
+        if y.size:
+            out.append(y)
+        i += step
+    y = np.concatenate(out)
+    lat = nr.latency_samples
+    m = y.size - 2 * lat
+    assert m > 0
+    assert np.allclose(y[lat:lat + m], x[lat:lat + m], atol=1e-5)
+    # no model was ever created
+    assert nr.noise_floor is None
+    assert nr.power_smooth is None
+
+
+def test_side_nr_adapt_false_freezes_model_and_advances_time(rng):
+    """Long mono (adapt=False silence) must not collapse the NR model.
+
+    Codex P1 on PR #31: feeding the mono path's artificial side = 0
+    through the ADAPTING tracker collapsed the minimum-statistics
+    floor (measured -35 dB after 1 s, -144 dB after 4 s, -289 dB
+    after 8 s of mono) and, because recovery is bounded by
+    SIDE_NR_NOISE_DECAY_DB_PER_SEC, pinned the NR at unity gain for
+    30-50 s after stereo re-entry.  With adapt=False the spectral
+    model must stay BIT-identical across 8 s of silence while the
+    output timeline advances, and post-re-entry suppression must
+    match a continuously-adapting control immediately.
+    """
+    fs = 48000
+    noise = (rng.standard_normal(4 * fs) * 0.01).astype(np.float32)
+    nr = SideNoiseReducer(sample_rate=fs, frame=1024, hop=256)
+    nr.process(noise)                        # learn the floor
+    floor = nr.noise_floor.copy()
+    psm = nr.power_smooth.copy()
+    pg = nr.prev_gain.copy()
+    pgm = nr.prev_gamma.copy()
+
+    n_zero = 8 * fs
+    out_z = nr.process(np.zeros(n_zero, dtype=np.float32), adapt=False)
+    assert abs(out_z.size - n_zero) <= nr.frame      # timeline advanced
+    assert np.array_equal(nr.noise_floor, floor)     # model bit-frozen
+    assert np.array_equal(nr.power_smooth, psm)
+    assert np.array_equal(nr.prev_gain, pg)
+    assert np.array_equal(nr.prev_gamma, pgm)
+
+    # re-entry: suppression in the first second matches the control
+    x2 = (rng.standard_normal(fs) * 0.01).astype(np.float32)
+    y2 = nr.process(x2)
+    ctrl = SideNoiseReducer(sample_rate=fs, frame=1024, hop=256)
+    ctrl.process(noise)
+    y2c = ctrl.process(x2)
+
+    def rms(v):
+        return float(np.sqrt(np.mean(v[-fs // 2:] ** 2)))
+
+    sup = 20 * np.log10(rms(y2) / rms(x2) + 1e-15)
+    sup_ctrl = 20 * np.log10(rms(y2c) / rms(x2) + 1e-15)
+    assert sup < -2.0, sup                   # NR active immediately
+    assert abs(sup - sup_ctrl) < 1.0, (sup, sup_ctrl)
+
+
 def test_side_nr_reduces_stationary_noise(rng):
     fs = 48000
     nr = SideNoiseReducer(

@@ -870,8 +870,8 @@ class BaseFMDemodulator(FMDemodulatorInterface):
 
         return self._apply_side_nr(left_48, right_48)
 
-    def _apply_side_nr(self, left_48: np.ndarray,
-                       right_48: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    def _apply_side_nr(self, left_48: np.ndarray, right_48: np.ndarray,
+                       adapt: bool = True) -> tuple[np.ndarray, np.ndarray]:
         """Shared mid/side NR tail for BOTH the stereo and mono paths.
 
         Routing the mono path through the identical tail (issue #29)
@@ -891,16 +891,24 @@ class BaseFMDemodulator(FMDemodulatorInterface):
           tail in both paths the latency is mode-independent and the
           output timeline is continuous across switches.
 
-        During long mono stretches the NR's minimum-statistics floor
-        adapts toward the silent side; on stereo re-entry it re-learns
-        the floor within seconds (bounded by
-        SIDE_NR_NOISE_DECAY_DB_PER_SEC), during which the NR briefly
-        attenuates less than steady state - a benign direction.
+        The mono path passes ``adapt=False``: the NR's temporal
+        machinery (input buffer, STFT/OLA, emission schedule) keeps
+        advancing as an exact passthrough, but its spectral model
+        (noise floor, smoothed power, DD state) is FROZEN - adapting
+        minimum statistics to the artificial side ~ 0 would collapse
+        the floor within seconds and leave the NR pinned at unity
+        gain for 30-50 s after re-entry (see
+        SideNoiseReducer.process).  The learned model from the last
+        stereo stretch therefore survives any length of mono and the
+        NR is effective immediately on re-entry; the only residual is
+        a ~2-frame floor dip from transition frames that mix silence
+        with content, bounded by the power-smoothing EMA and healed
+        by the upward leak within a second.
         """
         if self.side_nr_enabled:
             mid = (0.5 * (left_48 + right_48)).astype(np.float32)
             side = (0.5 * (left_48 - right_48)).astype(np.float32)
-            side_clean = self.side_nr.process(side)
+            side_clean = self.side_nr.process(side, adapt=adapt)
             mid_aligned = self.side_nr_mid_aligner.feed_and_take(
                 mid, side_clean.size,
             )
@@ -926,10 +934,16 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         """
         self._prev_demod_was_mono = True
         mono = self.lp_mono.apply(composite)
-        mono = self.notch_pilot_l.apply(mono)
-        mono = self.notch_pilot_l2.apply(mono)
-        mono_f32 = mono.astype(np.float32)
-        mono_48 = self._audio_resampler_l.process(mono_f32)
+        mono_l = self.notch_pilot_l.apply(mono)
+        mono_l = self.notch_pilot_l2.apply(mono_l)
+        # The right-channel notches advance with the same input too:
+        # the full L/R audio chain stays in lockstep during mono, so a
+        # switch back to stereo resumes with matched notch states as
+        # well (their outputs converge bit-identically within ~0.5 ms
+        # - the Q=30 notch's own settling time).
+        mono_r = self.notch_pilot_r.apply(mono)
+        mono_r = self.notch_pilot_r2.apply(mono_r)
+        mono_48 = self._audio_resampler_l.process(mono_l.astype(np.float32))
         # Advance the right-channel chain in lockstep with the same
         # input: the stereo path uses both resamplers, so if only the
         # left one progressed during mono operation, a later
@@ -937,7 +951,7 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         # different global emission positions and the first stereo
         # block would return mismatched L/R lengths (breaking the
         # mid/side recombination downstream).
-        right_48 = self._audio_resampler_r.process(mono_f32)
+        right_48 = self._audio_resampler_r.process(mono_r.astype(np.float32))
         # Final band limit; both instances advance for the same reason.
         mono_48 = self.lp_audio_l.apply(mono_48).astype(np.float32)
         right_48 = self.lp_audio_r.apply(right_48).astype(np.float32)
@@ -947,8 +961,10 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         # advancing and the output latency mode-independent, so
         # mono <-> stereo switches are continuous.  side = (L-R)/2 is
         # ~0 here (both channels carry the same mono programme through
-        # matched chains), so the NR output reduces to the mono signal.
-        return self._apply_side_nr(mono_48, right_48)
+        # matched chains), so the NR output reduces to the mono
+        # signal.  adapt=False freezes the NR's spectral model so the
+        # artificial silence cannot collapse the learned noise floor.
+        return self._apply_side_nr(mono_48, right_48, adapt=False)
 
     # ------------------------------------------------------------------
     # Reset
