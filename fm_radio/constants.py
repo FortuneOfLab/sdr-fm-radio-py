@@ -413,6 +413,34 @@ STEREO_BLEND_STABILITY_MIN_FACTOR = 1.00  # Floor of the pilot-"jitter" stabilit
                                     # measures programme dynamics, not reception.  The
                                     # mechanism stays in place (set <1.0 to re-enable).
 STEREO_BLEND_SMOOTHING = 0.08              # EMA smoothing for blend factor (0-1)
+STEREO_BLEND_DROPOUT_POWER_DROP_DB = 15.0  # Pilot-power collapse (dB below its own EMA)
+                                    # that identifies a genuine pilot DROPOUT for the
+                                    # blend fast-close.  A real dropout collapses the
+                                    # measured pilot power by tens of dB within one
+                                    # block; programme spill into the NOISE bands
+                                    # (which dips the per-block SNR for several
+                                    # consecutive blocks on real music) leaves the
+                                    # pilot power stable (CATV per-block variation
+                                    # ~ +-1 dB), so 15 dB separates the two cleanly.
+STEREO_BLEND_FAST_CLOSE_SETTLE_REF = 12.0  # Reference (16 ms) blocks after a pilot-chain
+                                    # (re)start before the fast-close may trigger
+                                    # (~190 ms): the resampler's priming blocks read
+                                    # instantaneous SNR ~ 0 even on a strong capture,
+                                    # and tripping there broke bit-identity with main.
+STEREO_BLEND_FAST_CLOSE_FACTOR = 0.5  # Per-16 ms-reference-block blend decay while the
+                                    # INSTANTANEOUS pilot SNR sits below the blend LO
+                                    # threshold (pilot dropout / pilot-less content):
+                                    # the regular smoothed EMA lagged for seconds on
+                                    # the light variant's 65.5 ms blocks (blend 0.716
+                                    # at 0.26 s of a pilot-less cold start, 2.4-3.6 s
+                                    # to close), leaving audible false side driven by
+                                    # programme leakage.  Halving per reference block
+                                    # closes 1.0 -> <0.05 in ~80 ms; a valid pilot
+                                    # never trips the instantaneous test, so healthy
+                                    # streams are untouched.  All blend/SNR EMAs are
+                                    # additionally time-normalised to the 16 ms
+                                    # reference block, so light's real block size
+                                    # gets identical time constants to standard.
 
 # --------------------------------------------------
 # Adaptive HF stereo blend (frequency-axis blend, pilot SNR based)

@@ -334,10 +334,10 @@ def test_mono_built_demod_learns_clean_nr_floor_on_stereo(cls, rng):
         pos += n_blk
     dm.stereo = True
     # NATURAL blend for both variants (codex round 4): the gate's ON
-    # threshold sits below the light variant's blend saturation
-    # (~0.31), so both variants train through their real product
-    # paths; each is compared against its own-variant control that
-    # experiences the same blend trajectory.
+    # both variants train through their real product paths (light's
+    # old blend saturation is gone since PR #32); each is compared
+    # against its own-variant control that experiences the same blend
+    # trajectory.
     r1 = np.random.default_rng(7)
     for _ in range(6 * fs_c // n_blk):
         left, right = dm.demodulate(stereo_comp(n_blk, pos, r1))
@@ -730,6 +730,91 @@ def test_pilot_dropout_and_recovery(cls):
     assert d._phase_acquired
     angle_after = np.rad2deg(d.stereo_phase_err_ema)
     assert abs(angle_after - angle_before) < 10.0, (angle_before, angle_after)
+
+
+def test_light_real_block_pilotless_transients():
+    """Codex P1 on PR #32 round 3: transients at the REAL light block.
+
+    The light variant's production block is 16384 IQ samples at
+    250 kHz (~65.5 ms of composite) - ~4x the 16 ms reference the
+    per-block EMAs were tuned against.  Before the time-normalised
+    EMAs + fast-close, a pilot-less cold start held blend 0.716 at
+    0.26 s (side/mid 0.877) and took 2.36 s to close; a dropout
+    after full stereo took 3.60 s.  After the fix (both measured at
+    the real block size): the cold start rides the time-normalised
+    EMA through the ~190 ms settle window, is crushed by the
+    steady-pilot-less trigger, and closes at 0.197 s; the dropout
+    fires the pilot-power-collapse trigger and closes at 0.197 s
+    (the first 65.5 ms block still carries pilot-era composite
+    through the pipeline latency).
+    """
+    from fm_radio.quality_selftest import _synthesize_iq_tone
+    fs_iq = 250_000
+    blk = 16384                                     # real light block
+
+    # --- pilot-less cold start: left-only content (mono present) ---
+    iq = _synthesize_iq_tone(
+        2.0, fs_iq, 1000.0, 1.0, 0.0, 0.0, 75_000.0,  # pilot_amp = 0
+    ).astype(np.complex64)
+    d = FMDemodulatorLight(stereo=True)
+    d.subcarrier_phase_offset_rad = np.deg2rad(0.3)
+    t_now = 0.0
+    t_closed = None
+    for i in range(0, iq.size, blk):
+        ch = iq[i:i + blk]
+        if ch.size < 8:
+            break
+        left, right = d.demodulate(d.process_iq_samples(ch))
+        t_now += ch.size / fs_iq
+        side = 0.5 * (left.astype(np.float64) - right.astype(np.float64))
+        mid = 0.5 * (left.astype(np.float64) + right.astype(np.float64))
+        if mid.size and float(np.sqrt(np.mean(mid ** 2))) > 1e-4:
+            ratio = (np.sqrt(np.mean(side ** 2))
+                     / (np.sqrt(np.mean(mid ** 2)) + 1e-12))
+            # During the ~190 ms settle window the blend rides the
+            # time-normalised EMA down (the fast-close would be
+            # unreliable there), so the first blocks pass genuine
+            # side at a declining blend; after 0.3 s it must be gone.
+            limit = 1.0 if t_now < 0.30 else 0.02
+            assert ratio < limit, (t_now, ratio)
+        if t_closed is None and d.blend_factor < 0.05:
+            t_closed = t_now
+    assert t_closed is not None and t_closed < 0.30, t_closed
+
+    # --- dropout after full stereo (mono + side content) ---
+    iq_st = _synthesize_iq_tone(
+        3.0, fs_iq, 700.0, 1.0, 0.0, 0.1, 75_000.0,
+    ).astype(np.complex64)
+    iq_dr = _synthesize_iq_tone(
+        3.0, fs_iq, 700.0, 1.0, 0.0, 0.0, 75_000.0,
+    ).astype(np.complex64)
+    d = FMDemodulatorLight(stereo=True)
+    d.subcarrier_phase_offset_rad = np.deg2rad(0.3)
+    for i in range(0, iq_st.size, blk):
+        ch = iq_st[i:i + blk]
+        if ch.size < 8:
+            break
+        d.demodulate(d.process_iq_samples(ch))
+    assert d.blend_factor > 0.9
+    t_now = 0.0
+    t_closed = None
+    for i in range(0, iq_dr.size, blk):
+        ch = iq_dr[i:i + blk]
+        if ch.size < 8:
+            break
+        left, right = d.demodulate(d.process_iq_samples(ch))
+        t_now += ch.size / fs_iq
+        if t_closed is None and d.blend_factor < 0.05:
+            t_closed = t_now
+        if t_now > 0.4:
+            side = 0.5 * (left.astype(np.float64) - right.astype(np.float64))
+            mid = 0.5 * (left.astype(np.float64) + right.astype(np.float64))
+            ratio = (np.sqrt(np.mean(side ** 2))
+                     / (np.sqrt(np.mean(mid ** 2)) + 1e-12))
+            assert ratio < 0.05, (t_now, ratio)     # settled to mono
+    # was 3.60 s before the fix; one 65.5 ms block of pipeline
+    # latency still carries pilot-era composite, then fast-close
+    assert t_closed is not None and t_closed < 0.35, t_closed
 
 
 def test_light_pilot_snr_matches_standard_on_pure_pilot():
