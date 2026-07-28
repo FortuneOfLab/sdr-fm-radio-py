@@ -180,7 +180,7 @@ discriminator は全帯域で平坦・純遅延。合成 IQ でステレオセ�
 `process_iq_samples()` は標準モードと同じ arctan discriminator
 （`angle(x[n]·conj(x[n-1]))`）で FM 復調し、`StatefulResampler` 96:125 で
 250 kHz→192 kHz に変換、`LIGHT_COMPOSITE_SCALE=0.35` を乗じます。以降の
-ステレオ復調は標準モードと共通（mono/side FIR バンクも同一タップ数を共有。パイロット複素 LPF のみ order-1）。旧実装の
+ステレオ復調は標準モードと共通（mono/side FIR バンクも同一タップ数を共有。パイロット複素 LPF のみ order-1、SNR ノイズ帯 BPF は標準と同じ order-9 — 旧 order-1 流用はパイロット漏れで SNR を ~10 dB に飽和させ、軽量モードが full stereo に到達できなかった）。旧実装の
 `angle→unwrap→diff` は unwrap 位相が搬送波オフセット下で無限成長し、
 float32 量子化により長時間セッションで劣化するため置換されました
 （伝達特性は同一）。
@@ -493,7 +493,8 @@ IQ (250 kHz)
 |------|-----|------|
 | `IQ_LOWPASS_ORDER` / `IQ_LOWPASS_CUTOFF` | 5 / 200 kHz | IQ ローパス |
 | `MONO_LOWPASS_CUTOFF` | 15 kHz | モノ / L−R ベース LPF カットオフ |
-| `PILOT_BANDPASS_ORDER` | 9 | パイロット複素 LPF 次数（軽量は 1） |
+| `PILOT_BANDPASS_ORDER` | 9 | パイロット複素 LPF 次数（軽量は 1 — サブキャリア位相動作点の校正対象） |
+| `PILOT_NOISE_BAND_ORDER` | 9 | パイロット SNR ノイズ帯 BPF 次数（**両変種共通**。旧実装で軽量が order-1 を流用した際、スカートがパイロット自身をノイズ参照へ漏らし SNR が 9.975 dB / blend 0.313 に飽和していた） |
 | `STEREO_FIR_NTAPS` / `_TRANSITION_HZ` | 321 / 3.5 kHz | mono/side 線形位相 FIR バンク（タップ数は composite レート比例、全フィルタ共有） |
 | `AUDIO_FINAL_LP_NTAPS` / `_CUTOFF_HZ` / `_STOP_HZ` | 183 / 15 k / 16.5 k | 最終音声帯域制限（L/R 共通 FIR、raw composite 復調の遷移帯写像を抑制） |
 | `DEEMPHASIS_TAU` | 50e-6 | ディエンファシス時定数 |

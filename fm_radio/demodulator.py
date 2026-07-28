@@ -74,6 +74,7 @@ from fm_radio.constants import (
     STEREO_PHASE_SIDE_OVER_NOISE_DB, STEREO_PHASE_NOISE_CONF_RAMP_DB,
     STEREO_PHASE_LEAK_DEG_PER_SEC,
     STEREO_IQ_PHASE_CORRECTION_ENABLE,
+    PILOT_NOISE_BAND_ORDER,
     PILOT_NOISE_BAND1_LOW, PILOT_NOISE_BAND1_HIGH,
     PILOT_NOISE_BAND2_LOW, PILOT_NOISE_BAND2_HIGH,
     STEREO_FIR_NTAPS, STEREO_FIR_TRANSITION_HZ,
@@ -181,12 +182,17 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         self._pilot_lp_zi: np.ndarray = np.zeros(
             (self.pilot_lp_sos.shape[0], 2), dtype=np.complex128,
         )
+        # Noise bands use their own order for BOTH variants (see
+        # PILOT_NOISE_BAND_ORDER): the light variant's order-1 skirts
+        # leaked the pilot itself into the noise reference and locked
+        # its SNR at ~10 dB; the pilot LP above keeps the per-variant
+        # order because it sets the subcarrier phase operating point.
         self.bp_pilot_noise_1 = BandpassFilter(
-            order=pilot_order, lowcut=PILOT_NOISE_BAND1_LOW,
+            order=PILOT_NOISE_BAND_ORDER, lowcut=PILOT_NOISE_BAND1_LOW,
             highcut=PILOT_NOISE_BAND1_HIGH, sample_rate=self.composite_rate,
         )
         self.bp_pilot_noise_2 = BandpassFilter(
-            order=pilot_order, lowcut=PILOT_NOISE_BAND2_LOW,
+            order=PILOT_NOISE_BAND_ORDER, lowcut=PILOT_NOISE_BAND2_LOW,
             highcut=PILOT_NOISE_BAND2_HIGH, sample_rate=self.composite_rate,
         )
         # --- De-emphasis ---

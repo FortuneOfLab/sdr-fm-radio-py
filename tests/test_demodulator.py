@@ -380,6 +380,12 @@ def test_nr_gate_untrained_weak_pilot_then_recovery(cls, rng):
     n_blk = 3072
 
     def comp(n, p0, r, pilot):
+        # Weak signal is modelled as LOW CNR (broadband composite
+        # noise floods the pilot and noise bands alike), not merely a
+        # missing pilot on a noiseless synthetic: the light variant's
+        # order-1 pilot LP leaks strong DSB content into the pilot
+        # measure, so a noise-free pilot-less composite would read as
+        # HIGH SNR there while a real weak signal never does.
         tt = (np.arange(n) + p0) / fs_c
         lmr = (0.2 * np.sin(2 * np.pi * 800.0 * tt)
                + r.standard_normal(n) * 0.005)
@@ -387,6 +393,8 @@ def test_nr_gate_untrained_weak_pilot_then_recovery(cls, rng):
         out = lpr + lmr * np.cos(2 * np.pi * 38_000.0 * tt)
         if pilot:
             out = out + 0.1 * np.cos(2 * np.pi * 19_000.0 * tt)
+        else:
+            out = out + r.standard_normal(n) * 0.05
         return out
 
     dm = cls(stereo=False)
@@ -573,27 +581,34 @@ def test_nr_gate_blend_ramp_has_no_gain_step():
     assert d._side_nr_adapt                          # ended reopened
 
 
-def test_light_pilot_snr_saturation_documented():
-    """The light variant's order-1 pilot filters leak the pilot into
-    the noise reference: pilot SNR saturates at ~9.975 dB and blend
-    at ~0.313 on a PURE pilot of ANY amplitude.  The gate's ON
-    threshold (0.25) must sit below that saturation, or light would
-    never train its NR (codex P1-1 round 4)."""
-    from fm_radio.constants import SIDE_NR_ADAPT_BLEND_ON
+def test_light_pilot_snr_matches_standard_on_pure_pilot():
+    """Light's pilot SNR must track signal quality like standard's.
+
+    Historically light reused its order-1 pilot order for the NOISE
+    bandpasses, whose skirts leaked the pilot itself into the noise
+    reference (-9.6/-10.4 dB at 19 kHz): pilot SNR saturated at
+    9.975 dB and blend at 0.313 on a PURE pilot of ANY amplitude, so
+    light never reached full stereo.  With order-9 noise bands
+    (PILOT_NOISE_BAND_ORDER) a clean pilot must read high-SNR and
+    open the blend fully, at parity with the standard variant
+    (measured 84.18 vs 84.17 dB).
+    """
     fs_c = 192_000
     n_blk = 3072
-    for amp in (0.01, 1.0):
-        d = FMDemodulatorLight(stereo=True)
+    snrs = {}
+    for cls in (FMDemodulatorLight, FMDemodulator):
+        d = cls(stereo=True)
         d.subcarrier_phase_offset_rad = np.deg2rad(0.3)
         pos = 0
         for _ in range(8 * fs_c // n_blk):
             tt = (np.arange(n_blk) + pos) / fs_c
-            d.demodulate(amp * np.cos(2 * np.pi * 19_000.0 * tt))
+            d.demodulate(0.1 * np.cos(2 * np.pi * 19_000.0 * tt))
             pos += n_blk
-        assert 9.0 < d.pilot_snr_ema < 11.0, (amp, d.pilot_snr_ema)
-        assert 0.28 < d.blend_factor < 0.35, (amp, d.blend_factor)
-        assert d.blend_factor > SIDE_NR_ADAPT_BLEND_ON
-        assert d._side_nr_adapt                     # gate reachable
+        snrs[cls] = d.pilot_snr_ema
+        assert d.pilot_snr_ema > 60.0, (cls, d.pilot_snr_ema)
+        assert d.blend_factor > 0.99, (cls, d.blend_factor)
+        assert d._side_nr_adapt
+    assert abs(snrs[FMDemodulatorLight] - snrs[FMDemodulator]) < 2.0, snrs
 
 
 def test_nr_gate_hysteresis_and_reset(rng):

@@ -89,6 +89,25 @@ PILOT_BANDPASS_ORDER = 9            # Pilot bandpass filter order (standard)
 PILOT_BANDPASS_ORDER_LIGHT = 1      # Pilot bandpass filter order (light)
 PILOT_BANDPASS_LOW = 18000.0        # Pilot bandpass lower edge (Hz)
 PILOT_BANDPASS_HIGH = 20000.0       # Pilot bandpass upper edge (Hz)
+PILOT_NOISE_BAND_ORDER = 9          # Pilot SNR noise-band filter order, BOTH variants.
+                                    # Historically the light variant reused its order-1
+                                    # pilot order here, and the order-1 skirts leaked the
+                                    # 19 kHz pilot itself into the noise reference
+                                    # (measured -9.6/-10.4 dB at 19 kHz, and only
+                                    # -7.9 dB for 23 kHz DSB content in band 2), locking
+                                    # light's pilot SNR at 9.975 dB and its blend at
+                                    # 0.313 on a PURE pilot of any amplitude - light
+                                    # never reached full stereo and its side NR could
+                                    # barely train.  Order 9 (the standard variant's
+                                    # value, unchanged there) puts the pilot at
+                                    # -82/-89.5 dB in the bands, giving light a real
+                                    # noise measurement and SNR-scale parity with the
+                                    # standard chain, so the shared blend/tracker/NR
+                                    # thresholds mean the same thing in both variants.
+                                    # The light PILOT LP stays order 1: it sets the
+                                    # subcarrier phase operating point (offset 0.3 deg
+                                    # was calibrated against it) and does not touch the
+                                    # noise reference.
 PILOT_NOISE_BAND1_LOW = 16000.0     # Pilot SNR noise band 1 lower edge (Hz)
 PILOT_NOISE_BAND1_HIGH = 17500.0    # Pilot SNR noise band 1 upper edge (Hz)
 PILOT_NOISE_BAND2_LOW = 20500.0     # Pilot SNR noise band 2 lower edge (Hz)
