@@ -900,10 +900,14 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         gain for 30-50 s after re-entry (see
         SideNoiseReducer.process).  The learned model from the last
         stereo stretch therefore survives any length of mono and the
-        NR is effective immediately on re-entry; the only residual is
-        a ~2-frame floor dip from transition frames that mix silence
-        with content, bounded by the power-smoothing EMA and healed
-        by the upward leak within a second.
+        NR is effective immediately on re-entry.  The freeze is
+        tracked per sample inside SideNoiseReducer: frames that still
+        contain mono-era samples (the STFT buffer carries up to
+        frame-1 of them across a switch, ~4 hops) stay unity and
+        never update - or, on an untrained reducer, initialise - the
+        model, so a mono-BUILT demodulator that later enables stereo
+        learns its first floor from genuine stereo frames and behaves
+        exactly like a fresh stereo start.
         """
         if self.side_nr_enabled:
             mid = (0.5 * (left_48 + right_48)).astype(np.float32)
@@ -939,8 +943,10 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         # The right-channel notches advance with the same input too:
         # the full L/R audio chain stays in lockstep during mono, so a
         # switch back to stereo resumes with matched notch states as
-        # well (their outputs converge bit-identically within ~0.5 ms
-        # - the Q=30 notch's own settling time).
+        # well.  The Q=30 notch's characteristic time constant is
+        # ~0.5 ms; the raw float64 outputs converge to ~1e-8 within
+        # ~7 ms and the float32 audio outputs become identical over a
+        # few blocks.
         mono_r = self.notch_pilot_r.apply(mono)
         mono_r = self.notch_pilot_r2.apply(mono_r)
         mono_48 = self._audio_resampler_l.process(mono_l.astype(np.float32))

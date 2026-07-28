@@ -297,6 +297,65 @@ def test_mono_and_stereo_share_emission_schedule(cls):
     assert all(s == 768 for s in sched_st[2:]), sched_st
 
 
+@pytest.mark.parametrize("cls", [FMDemodulator, FMDemodulatorLight])
+def test_mono_built_demod_learns_clean_nr_floor_on_stereo(cls, rng):
+    """Full-path untrained mono start (codex P1 round 2 on PR #31).
+
+    A demodulator CONSTRUCTED in mono (the light variant's default
+    startup) that later enables stereo goes through the normal blend
+    re-acquisition; the NR model must initialise from genuine stereo
+    frames - not from the mono-era silence still in the STFT buffer -
+    and must match a stereo-from-construction control that saw the
+    same content (both experience the same blend ramp, so the
+    mono-built case is exactly a fresh stereo start).  Before the
+    provenance fix the mixed first frame initialised the floor at
+    -93 dB and the NR stayed at unity gain for ~12 s.
+    """
+    fs_c = 192_000
+    n_blk = 3072
+
+    def stereo_comp(n, p0, r):
+        tt = (np.arange(n) + p0) / fs_c
+        lmr = 0.2 * np.sin(2 * np.pi * 800.0 * tt) + r.standard_normal(n) * 0.02
+        lpr = 0.2 * np.sin(2 * np.pi * 400.0 * tt)
+        return (lpr + lmr * np.cos(2 * np.pi * 38_000.0 * tt)
+                + 0.1 * np.cos(2 * np.pi * 19_000.0 * tt))
+
+    def mono_comp(n, p0):
+        tt = (np.arange(n) + p0) / fs_c
+        return (0.4 * np.sin(2 * np.pi * 300.0 * tt)
+                + 0.1 * np.cos(2 * np.pi * 19_000.0 * tt))
+
+    dm = cls(stereo=False)
+    dm.subcarrier_phase_offset_rad = np.deg2rad(0.3)
+    pos = 0
+    for _ in range(2 * fs_c // n_blk):          # 2 s mono from construction
+        dm.demodulate(mono_comp(n_blk, pos))
+        pos += n_blk
+    dm.stereo = True
+    r1 = np.random.default_rng(7)
+    for _ in range(6 * fs_c // n_blk):          # 6 s stereo, natural blend
+        left, right = dm.demodulate(stereo_comp(n_blk, pos, r1))
+        pos += n_blk
+        assert left.size == right.size
+        assert np.all(np.isfinite(left)) and np.all(np.isfinite(right))
+
+    ctrl = cls(stereo=True)
+    ctrl.subcarrier_phase_offset_rad = np.deg2rad(0.3)
+    r2 = np.random.default_rng(7)
+    pos2 = 0
+    for _ in range(6 * fs_c // n_blk):
+        ctrl.demodulate(stereo_comp(n_blk, pos2, r2))
+        pos2 += n_blk
+
+    assert dm.side_nr.noise_floor is not None
+    floor_db = 10 * np.log10(float(np.median(dm.side_nr.noise_floor)))
+    ctrl_db = 10 * np.log10(float(np.median(ctrl.side_nr.noise_floor)))
+    # measured parity: -39.9 vs -39.9 dB; 5 dB guards the contract
+    # while the pre-fix failure (-93 dB init) stays far outside
+    assert abs(floor_db - ctrl_db) < 5.0, (floor_db, ctrl_db)
+
+
 def test_mode_transition_flag_edge_cases(rng):
     """_reset_stereo_side_state runs exactly when stereo processing
     resumes after ACTUAL mono processing - once per transition, not

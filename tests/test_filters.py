@@ -351,6 +351,70 @@ def test_side_nr_adapt_false_freezes_model_and_advances_time(rng):
     assert abs(sup - sup_ctrl) < 1.0, (sup, sup_ctrl)
 
 
+def test_side_nr_untrained_mono_start_does_not_poison_floor(rng):
+    """Codex P1 round 2 on PR #31: sample provenance, untrained case.
+
+    A reducer built in mono (noise_floor=None) processes silence with
+    adapt=False; on switching to adaptive stereo, the input buffer
+    still holds up to frame-1 mono-era samples.  Without provenance
+    tracking the FIRST adaptive frame - measured 1014/1024 samples of
+    silence - initialised the floor at -93 dB and pinned the NR at
+    unity gain for ~12 s.  Contract: frames containing ANY
+    adapt=False-origin sample are unity OLA and must not initialise
+    or update the model; adaptation starts at the first
+    fully-adaptive frame, so the floor and first-second suppression
+    match a fresh continuously-adaptive control.
+    """
+    fs = 48000
+    for blocks in ("mono-like", "arbitrary"):
+        nr = SideNoiseReducer(sample_rate=fs, frame=1024, hop=256)
+        n_zero = 8 * fs
+        if blocks == "mono-like":
+            z = np.zeros(768, dtype=np.float32)
+            for _ in range(n_zero // 768):
+                nr.process(z, adapt=False)
+        else:
+            i = 0
+            while i < n_zero:
+                step = int(rng.integers(50, 900))
+                nr.process(np.zeros(step, dtype=np.float32), adapt=False)
+                i += step
+        assert nr.noise_floor is None
+        assert nr._nonadapt_pending == nr.in_buf.size > 0
+
+        noise = (rng.standard_normal(fs) * 0.01).astype(np.float32)
+        # feed just enough adaptive samples that frames still contain
+        # mono-era residue: the model must stay uninitialised
+        n_taint = max(0, nr.frame - nr.in_buf.size)  # completes 1st frame
+        nr.process(noise[:n_taint + 1])
+        assert nr.noise_floor is None      # mixed frame did not initialise
+        y = nr.process(noise[n_taint + 1:])
+
+        ctrl = SideNoiseReducer(sample_rate=fs, frame=1024, hop=256)
+        yc = ctrl.process(noise)
+
+        def rms(v):
+            return float(np.sqrt(np.mean(v[-fs // 2:] ** 2)))
+
+        assert nr.noise_floor is not None  # initialised from clean frames
+        floor_db = 10 * np.log10(float(np.median(nr.noise_floor)))
+        ctrl_db = 10 * np.log10(float(np.median(ctrl.noise_floor)))
+        assert abs(floor_db - ctrl_db) < 3.0, (blocks, floor_db, ctrl_db)
+        sup = 20 * np.log10(rms(y) / rms(noise) + 1e-15)
+        sup_ctrl = 20 * np.log10(rms(yc) / rms(noise) + 1e-15)
+        assert sup < -2.0, (blocks, sup)
+        assert abs(sup - sup_ctrl) < 1.0, (blocks, sup, sup_ctrl)
+
+
+def test_side_nr_reset_clears_provenance_counter(rng):
+    nr = SideNoiseReducer(sample_rate=48000, frame=1024, hop=256)
+    nr.process(np.zeros(4096, dtype=np.float32), adapt=False)
+    assert nr._nonadapt_pending > 0
+    nr.reset()
+    assert nr._nonadapt_pending == 0
+    assert nr.in_buf.size == 0
+
+
 def test_side_nr_reduces_stationary_noise(rng):
     fs = 48000
     nr = SideNoiseReducer(

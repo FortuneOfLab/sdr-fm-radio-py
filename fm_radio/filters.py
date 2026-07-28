@@ -484,6 +484,15 @@ class SideNoiseReducer:
         k = int(max(3, tone_protect_med_bins))
         self.tone_protect_med_bins: int = k if k % 2 == 1 else k + 1
         self.in_buf: np.ndarray = np.zeros(0, dtype=np.float32)
+        # Leading in_buf samples of NON-adaptive origin (fed with
+        # adapt=False).  Any STFT frame that still contains one of
+        # them is processed as unity OLA without touching the model:
+        # the first frame after a mono -> stereo switch would
+        # otherwise be almost entirely mono-era silence (measured
+        # in_buf 1014 of frame 1024) and, on an untrained reducer,
+        # would INITIALISE the noise floor from that silence
+        # (floor -93 dB, NR pinned at unity for ~12 s).
+        self._nonadapt_pending: int = 0
         self.synth_overlap: np.ndarray = np.zeros(
             self.frame - self.hop, dtype=np.float32,
         )
@@ -509,6 +518,7 @@ class SideNoiseReducer:
 
     def reset(self) -> None:
         self.in_buf = np.zeros(0, dtype=np.float32)
+        self._nonadapt_pending = 0
         self.synth_overlap = np.zeros(
             self.frame - self.hop, dtype=np.float32,
         )
@@ -533,6 +543,16 @@ class SideNoiseReducer:
         recovery is bounded by SIDE_NR_NOISE_DECAY_DB_PER_SEC.
         Freezing the model preserves the learned floor across mono
         stretches while the latency and mid alignment stay exact.
+
+        The freeze is tracked per SAMPLE, not per call: frames that
+        still contain any adapt=False-origin samples (the input
+        buffer carries up to frame-1 samples across a mode switch)
+        are processed as unity OLA without model updates, and - on an
+        untrained reducer - without INITIALISING the noise floor from
+        the mono-era silence (a mixed first frame measured 1014 of
+        1024 samples of silence and initialised the floor at -93 dB,
+        pinning the NR at unity gain for ~12 s).  Adaptation resumes
+        at the first fully-adaptive-origin frame.
         """
         x = np.asarray(x, dtype=np.float32)
         if x.size == 0:
@@ -543,15 +563,27 @@ class SideNoiseReducer:
         while self.in_buf.size >= n:
             frame = self.in_buf[:n]
             self.in_buf = self.in_buf[h:]
+            # Sample-provenance rule: a frame that contains even ONE
+            # non-adaptive sample must not touch the model.  The
+            # counter tracks how many LEADING in_buf samples came from
+            # adapt=False calls; each consumed hop retires h of them,
+            # so adaptation resumes exactly at the first frame whose
+            # window is fully adaptive-origin (with in_buf up to
+            # frame-1 = 1023 residual samples and hop 256, switch-era
+            # samples span up to ~4 hops).
+            frame_tainted = self._nonadapt_pending > 0
+            if frame_tainted:
+                self._nonadapt_pending = max(0, self._nonadapt_pending - h)
 
             windowed = frame * self.window
-            if not adapt:
+            if not adapt or frame_tainted:
                 # Unity gain: irfft(rfft(w)) * window == w * window,
                 # so the FFT round-trip is skipped entirely.  Frames
-                # straddling a mode switch (residual real side in the
-                # buffer) pass un-denoised for those ~2 frames, which
-                # keeps the flush smooth without teaching the model
-                # anything about the artificial silence.
+                # containing switch-era samples pass un-denoised,
+                # which keeps the stereo->mono flush smooth without
+                # teaching the model anything about the artificial
+                # silence - and, on an untrained reducer, prevents the
+                # mono-era silence from INITIALISING the noise floor.
                 out_frame = windowed * self.window
                 out_hop = (
                     self.synth_overlap[:h] + out_frame[:h]
@@ -651,6 +683,12 @@ class SideNoiseReducer:
 
             out_chunks.append(out_hop)
 
+        if not adapt:
+            # Conservative provenance: after an adapt=False call the
+            # ENTIRE residual buffer (the call's own tail plus any
+            # older adaptive residue it mixed with) is treated as
+            # non-adaptive origin.
+            self._nonadapt_pending = self.in_buf.size
         if not out_chunks:
             return np.zeros(0, dtype=np.float32)
         return np.concatenate(out_chunks)
