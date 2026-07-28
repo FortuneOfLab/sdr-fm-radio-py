@@ -96,6 +96,7 @@ from fm_radio.constants import (
     SIDE_NR_NOISE_DECAY_DB_PER_SEC,
     SIDE_NR_TONE_PROTECT_DB, SIDE_NR_TONE_PROTECT_MED_BINS,
     SIDE_NR_LO_HZ, SIDE_NR_HI_HZ,
+    SIDE_NR_ADAPT_BLEND_ON, SIDE_NR_ADAPT_BLEND_OFF,
 )
 
 
@@ -275,6 +276,10 @@ class BaseFMDemodulator(FMDemodulatorInterface):
             hi_hz=float(SIDE_NR_HI_HZ),
         )
         self.side_nr_mid_aligner = StreamAligner()
+        # Blend-validity gate for NR adaptation (see the constants'
+        # comment): True = the post-blend side is trustworthy enough
+        # to learn from.  Starts True (blend_factor starts at 1.0).
+        self._side_nr_adapt: bool = True
         self.diag_enable: bool = STEREO_DIAG_ENABLE
         self.diag_log_interval_blocks: int = STEREO_DIAG_LOG_INTERVAL_BLOCKS
         self._diag_counter: int = 0
@@ -910,6 +915,23 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         exactly like a fresh stereo start.
         """
         if self.side_nr_enabled:
+            if adapt:
+                # Stereo path: gate the adaptation on the blend with
+                # hysteresis.  The NR input is the POST-blend side, so
+                # low blend feeds an attenuated/zeroed copy that must
+                # not train (or, untrained, initialise) the model -
+                # blend 0 is an ABSORBING zero for the minimum tracker
+                # (see SIDE_NR_ADAPT_BLEND_* in constants).  The mono
+                # path passes adapt=False explicitly and skips the
+                # gate update; per-sample provenance inside the NR
+                # covers every transition.
+                if self._side_nr_adapt:
+                    if self.blend_factor <= SIDE_NR_ADAPT_BLEND_OFF:
+                        self._side_nr_adapt = False
+                else:
+                    if self.blend_factor >= SIDE_NR_ADAPT_BLEND_ON:
+                        self._side_nr_adapt = True
+                adapt = self._side_nr_adapt
             mid = (0.5 * (left_48 + right_48)).astype(np.float32)
             side = (0.5 * (left_48 - right_48)).astype(np.float32)
             side_clean = self.side_nr.process(side, adapt=adapt)
@@ -986,6 +1008,7 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         """
         self.pilot_pll.reset()
         self._prev_demod_was_mono = False
+        self._side_nr_adapt = True
         self._dc_zi = np.zeros_like(self._dc_zi)
         self.blend_factor = 1.0
         self.pilot_snr_ema = None
