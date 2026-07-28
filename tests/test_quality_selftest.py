@@ -339,44 +339,68 @@ def test_cli_sep_sweep_passes_clock_ppm_and_noiseless_default(monkeypatch):
 
 
 def test_cli_sep_sweep_passes_carrier_offset(monkeypatch, capsys):
-    """--carrier-offset-hz must reach evaluate_quality, and the
-    DC-notch stress note must appear ONLY near the notch.
+    """--carrier-offset-hz must reach evaluate_quality, the header must
+    keep sub-Hz resolution, and the DC-notch stress note must appear
+    exactly when abs(offset) <= 3 * DC_BLOCK_CUTOFF_HZ.
 
-    Boundary-tested with the evaluation stubbed out (the same pattern
-    that caught the --hifi-tx and --clock-ppm no-ops)."""
+    The old :.0f header printed 0.3 Hz (note) and 0.31 Hz (no note)
+    both as "carrier_offset=0Hz", making saved charts unreproducible;
+    -0.3 Hz additionally printed "-0Hz".  Boundary values derive from
+    DC_BLOCK_CUTOFF_HZ so the test follows the constant.  Evaluation
+    stubbed out (the same pattern that caught the --hifi-tx and
+    --clock-ppm no-ops)."""
     import sys
     import fm_radio.quality_selftest as qs
+    from fm_radio.constants import DC_BLOCK_CUTOFF_HZ
     captured = []
     _spy_eval(monkeypatch, captured)
 
-    # omitted -> 0 Hz propagated, note printed (0 is inside the notch)
-    monkeypatch.setattr(sys, "argv", [
-        "quality_selftest", "--sep-sweep", "--sep-freqs", "1000",
-        "--duration", "1",
-    ])
-    qs.main()
-    assert captured[0]["carrier_offset_hz"] == 0.0
-    out = capsys.readouterr().out
-    assert "DC-blocker notch" in out
+    edge = 3.0 * DC_BLOCK_CUTOFF_HZ          # 0.3 at fc = 0.1
+    outside = edge * 1.05                     # 0.315: just past the note
 
-    # explicit 1237 -> propagated, no note
-    captured.clear()
-    monkeypatch.setattr(sys, "argv", [
-        "quality_selftest", "--sep-sweep", "--sep-freqs", "1000",
-        "--duration", "1", "--carrier-offset-hz", "1237",
-    ])
-    qs.main()
+    def run(extra_argv):
+        captured.clear()
+        monkeypatch.setattr(sys, "argv", [
+            "quality_selftest", "--sep-sweep", "--sep-freqs", "1000",
+            "--duration", "1", *extra_argv,
+        ])
+        qs.main()
+        return capsys.readouterr().out
+
+    # omitted -> 0 Hz propagated, note printed
+    out = run([])
+    assert captured[0]["carrier_offset_hz"] == 0.0
+    assert "carrier_offset=0Hz" in out
+    assert "notch transition" in out
+
+    # explicit 0 -> identical
+    out = run(["--carrier-offset-hz", "0"])
+    assert captured[0]["carrier_offset_hz"] == 0.0
+    assert "carrier_offset=0Hz" in out
+    assert "notch transition" in out
+
+    # +edge: sub-Hz kept, note printed (boundary is inclusive)
+    out = run(["--carrier-offset-hz", str(edge)])
+    assert captured[0]["carrier_offset_hz"] == edge
+    assert f"carrier_offset={edge:g}Hz" in out
+    assert "notch transition" in out
+
+    # -edge: sign and sub-Hz kept, note printed, never "-0Hz"
+    out = run(["--carrier-offset-hz", str(-edge)])
+    assert captured[0]["carrier_offset_hz"] == -edge
+    assert f"carrier_offset={-edge:g}Hz" in out
+    assert "carrier_offset=-0Hz" not in out
+    assert "notch transition" in out
+
+    # just outside: sub-Hz kept, distinguishable from the edge, no note
+    out = run(["--carrier-offset-hz", str(outside)])
+    assert captured[0]["carrier_offset_hz"] == outside
+    assert f"carrier_offset={outside:g}Hz" in out
+    assert f"carrier_offset={edge:g}Hz" not in out
+    assert "notch transition" not in out
+
+    # realistic chart value: integer rendering preserved, no note
+    out = run(["--carrier-offset-hz", "1237"])
     assert captured[0]["carrier_offset_hz"] == 1237.0
-    out = capsys.readouterr().out
     assert "carrier_offset=1237Hz" in out
-    assert "DC-blocker notch" not in out
-
-    # explicit 0 -> propagated, note printed (historical stress rerun)
-    captured.clear()
-    monkeypatch.setattr(sys, "argv", [
-        "quality_selftest", "--sep-sweep", "--sep-freqs", "1000",
-        "--duration", "1", "--carrier-offset-hz", "0",
-    ])
-    qs.main()
-    assert captured[0]["carrier_offset_hz"] == 0.0
-    assert "DC-blocker notch" in capsys.readouterr().out
+    assert "notch transition" not in out
