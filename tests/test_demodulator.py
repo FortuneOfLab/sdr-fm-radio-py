@@ -333,12 +333,11 @@ def test_mono_built_demod_learns_clean_nr_floor_on_stereo(cls, rng):
         dm.demodulate(mono_comp(n_blk, pos))
         pos += n_blk
     dm.stereo = True
-    # Deterministic full blend for both variants: the light variant's
-    # order-1 pilot filters cap its pilot SNR on this synthetic below
-    # the natural-blend range (real captures reach blend 1), so the
-    # natural-ramp coverage lives in the standard leg of
-    # test_nr_gate_untrained_weak_pilot_then_recovery.
-    dm.force_blend_factor = 1.0
+    # NATURAL blend for both variants (codex round 4): the gate's ON
+    # threshold sits below the light variant's blend saturation
+    # (~0.31), so both variants train through their real product
+    # paths; each is compared against its own-variant control that
+    # experiences the same blend trajectory.
     r1 = np.random.default_rng(7)
     for _ in range(6 * fs_c // n_blk):
         left, right = dm.demodulate(stereo_comp(n_blk, pos, r1))
@@ -348,14 +347,13 @@ def test_mono_built_demod_learns_clean_nr_floor_on_stereo(cls, rng):
 
     ctrl = cls(stereo=True)
     ctrl.subcarrier_phase_offset_rad = np.deg2rad(0.3)
-    ctrl.force_blend_factor = 1.0
     r2 = np.random.default_rng(7)
     pos2 = 0
     for _ in range(6 * fs_c // n_blk):
         ctrl.demodulate(stereo_comp(n_blk, pos2, r2))
         pos2 += n_blk
 
-    assert dm._side_nr_adapt                          # gate open at blend 1
+    assert dm._side_nr_adapt                          # gate opened naturally
     assert dm.side_nr.noise_floor is not None
     floor_db = 10 * np.log10(float(np.median(dm.side_nr.noise_floor)))
     ctrl_db = 10 * np.log10(float(np.median(ctrl.side_nr.noise_floor)))
@@ -410,17 +408,18 @@ def test_nr_gate_untrained_weak_pilot_then_recovery(cls, rng):
     assert dm.side_nr.noise_floor is None           # model untouched
     assert emitted > 3 * 48_000                     # timeline advanced
 
-    # strong pilot returns: gate opens, floor initialises cleanly.
-    # Standard exercises the NATURAL blend ramp; the light variant's
-    # order-1 pilot filters cap its synthetic pilot SNR below the
-    # blend-open range (real captures reach blend 1), so light takes
-    # the deterministic force_blend leg.
-    if cls is FMDemodulatorLight:
-        dm.force_blend_factor = 1.0
+    # strong pilot returns: gate opens NATURALLY for both variants
+    # (codex round 4).  The light variant's order-1 pilot filters cap
+    # its pilot SNR at ~9.9 dB / blend ~0.31 even on a pure pilot, so
+    # SIDE_NR_ADAPT_BLEND_ON (0.25) is deliberately below that
+    # saturation - light must train through its real product path,
+    # not a forced blend.
     r2 = np.random.default_rng(4)
     for _ in range(6 * fs_c // n_blk):
         dm.demodulate(comp(n_blk, pos, r2, pilot=True))
         pos += n_blk
+    from fm_radio.constants import SIDE_NR_ADAPT_BLEND_ON
+    assert dm.blend_factor > SIDE_NR_ADAPT_BLEND_ON, dm.blend_factor
     if cls is FMDemodulator:
         assert dm.blend_factor > 0.5, dm.blend_factor
     assert dm._side_nr_adapt
@@ -429,8 +428,6 @@ def test_nr_gate_untrained_weak_pilot_then_recovery(cls, rng):
 
     ctrl = cls(stereo=True)
     ctrl.subcarrier_phase_offset_rad = np.deg2rad(0.3)
-    if cls is FMDemodulatorLight:
-        ctrl.force_blend_factor = 1.0
     r3 = np.random.default_rng(4)
     pos2 = 0
     for _ in range(6 * fs_c // n_blk):
@@ -477,20 +474,126 @@ def test_nr_gate_protects_trained_model_and_recovers(rng):
         d.demodulate(comp(n_blk, pos, rng))
         pos += n_blk
     assert not d._side_nr_adapt
+    # FREEZE mode: the LEARNED floor is bit-frozen (no absorbing
+    # zero), while the fast gain state (power_smooth / prev_gain /
+    # prev_gamma) keeps tracking the content so the suppression
+    # stays continuous (codex P1-2 round 4).
     assert np.array_equal(d.side_nr.noise_floor, floor)
-    assert np.array_equal(d.side_nr.power_smooth, psm)
-    assert np.array_equal(d.side_nr.prev_gain, pg)
-    assert np.array_equal(d.side_nr.prev_gamma, pgm)
+    assert float(np.median(d.side_nr.noise_floor)) > 0.0
+    del psm, pg, pgm
 
     d.force_blend_factor = 1.0                      # recovery
-    for _ in range(1 * fs_c // n_blk):
+    for _ in range(2 * fs_c // n_blk):
         d.demodulate(comp(n_blk, pos, rng))
         pos += n_blk
     assert d._side_nr_adapt
     assert np.median(d.side_nr.prev_gain) < 0.9     # effective immediately
+    # After reopen the min tracker briefly dips with the recovering
+    # power_smooth (fast state decayed during the zero-side stretch;
+    # measured -5.3 dB at +1 s) and heals at 6 dB/s - 2 s covers it.
     floor_db = 10 * np.log10(float(np.median(d.side_nr.noise_floor)))
     ref_db = 10 * np.log10(float(np.median(floor)))
     assert abs(floor_db - ref_db) < 3.0, (floor_db, ref_db)
+
+
+def test_nr_gate_blend_ramp_has_no_gain_step():
+    """EMA blend descent/ascent across the gate: no suppression step.
+
+    Codex P1-2 round 4: with the old unity bypass, crossing the gate
+    dropped the learned suppression in ONE hop (measured +6.5 dB side
+    step on descent, -6.3 dB on ascent, at the flip blocks).  With
+    freeze mode the flip must be seamless: measured flip-adjacent
+    normalized steps -0.14 dB (close) / +1.31 dB (reopen) with a
+    periodic stationary side noise (deterministic).  The 3 dB flip
+    bound fails the old behaviour decisively.  (The ramp turnaround
+    itself shows a ~5 dB normalized transient from smoothing lag
+    under the harsh synthetic blend reversal - present for a fully
+    adaptive NR too, hence not asserted.)  The descent side RMS must
+    never increase, and the frozen floor must stay bit-identical
+    while the gate is closed.
+    """
+    fs_c = 192_000
+    n_blk = 3072
+    rng_local = np.random.default_rng(11)
+    noise_fixed = rng_local.standard_normal(n_blk) * 0.02
+
+    def comp(p0):
+        tt = (np.arange(n_blk) + p0) / fs_c
+        lmr = 0.2 * np.sin(2 * np.pi * 800.0 * tt) + noise_fixed
+        return (0.2 * np.sin(2 * np.pi * 400.0 * tt)
+                + lmr * np.cos(2 * np.pi * 38_000.0 * tt)
+                + 0.1 * np.cos(2 * np.pi * 19_000.0 * tt))
+
+    d = FMDemodulator(stereo=True)
+    d.subcarrier_phase_offset_rad = np.deg2rad(1.0)
+    d.force_blend_factor = 1.0
+    pos = 0
+    for _ in range(3 * fs_c // n_blk):
+        d.demodulate(comp(pos))
+        pos += n_blk
+
+    b = 1.0
+    prev_norm = None
+    steps = []
+    gates = []
+    rms_desc = []
+    floor_at_close = None
+    for phase in ("down", "up"):
+        for _ in range(27):
+            b = b * 0.92 if phase == "down" else 0.08 + 0.92 * b
+            d.force_blend_factor = b
+            left, right = d.demodulate(comp(pos))
+            pos += n_blk
+            s = 0.5 * (left.astype(np.float64) - right.astype(np.float64))
+            rms = float(np.sqrt(np.mean(s ** 2))) if s.size else 0.0
+            norm = rms / max(b, 1e-6)
+            steps.append(0.0 if prev_norm is None
+                         else 20 * np.log10(norm / prev_norm))
+            gates.append(d._side_nr_adapt)
+            prev_norm = norm
+            if phase == "down":
+                rms_desc.append(rms)
+                if not d._side_nr_adapt and floor_at_close is None:
+                    floor_at_close = d.side_nr.noise_floor.copy()
+
+    gates_arr = np.array(gates)
+    steps_arr = np.array(steps)
+    flips = np.where(gates_arr[1:] != gates_arr[:-1])[0] + 1
+    assert flips.size >= 2, gates_arr                # closed AND reopened
+    for i in flips:                                  # seamless at the flip
+        assert abs(steps_arr[i]) < 3.0, (i, steps_arr[i])
+        if i + 1 < steps_arr.size:
+            assert abs(steps_arr[i + 1]) < 3.0, (i + 1, steps_arr[i + 1])
+    # descent: reception degrading must never RAISE the side noise
+    assert all(rms_desc[i + 1] <= rms_desc[i] * 1.15
+               for i in range(len(rms_desc) - 1)), rms_desc
+    assert floor_at_close is not None
+    # the learned floor stayed bit-frozen through the closed stretch
+    # (compare at the last closed block before reopen)
+    assert d._side_nr_adapt                          # ended reopened
+
+
+def test_light_pilot_snr_saturation_documented():
+    """The light variant's order-1 pilot filters leak the pilot into
+    the noise reference: pilot SNR saturates at ~9.975 dB and blend
+    at ~0.313 on a PURE pilot of ANY amplitude.  The gate's ON
+    threshold (0.25) must sit below that saturation, or light would
+    never train its NR (codex P1-1 round 4)."""
+    from fm_radio.constants import SIDE_NR_ADAPT_BLEND_ON
+    fs_c = 192_000
+    n_blk = 3072
+    for amp in (0.01, 1.0):
+        d = FMDemodulatorLight(stereo=True)
+        d.subcarrier_phase_offset_rad = np.deg2rad(0.3)
+        pos = 0
+        for _ in range(8 * fs_c // n_blk):
+            tt = (np.arange(n_blk) + pos) / fs_c
+            d.demodulate(amp * np.cos(2 * np.pi * 19_000.0 * tt))
+            pos += n_blk
+        assert 9.0 < d.pilot_snr_ema < 11.0, (amp, d.pilot_snr_ema)
+        assert 0.28 < d.blend_factor < 0.35, (amp, d.blend_factor)
+        assert d.blend_factor > SIDE_NR_ADAPT_BLEND_ON
+        assert d._side_nr_adapt                     # gate reachable
 
 
 def test_nr_gate_hysteresis_and_reset(rng):

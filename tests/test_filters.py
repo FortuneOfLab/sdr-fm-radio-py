@@ -328,7 +328,8 @@ def test_side_nr_adapt_false_freezes_model_and_advances_time(rng):
     pgm = nr.prev_gamma.copy()
 
     n_zero = 8 * fs
-    out_z = nr.process(np.zeros(n_zero, dtype=np.float32), adapt=False)
+    out_z = nr.process(np.zeros(n_zero, dtype=np.float32), adapt=False,
+                       bypass=True)                  # mono semantics
     assert abs(out_z.size - n_zero) <= nr.frame      # timeline advanced
     assert np.array_equal(nr.noise_floor, floor)     # model bit-frozen
     assert np.array_equal(nr.power_smooth, psm)
@@ -372,12 +373,13 @@ def test_side_nr_untrained_mono_start_does_not_poison_floor(rng):
         if blocks == "mono-like":
             z = np.zeros(768, dtype=np.float32)
             for _ in range(n_zero // 768):
-                nr.process(z, adapt=False)
+                nr.process(z, adapt=False, bypass=True)
         else:
             i = 0
             while i < n_zero:
                 step = int(rng.integers(50, 900))
-                nr.process(np.zeros(step, dtype=np.float32), adapt=False)
+                nr.process(np.zeros(step, dtype=np.float32), adapt=False,
+                           bypass=True)
                 i += step
         assert nr.noise_floor is None
         assert nr._nonadapt_pending == nr.in_buf.size > 0
@@ -404,6 +406,41 @@ def test_side_nr_untrained_mono_start_does_not_poison_floor(rng):
         sup_ctrl = 20 * np.log10(rms(yc) / rms(noise) + 1e-15)
         assert sup < -2.0, (blocks, sup)
         assert abs(sup - sup_ctrl) < 1.0, (blocks, sup, sup_ctrl)
+
+
+def test_side_nr_freeze_mode_keeps_suppressing(rng):
+    """Freeze mode (adapt=False, bypass=False) on a TRAINED reducer.
+
+    Codex P1-2 round 4: the old adapt=False was a unity bypass, so
+    closing the stereo low-blend gate dropped the learned suppression
+    in one hop (+6.5 dB side-noise step exactly when reception
+    degrades).  Freeze mode must keep the gain computation running
+    against the FROZEN floor: continued broadband input stays
+    suppressed at the adaptive level while only the learned floor is
+    bit-frozen (the fast gain state - power_smooth, prev_gain,
+    prev_gamma - keeps tracking the content).
+    """
+    fs = 48000
+    noise = (rng.standard_normal(4 * fs) * 0.01).astype(np.float32)
+    nr = SideNoiseReducer(sample_rate=fs, frame=1024, hop=256)
+    y_train = nr.process(noise)
+    floor = nr.noise_floor.copy()
+
+    x2 = (rng.standard_normal(fs) * 0.01).astype(np.float32)
+    y_frozen = nr.process(x2, adapt=False, bypass=False)
+
+    ctrl = SideNoiseReducer(sample_rate=fs, frame=1024, hop=256)
+    ctrl.process(noise)
+    y_ctrl = ctrl.process(x2)
+
+    def rms(v):
+        return float(np.sqrt(np.mean(v[-fs // 2:] ** 2)))
+
+    assert np.array_equal(nr.noise_floor, floor)      # floor frozen
+    sup = 20 * np.log10(rms(y_frozen) / rms(x2) + 1e-15)
+    sup_ctrl = 20 * np.log10(rms(y_ctrl) / rms(x2) + 1e-15)
+    assert sup < -2.0, sup                            # still suppressing
+    assert abs(sup - sup_ctrl) < 1.0, (sup, sup_ctrl)
 
 
 def test_side_nr_reset_clears_provenance_counter(rng):

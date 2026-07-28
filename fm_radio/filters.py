@@ -527,32 +527,38 @@ class SideNoiseReducer:
         self.prev_gain = None
         self.prev_gamma = None
 
-    def process(self, x: np.ndarray, adapt: bool = True) -> np.ndarray:
+    def process(self, x: np.ndarray, adapt: bool = True,
+                bypass: bool = False) -> np.ndarray:
         """Denoise a streaming chunk.
 
-        ``adapt=False`` advances ONLY the temporal machinery - input
-        buffer, STFT/OLA timeline and output emission schedule - as an
-        EXACT unity-gain passthrough, leaving the spectral adaptation
-        state (``power_smooth``, ``noise_floor``, ``prev_gain``,
-        ``prev_gamma``) untouched.  The mono demodulation path uses
-        this (issue #29 review): mono streams an artificial
-        side ~ 0, and the minimum-statistics tracker would collapse
-        the noise floor within seconds (measured -35 dB after 1 s,
-        -144 dB after 4 s, -289 dB after 8 s of mono), pinning the NR
-        at unity gain for 30-50 s after stereo re-entry because
-        recovery is bounded by SIDE_NR_NOISE_DECAY_DB_PER_SEC.
-        Freezing the model preserves the learned floor across mono
-        stretches while the latency and mid alignment stay exact.
+        Two orthogonal controls (codex P1 rounds 2-4 on PR #31):
 
-        The freeze is tracked per SAMPLE, not per call: frames that
-        still contain any adapt=False-origin samples (the input
-        buffer carries up to frame-1 samples across a mode switch)
-        are processed as unity OLA without model updates, and - on an
-        untrained reducer - without INITIALISING the noise floor from
-        the mono-era silence (a mixed first frame measured 1014 of
-        1024 samples of silence and initialised the floor at -93 dB,
-        pinning the NR at unity gain for ~12 s).  Adaptation resumes
-        at the first fully-adaptive-origin frame.
+        ``adapt`` - may this call's samples train the LEARNED model
+        (the minimum-statistics ``noise_floor``)?  Tracked per SAMPLE
+        via ``_nonadapt_pending``: frames still containing any
+        adapt=False-origin sample never update - or, on an untrained
+        reducer, initialise - the floor.  Without this, mono-era
+        silence collapsed the floor within seconds (-144 dB after
+        4 s; zero side is an ABSORBING state), and the mixed first
+        frame after a switch (measured 1014/1024 silence samples)
+        initialised an untrained floor at -93 dB.
+
+        ``bypass`` - process as an EXACT unity-gain OLA passthrough
+        (no FFT, and the fast gain state ``power_smooth`` /
+        ``prev_gain`` / ``prev_gamma`` stays bit-frozen too).  Used
+        by the MONO path only, where side ~ 0 and there is nothing
+        to suppress; the temporal machinery (input buffer, OLA,
+        emission schedule) still advances, so latency and mid
+        alignment stay exact and held content flushes smoothly.
+
+        The stereo low-blend gate passes adapt=False WITHOUT bypass
+        (freeze mode): the learned floor is protected, but the gain
+        computation keeps running against it frame by frame, so a
+        trained reducer keeps suppressing CONTINUOUSLY through blend
+        dips - switching to unity here measured a +6.5 dB side-noise
+        step exactly when reception degrades.  Untrained freeze
+        frames (floor is None) fall back to unity since there is no
+        model to apply.
         """
         x = np.asarray(x, dtype=np.float32)
         if x.size == 0:
@@ -576,14 +582,17 @@ class SideNoiseReducer:
                 self._nonadapt_pending = max(0, self._nonadapt_pending - h)
 
             windowed = frame * self.window
-            if not adapt or frame_tainted:
-                # Unity gain: irfft(rfft(w)) * window == w * window,
-                # so the FFT round-trip is skipped entirely.  Frames
-                # containing switch-era samples pass un-denoised,
-                # which keeps the stereo->mono flush smooth without
-                # teaching the model anything about the artificial
-                # silence - and, on an untrained reducer, prevents the
-                # mono-era silence from INITIALISING the noise floor.
+            # May THIS frame train the learned floor?
+            model_update = adapt and not frame_tainted
+            if bypass or (self.noise_floor is None and not model_update):
+                # Exact unity OLA: irfft(rfft(w)) * window == w * window,
+                # so the FFT round-trip is skipped entirely.  Taken by
+                # the mono path (side ~ 0: nothing to suppress, gain
+                # state stays bit-frozen) and by an UNTRAINED reducer
+                # whose frame may not initialise the model (mixed
+                # switch-era frames, low-blend stereo before any
+                # learning) - there is no model to apply, so unity is
+                # the only correct output.
                 out_frame = windowed * self.window
                 out_hop = (
                     self.synth_overlap[:h] + out_frame[:h]
@@ -599,7 +608,10 @@ class SideNoiseReducer:
             spec = np.fft.rfft(windowed)
             power = spec.real * spec.real + spec.imag * spec.imag
 
-            # Stage 1: smooth raw power per bin (variance reduction)
+            # Stage 1: smooth raw power per bin (variance reduction).
+            # Fast gain state: updated on every FFT frame, INCLUDING
+            # freeze mode, so the applied gains keep tracking the
+            # current content while only the learned floor is frozen.
             if self.power_smooth is None:
                 self.power_smooth = power.copy()
             else:
@@ -613,21 +625,26 @@ class SideNoiseReducer:
             # Narrowband peaks are clamped to the frequency-local median
             # before feeding the tracker (see __init__: tone_protect_db)
             # so a sustained tone cannot raise its own bin's floor.
-            tracker_in = self.power_smooth
-            if self.tone_protect_db > 0.0:
-                local_med = signal.medfilt(
-                    self.power_smooth.astype(np.float64),
-                    kernel_size=self.tone_protect_med_bins,
-                )
-                cap = local_med * (10.0 ** (self.tone_protect_db / 10.0))
-                tracker_in = np.minimum(self.power_smooth, cap)
-            if self.noise_floor is None:
-                self.noise_floor = tracker_in.copy()
-            else:
-                self.noise_floor = np.minimum(
-                    self.noise_floor * self.noise_decay,
-                    tracker_in,
-                )
+            # SKIPPED entirely (floor frozen) unless this frame is
+            # fully adaptive-origin AND adaptation is enabled: a
+            # blend-attenuated or silent side would drag the minimum
+            # down (zero is absorbing).
+            if model_update:
+                tracker_in = self.power_smooth
+                if self.tone_protect_db > 0.0:
+                    local_med = signal.medfilt(
+                        self.power_smooth.astype(np.float64),
+                        kernel_size=self.tone_protect_med_bins,
+                    )
+                    cap = local_med * (10.0 ** (self.tone_protect_db / 10.0))
+                    tracker_in = np.minimum(self.power_smooth, cap)
+                if self.noise_floor is None:
+                    self.noise_floor = tracker_in.copy()
+                else:
+                    self.noise_floor = np.minimum(
+                        self.noise_floor * self.noise_decay,
+                        tracker_in,
+                    )
             noise_est = self.noise_bias * self.noise_floor + 1e-18
 
             # Stage 3: Ephraim-Malah Decision-Directed Wiener.

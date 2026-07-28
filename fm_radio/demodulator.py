@@ -876,7 +876,8 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         return self._apply_side_nr(left_48, right_48)
 
     def _apply_side_nr(self, left_48: np.ndarray, right_48: np.ndarray,
-                       adapt: bool = True) -> tuple[np.ndarray, np.ndarray]:
+                       adapt: bool = True,
+                       bypass: bool = False) -> tuple[np.ndarray, np.ndarray]:
         """Shared mid/side NR tail for BOTH the stereo and mono paths.
 
         Routing the mono path through the identical tail (issue #29)
@@ -934,7 +935,16 @@ class BaseFMDemodulator(FMDemodulatorInterface):
                 adapt = self._side_nr_adapt
             mid = (0.5 * (left_48 + right_48)).astype(np.float32)
             side = (0.5 * (left_48 - right_48)).astype(np.float32)
-            side_clean = self.side_nr.process(side, adapt=adapt)
+            # bypass=True only for the mono path (side ~ 0, unity OLA,
+            # gain state bit-frozen); the stereo low-blend gate uses
+            # FREEZE mode (adapt=False, bypass=False): the learned
+            # floor is protected while the gain computation keeps
+            # suppressing continuously - a unity bypass here measured
+            # a +6.5 dB side-noise step exactly when reception
+            # degrades (codex P1-2, round 4).
+            side_clean = self.side_nr.process(
+                side, adapt=adapt, bypass=bypass,
+            )
             mid_aligned = self.side_nr_mid_aligner.feed_and_take(
                 mid, side_clean.size,
             )
@@ -992,7 +1002,8 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         # matched chains), so the NR output reduces to the mono
         # signal.  adapt=False freezes the NR's spectral model so the
         # artificial silence cannot collapse the learned noise floor.
-        return self._apply_side_nr(mono_48, right_48, adapt=False)
+        return self._apply_side_nr(mono_48, right_48, adapt=False,
+                                   bypass=True)
 
     # ------------------------------------------------------------------
     # Reset

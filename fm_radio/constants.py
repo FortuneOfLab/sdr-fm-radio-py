@@ -425,28 +425,35 @@ SIDE_NR_TONE_PROTECT_DB = 8.0   # Clamp noise-tracker input to local median + th
 SIDE_NR_TONE_PROTECT_MED_BINS = 33  # Median window (bins) for the tonal-protection clamp
 # Side NR adaptation gate on the stereo blend.  The NR input is the
 # POST-blend side, so at low blend it is an attenuated (or, at
-# blend = 0, exactly ZERO) copy of the genuine side: adapting there
-# poisons the model - zero is an ABSORBING state for the minimum
-# tracker (floor = min(floor*decay, 0) = 0 forever; measured: 4 s of
-# blend-0 stereo left the floor at exactly 0 with gain pinned at 1.0
-# permanently, even after 8 s of blend 1), and a small-blend
-# initialisation sits 20*log10(blend) dB low (side power scales with
-# blend^2).  The gate freezes adaptation (adapt=False: temporal
-# machinery advances, model untouched) until the blend is high
-# enough that the learned floor lands within a quickly-healable
-# offset of the steady-state value.  Measured init error vs forced
-# blend (untrained, vs the blend-1 steady floor of -25.0 dB):
-# 0.5 -> -9.1 dB low (theory -6 from blend^2 plus min-statistics
-# variance), 0.7 -> -4.9 dB; the 6 dB/s upward leak heals -9 dB in
-# ~1.5 s.  In the blend-step case (0 -> 1) the gate opens at full
-# blend and the floor initialises at parity immediately (measured
-# -25.3 vs control -24.8 dB within 1 s, gain 0.300 both).  The OFF
-# threshold adds hysteresis wider than the blend
-# EMA's block-to-block jitter so the gate cannot flap; frames
-# spanning a gate flip are protected by the NR's per-sample
-# provenance tracking (_nonadapt_pending).
-SIDE_NR_ADAPT_BLEND_ON = 0.5    # Blend at/above which NR adaptation (re)opens
-SIDE_NR_ADAPT_BLEND_OFF = 0.35  # Blend at/below which NR adaptation freezes
+# blend = 0, exactly ZERO) copy of the genuine side: TRAINING there
+# poisons the learned floor - zero is an ABSORBING state for the
+# minimum tracker (floor = min(floor*decay, 0) = 0 forever; measured:
+# 4 s of blend-0 stereo left the floor at exactly 0 with gain pinned
+# at 1.0 permanently), and a small-blend initialisation sits
+# ~20*log10(blend) dB low.  Below the gate the NR runs in FREEZE mode
+# (adapt=False, bypass=False): the floor stops updating but the gain
+# computation keeps running against it, so a trained reducer keeps
+# suppressing CONTINUOUSLY through blend dips (a unity bypass here
+# measured a +6.5 dB side-noise step exactly when reception
+# degrades); an untrained reducer outputs unity until the gate opens.
+#
+# Threshold choice (codex round 4): the LIGHT variant's order-1 pilot
+# filters leak the pilot itself into the noise reference, capping its
+# pilot SNR at 9.975 dB and its blend at 0.313 on a PURE pilot of any
+# amplitude - a pre-existing light characteristic, so the gate must
+# open BELOW that saturation or light would never train.  ON = 0.25
+# clears light's 0.31 ceiling with margin while the untrained
+# initialisation error at forced blend 0.25 measures -14.8 dB vs the
+# blend-1 steady floor (-25.0 dB) and heals at the 6 dB/s upward leak
+# in ~2.5 s; for light, whose blend STAYS at ~0.31, the floor learned
+# there matches the side it actually processes, so no healing is
+# needed at all.  OFF = 0.15 keeps a hysteresis band wider than the
+# blend EMA's block-to-block jitter (flap-tested) and still closes
+# the gate long before the absorbing-zero regime; with FREEZE mode
+# even a closed gate can no longer absorb the floor, so the
+# thresholds only decide WHERE the model may learn.
+SIDE_NR_ADAPT_BLEND_ON = 0.25   # Blend at/above which NR adaptation (re)opens
+SIDE_NR_ADAPT_BLEND_OFF = 0.15  # Blend at/below which NR adaptation freezes
 SIDE_NR_LO_HZ = 1500.0          # Lower edge of NR band (preserve low-frequency stereo)
 SIDE_NR_HI_HZ = 15000.0         # Upper edge of NR band
 
