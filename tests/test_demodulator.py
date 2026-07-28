@@ -417,19 +417,15 @@ def test_nr_gate_untrained_weak_pilot_then_recovery(cls, rng):
     assert emitted > 3 * 48_000                     # timeline advanced
 
     # strong pilot returns: gate opens NATURALLY for both variants
-    # (codex round 4).  The light variant's order-1 pilot filters cap
-    # its pilot SNR at ~9.9 dB / blend ~0.31 even on a pure pilot, so
-    # SIDE_NR_ADAPT_BLEND_ON (0.25) is deliberately below that
-    # saturation - light must train through its real product path,
-    # not a forced blend.
+    # through their real product paths (with the PR #32 measurement
+    # path both variants reach full blend on a healthy pilot).
     r2 = np.random.default_rng(4)
     for _ in range(6 * fs_c // n_blk):
         dm.demodulate(comp(n_blk, pos, r2, pilot=True))
         pos += n_blk
     from fm_radio.constants import SIDE_NR_ADAPT_BLEND_ON
     assert dm.blend_factor > SIDE_NR_ADAPT_BLEND_ON, dm.blend_factor
-    if cls is FMDemodulator:
-        assert dm.blend_factor > 0.5, dm.blend_factor
+    assert dm.blend_factor > 0.5, dm.blend_factor
     assert dm._side_nr_adapt
     assert dm.side_nr.noise_floor is not None
     assert np.median(dm.side_nr.prev_gain) < 0.9    # NR active, not pinned
@@ -579,6 +575,161 @@ def test_nr_gate_blend_ramp_has_no_gain_step():
     # the learned floor stayed bit-frozen through the closed stretch
     # (compare at the last closed block before reopen)
     assert d._side_nr_adapt                          # ended reopened
+
+
+PILOTLESS_CASES = {
+    "mono_1k": lambda n, p, fs: 0.4 * np.sin(
+        2 * np.pi * 1000.0 * ((np.arange(n) + p) / fs)),
+    "mono_10k": lambda n, p, fs: 0.4 * np.sin(
+        2 * np.pi * 10_000.0 * ((np.arange(n) + p) / fs)),
+    "mono_14k": lambda n, p, fs: 0.4 * np.sin(
+        2 * np.pi * 14_000.0 * ((np.arange(n) + p) / fs)),
+    "mono_broadband": lambda n, p, fs: (
+        0.2 * np.sin(2 * np.pi * 400.0 * ((np.arange(n) + p) / fs))
+        + 0.1 * np.sin(2 * np.pi * 3_000.0 * ((np.arange(n) + p) / fs))
+        + 0.05 * np.sin(2 * np.pi * 11_000.0 * ((np.arange(n) + p) / fs))),
+    "dsb_only": lambda n, p, fs: (
+        0.4 * np.sin(2 * np.pi * 800.0 * ((np.arange(n) + p) / fs))
+        * np.cos(2 * np.pi * 38_000.0 * ((np.arange(n) + p) / fs))),
+    "silence": lambda n, p, fs: np.zeros(n),
+}
+
+
+@pytest.mark.parametrize("cls", [FMDemodulator, FMDemodulatorLight])
+@pytest.mark.parametrize("case", sorted(PILOTLESS_CASES))
+def test_pilotless_high_cnr_never_reads_as_stereo(cls, case):
+    """Codex P1 on PR #32: pilot-less HIGH-CNR content must stay mono.
+
+    The light variant's order-1 phase LP leaks programme into the
+    pilot measure; with the order-9 noise bands the denominator is
+    tiny on clean composites, so pilot-less mono/DSB content read as
+    74-91 dB SNR / blend 1.0 and the tracker false-acquired (-26 deg
+    on plain mono, +16 deg on orphan DSB).  With the dedicated
+    order-9 measurement residual plus the tracker's pilot-valid
+    gate: SNR below the blend LO threshold, blend closed, NR gate
+    closed, no acquisition, no streak progress, output essentially
+    mono.  This is a DIFFERENT contract from the low-CNR test (which
+    floods all bands with noise); both are needed.
+    """
+    from fm_radio.constants import STEREO_BLEND_PILOT_SNR_DB_LO
+    fs_c = 192_000
+    n_blk = 3072
+    d = cls(stereo=True)
+    d.subcarrier_phase_offset_rad = np.deg2rad(0.3)
+    outs = []
+    pos = 0
+    for _ in range(5 * fs_c // n_blk):
+        left, right = d.demodulate(PILOTLESS_CASES[case](n_blk, pos, fs_c))
+        pos += n_blk
+        outs.append((left, right))
+    assert d.pilot_snr_ema < STEREO_BLEND_PILOT_SNR_DB_LO, d.pilot_snr_ema
+    assert d.blend_factor < 0.05, d.blend_factor
+    assert not d._side_nr_adapt
+    assert not d._phase_acquired
+    assert d._phase_acq_count == 0                  # streak never advanced
+    assert d.stereo_phase_err_ema == 0.0            # no false lock
+    left = np.concatenate([o[0] for o in outs][-20:])
+    right = np.concatenate([o[1] for o in outs][-20:])
+    side = 0.5 * (left.astype(np.float64) - right.astype(np.float64))
+    mid = 0.5 * (left.astype(np.float64) + right.astype(np.float64))
+    if float(np.sqrt(np.mean(mid ** 2))) > 1e-4:    # silence has no mid
+        ratio = (np.sqrt(np.mean(side ** 2))
+                 / (np.sqrt(np.mean(mid ** 2)) + 1e-12))
+        assert ratio < 0.02, ratio                  # essentially mono
+
+
+@pytest.mark.parametrize("amp", [0.01, 0.1, 1.0])
+def test_pure_pilot_parity_across_amplitudes(amp):
+    """Both variants must read a clean pilot as high SNR at ANY
+    amplitude (the old order-1 noise bands saturated light at
+    9.975 dB regardless of amplitude), with variant parity."""
+    fs_c = 192_000
+    n_blk = 3072
+    snrs = {}
+    for cls in (FMDemodulatorLight, FMDemodulator):
+        d = cls(stereo=True)
+        d.subcarrier_phase_offset_rad = np.deg2rad(0.3)
+        pos = 0
+        for _ in range(6 * fs_c // n_blk):
+            tt = (np.arange(n_blk) + pos) / fs_c
+            d.demodulate(amp * np.cos(2 * np.pi * 19_000.0 * tt))
+            pos += n_blk
+        snrs[cls] = d.pilot_snr_ema
+        assert d.pilot_snr_ema > 60.0, (cls, amp, d.pilot_snr_ema)
+        assert d.blend_factor > 0.99, (cls, amp, d.blend_factor)
+    assert abs(snrs[FMDemodulatorLight] - snrs[FMDemodulator]) < 2.0, snrs
+
+
+def test_light_standard_snr_parity_across_cnr():
+    """With a VALID pilot, light and standard pilot SNR must agree
+    across the blend threshold region (codex measured 0.11-0.43 dB
+    deltas on an independent sweep; 1 dB guards the parity)."""
+    fs_c = 192_000
+    n_blk = 3072
+    for noise in (0.05, 0.12, 0.25):                # spans ~blend LO..HI
+        snrs = {}
+        for cls in (FMDemodulator, FMDemodulatorLight):
+            r = np.random.default_rng(5)
+            d = cls(stereo=True)
+            d.subcarrier_phase_offset_rad = np.deg2rad(0.3)
+            pos = 0
+            for _ in range(5 * fs_c // n_blk):
+                tt = (np.arange(n_blk) + pos) / fs_c
+                compv = (0.2 * np.sin(2 * np.pi * 400.0 * tt)
+                         + 0.1 * np.cos(2 * np.pi * 19_000.0 * tt)
+                         + r.standard_normal(n_blk) * noise)
+                d.demodulate(compv)
+                pos += n_blk
+            snrs[cls] = d.pilot_snr_ema
+        delta = abs(snrs[FMDemodulator] - snrs[FMDemodulatorLight])
+        assert delta < 1.0, (noise, snrs, delta)
+
+
+@pytest.mark.parametrize("cls", [FMDemodulator, FMDemodulatorLight])
+def test_pilot_dropout_and_recovery(cls):
+    """Pilot dropout on strong stereo, then recovery (codex PR #32).
+
+    Dropout: blend closes, the tracker stops updating and leaks (no
+    false re-acquisition from the pilot-less DSB+mono content).
+    Recovery: re-acquires on the SAME branch/polarity (angle back
+    near the pre-dropout value, blend reopens).
+    """
+    fs_c = 192_000
+    n_blk = 3072
+
+    def comp(n, p0, pilot):
+        tt = (np.arange(n) + p0) / fs_c
+        lmr = 0.3 * np.sin(2 * np.pi * 700.0 * tt)
+        out = (0.2 * np.sin(2 * np.pi * 400.0 * tt)
+               + lmr * np.cos(2 * np.pi * 38_000.0 * tt))
+        if pilot:
+            out = out + 0.1 * np.cos(2 * np.pi * 19_000.0 * tt)
+        return out
+
+    d = cls(stereo=True)
+    d.subcarrier_phase_offset_rad = np.deg2rad(0.3)
+    pos = 0
+    for _ in range(4 * fs_c // n_blk):              # acquire
+        d.demodulate(comp(n_blk, pos, True))
+        pos += n_blk
+    assert d._phase_acquired
+    assert d.blend_factor > 0.9
+    angle_before = np.rad2deg(d.stereo_phase_err_ema)
+
+    for _ in range(4 * fs_c // n_blk):              # dropout
+        d.demodulate(comp(n_blk, pos, False))
+        pos += n_blk
+    assert d.blend_factor < 0.05, d.blend_factor
+    # leaked toward 0 (or already there); never a new false lock away
+    assert abs(np.rad2deg(d.stereo_phase_err_ema)) <= abs(angle_before) + 1.0
+
+    for _ in range(4 * fs_c // n_blk):              # recovery
+        d.demodulate(comp(n_blk, pos, True))
+        pos += n_blk
+    assert d.blend_factor > 0.9
+    assert d._phase_acquired
+    angle_after = np.rad2deg(d.stereo_phase_err_ema)
+    assert abs(angle_after - angle_before) < 10.0, (angle_before, angle_after)
 
 
 def test_light_pilot_snr_matches_standard_on_pure_pilot():

@@ -456,24 +456,21 @@ SIDE_NR_TONE_PROTECT_MED_BINS = 33  # Median window (bins) for the tonal-protect
 # measured a +6.5 dB side-noise step exactly when reception
 # degrades); an untrained reducer outputs unity until the gate opens.
 #
-# Threshold choice (codex round 4): the LIGHT variant's order-1 pilot
-# filters leak the pilot itself into the noise reference, capping its
-# pilot SNR at 9.975 dB and its blend at 0.313 on a PURE pilot of any
-# amplitude - a pre-existing light characteristic, so the gate must
-# open BELOW that saturation or light would never train.  ON = 0.25
-# clears light's 0.31 ceiling with margin while the untrained
-# initialisation error at forced blend 0.25 measures -17.3 dB
-# (floor -42.3 vs the blend-1 steady -25.0 dB; 3 s synthetic stereo,
-# broadband side noise 0.02) and heals at the 6 dB/s upward leak in
-# ~2.9 s; for light, whose blend STAYS at ~0.31, the floor learned
-# there matches the side it actually processes, so no healing is
-# needed at all.  OFF = 0.15 keeps a hysteresis band wider than the
-# blend EMA's block-to-block jitter (flap-tested) and still closes
-# the gate long before the absorbing-zero regime; with FREEZE mode
-# even a closed gate can no longer absorb the floor, so the
-# thresholds only decide WHERE the model may learn.
-SIDE_NR_ADAPT_BLEND_ON = 0.25   # Blend at/above which NR adaptation (re)opens
-SIDE_NR_ADAPT_BLEND_OFF = 0.15  # Blend at/below which NR adaptation freezes
+# Threshold choice (PR #32: light's pilot SNR is fixed, so the
+# PR #31-era rationale - light's blend saturating at 0.313 and
+# staying there - no longer exists and the original thresholds are
+# restored).  An untrained initialisation at forced blend 0.5
+# measures -9.1 dB vs the blend-1 steady floor (-34.1 vs -25.0 dB;
+# healed by the 6 dB/s upward leak in ~1.5 s); in the blend-step
+# case (0 -> 1) the gate
+# opens at full blend and the floor initialises at parity
+# immediately.  The OFF threshold's 0.15 hysteresis is far wider
+# than the blend EMA's block-to-block jitter (flap-tested across the
+# band).  With FREEZE mode below the gate the absorbing-zero failure
+# is structurally impossible at any threshold; the thresholds only
+# decide where the model may LEARN.
+SIDE_NR_ADAPT_BLEND_ON = 0.5    # Blend at/above which NR adaptation (re)opens
+SIDE_NR_ADAPT_BLEND_OFF = 0.35  # Blend at/below which NR adaptation freezes
 SIDE_NR_LO_HZ = 1500.0          # Lower edge of NR band (preserve low-frequency stereo)
 SIDE_NR_HI_HZ = 15000.0         # Upper edge of NR band
 

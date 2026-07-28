@@ -182,6 +182,34 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         self._pilot_lp_zi: np.ndarray = np.zeros(
             (self.pilot_lp_sos.shape[0], 2), dtype=np.complex128,
         )
+        # --- Pilot MEASUREMENT lowpass (SNR numerator) ---
+        # The SNR numerator must come from an order-matched residual:
+        # with the noise DENOMINATOR at PILOT_NOISE_BAND_ORDER, the
+        # light variant's order-1 PHASE residual leaks programme
+        # content into the numerator, and a pilot-less high-CNR
+        # composite read as 74-91 dB SNR / blend 1.0 while the phase
+        # tracker false-acquired (codex P1 on PR #32).  The
+        # measurement path shares the phase-continuous heterodyne and
+        # filters it at PILOT_NOISE_BAND_ORDER; when the variant's
+        # phase LP already has that order (standard), the phase
+        # residual is reused directly - bit-identical, no extra
+        # filter.  The phase LP keeps the per-variant order because
+        # it sets the subcarrier phase operating point
+        # (STEREO_SUBCARRIER_PHASE_OFFSET_DEG_LIGHT was calibrated
+        # against the order-1 response).
+        self._pilot_meas_separate: bool = (
+            int(pilot_order) != int(PILOT_NOISE_BAND_ORDER)
+        )
+        self._pilot_meas_lp_sos: np.ndarray = (
+            signal.butter(
+                PILOT_NOISE_BAND_ORDER,
+                pilot_lp_cutoff / (self.composite_rate / 2.0),
+                btype="low", output="sos",
+            ) if self._pilot_meas_separate else self.pilot_lp_sos
+        )
+        self._pilot_meas_lp_zi: np.ndarray = np.zeros(
+            (self._pilot_meas_lp_sos.shape[0], 2), dtype=np.complex128,
+        )
         # Noise bands use their own order for BOTH variants (see
         # PILOT_NOISE_BAND_ORDER): the light variant's order-1 skirts
         # leaked the pilot itself into the noise reference and locked
@@ -418,7 +446,10 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         two lines and the lowpass keeps one).
 
         Returns:
-            Tuple of (pilot_phase, pilot_residual).
+            Tuple of (pilot_phase, measurement_residual) - the second
+            element is the ORDER-9 measurement residual used for the
+            pilot SNR numerator (equal to the phase residual on the
+            standard variant, a dedicated filter on light).
         """
         n = np.arange(composite.size, dtype=np.float64)
         w0 = 2.0 * np.pi * self.pilot_residual_center_hz / self.composite_rate
@@ -428,6 +459,17 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         residual_in, self._pilot_lp_zi = signal.sosfilt(
             self.pilot_lp_sos, mixed, zi=self._pilot_lp_zi,
         )
+        # Measurement residual for the SNR numerator (see ctor): the
+        # standard variant reuses the phase residual (same order,
+        # bit-identical); the light variant runs the dedicated
+        # order-9 filter so programme leakage through its order-1
+        # phase LP cannot masquerade as pilot power.
+        if self._pilot_meas_separate:
+            meas_in, self._pilot_meas_lp_zi = signal.sosfilt(
+                self._pilot_meas_lp_sos, mixed, zi=self._pilot_meas_lp_zi,
+            )
+        else:
+            meas_in = residual_in
         residual_phase = self.pilot_pll.process(
             residual_in.astype(np.complex64, copy=False)
         ).astype(np.float64, copy=False)
@@ -443,7 +485,7 @@ class BaseFMDemodulator(FMDemodulatorInterface):
                     np.concatenate(([self._pilot_phase_last], pilot_phase))
                 )[1:]
             self._pilot_phase_last = float(pilot_phase[-1])
-        return pilot_phase, residual_in
+        return pilot_phase, meas_in
 
     def _apply_mono_delay(self, mono: np.ndarray) -> np.ndarray:
         """Delay mono path to compensate LR path group delay."""
@@ -486,6 +528,7 @@ class BaseFMDemodulator(FMDemodulatorInterface):
             filt.reset()
         self.pilot_pll.reset()
         self._pilot_lp_zi = np.zeros_like(self._pilot_lp_zi)
+        self._pilot_meas_lp_zi = np.zeros_like(self._pilot_meas_lp_zi)
         self._pilot_mix_phase = 0.0
         self._pilot_phase_last = None
         self.pilot_snr_ema = None
@@ -637,8 +680,30 @@ class BaseFMDemodulator(FMDemodulatorInterface):
             self.stereo_phase_side_over_noise_db = float(
                 10.0 * np.log10((denom + 1e-30) / (noise_power + 1e-30))
             )
+            # Pilot-valid gate (codex P1 on PR #32): the conditions
+            # below measure the SIDE signal, not pilot presence - and
+            # with the order-9 noise bands the noise reference is tiny
+            # on clean composites, so a pilot-less high-CNR input
+            # (strong mono transmission, pilot dropout, orphan DSB)
+            # could false-acquire from programme leakage through the
+            # light variant's order-1 phase LP (measured -26 deg on
+            # plain mono, +16 deg on orphan DSB).  Require the
+            # measured pilot SNR to clear the blend LO threshold on
+            # BOTH the instantaneous and the EMA reading: the EMA
+            # alone lags a pilot DROPOUT by ~0.4 s, and during that
+            # window the light variant's order-1 phase residual locks
+            # onto leaked DSB content and walked the tracker -23 deg
+            # (the instantaneous reading collapses within one block).
+            # Below the gate the existing uninformative semantics
+            # apply (no acquisition, streak reset, confidence decay,
+            # leak home) and the blend is closed anyway.
+            pilot_valid = (
+                snr_db >= STEREO_BLEND_PILOT_SNR_DB_LO
+                and snr_for_blend >= STEREO_BLEND_PILOT_SNR_DB_LO
+            )
             informative = (
-                denom > 1e-18
+                pilot_valid
+                and denom > 1e-18
                 and mono_pow > 1e-18
                 and denom >= side_gate
                 and denom > noise_ref
@@ -1058,6 +1123,7 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         ):
             filt.reset()
         self._pilot_lp_zi = np.zeros_like(self._pilot_lp_zi)
+        self._pilot_meas_lp_zi = np.zeros_like(self._pilot_meas_lp_zi)
         self._audio_resampler_l.reset()
         self._audio_resampler_r.reset()
         self.side_nr.reset()
