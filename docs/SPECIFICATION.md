@@ -244,10 +244,7 @@ float32 量子化により長時間セッションで劣化するため置換さ
     手順 5 の遷移帯写像成分を抑制。同一フィルタのため
     セパレーションへは影響しない。モノ動作時も両インスタンスを
     同一入力で進め、L/R のサンプル数・出力グリッド・LPF state の
-    不整合を防ぐ。これは局所的な整合の保証であり、Side NR 連鎖
-    （`SideNoiseReducer` / mid アライナ）はモノ動作中に前進しない
-    ため、end-to-end の mono↔stereo 切替連続性は保証しない —
-    main にも存在する既存制約）
+    不整合を防ぐ）
 12. ディエンファシス（τ=50 μs）
 13. **Side NR**（既定 ON、下記）
 
@@ -256,6 +253,20 @@ float32 量子化により長時間セッションで劣化するため置換さ
 `SideNoiseReducer`（3.5 参照）が音声出力段で mid=(L+R)/2 を無加工の
 まま、side=(L−R)/2 のみを DD-Wiener STFT で雑音抑制します。モノ成分の
 音色は完全保存し、ステレオ由来の HF ヒスのみを狙って除去します。
+
+**mono↔stereo 切替連続性**（issue #29 対応）: mid/side NR テールは
+stereo・mono 両経路で共有され（`_apply_side_nr`。モノでは side=(L−R)/2≈0
+が流れる）、モノ動作中も NR 連鎖と mid アライナが前進します。これにより
+(a) stereo→mono 切替では保持中の旧 side が NR オーバーラップを通じて
+滑らかにフラッシュされ（旧実装は破棄後に stereo 復帰時 stale 再生:
+実測 side RMS 0.31/0.19/床）、(b) 出力レイテンシがモード非依存になり
+切替毎の ~16 ms タイムジャンプが消滅。さらに stereo 復帰時は
+`_reset_stereo_side_state` が stereo 専用状態（L−R FIR バンク、パイロット
+ヘテロダイン/PLL、ノイズ帯 BPF、blend/トラッカーの取得状態）を初期同調と
+同じ再取得semanticsでクリアし、復帰 block 0 から stale side なし（最悪
+条件 blend 強制 1 で実測 4e-4、適応 blend では ~5e-5）。長いモノ区間中は
+NR のノイズ床が無音 side に向けて減衰するため、復帰後数秒は NR が
+定常より弱め（`SIDE_NR_NOISE_DECAY_DB_PER_SEC` で有界）— 無害な方向。
 
 ### 3.4 音声出力（audio_output.py）
 

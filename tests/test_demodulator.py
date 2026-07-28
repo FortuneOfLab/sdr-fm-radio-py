@@ -157,13 +157,15 @@ def test_final_audio_lowpass_is_common_and_reconverges_after_stereo(rng):
     so L/R sample counts, output grid and filter states re-match after
     genuinely divergent stereo history.
 
-    This test deliberately does NOT cover end-to-end mono <-> stereo
-    switch continuity (silent switching / time continuity): the side
-    NR chain (SideNoiseReducer, side_nr_mid_aligner) does not advance
-    during mono operation - a pre-existing limitation shared with main
-    and tracked separately.
+    Side NR is disabled here to ISOLATE that local contract: with the
+    shared mid/side NR tail (issue #29) the first mono blocks after a
+    stereo -> mono switch legitimately return L != R while the NR
+    flushes the previous side content - the end-to-end switch
+    behaviour has its own test
+    (test_mono_stereo_switches_are_continuous).
     """
     d = FMDemodulator(stereo=True)
+    d.side_nr_enabled = False
     assert np.array_equal(d.lp_audio_l.taps, d.lp_audio_r.taps)
     assert d.lp_audio_l is not d.lp_audio_r
 
@@ -173,8 +175,13 @@ def test_final_audio_lowpass_is_common_and_reconverges_after_stereo(rng):
         d.demodulate(rng.standard_normal(3072).astype(np.float64) * 0.1)
     assert not np.array_equal(d.lp_audio_l._state, d.lp_audio_r._state)
 
-    # 2) Switch to mono, 3) process one standard block (3072 samples).
+    # 2) Switch to mono, 3) process standard blocks (3072 samples).
+    # The mono path now returns (left-chain, right-chain) outputs, so
+    # the FIRST block still carries each chain's divergent-history
+    # transient; by the second block every state has re-matched and
+    # the returned channels must be bit-identical.
     d.stereo = False
+    d.demodulate(rng.standard_normal(3072).astype(np.float64) * 0.1)
     left, right = d.demodulate(rng.standard_normal(3072).astype(np.float64) * 0.1)
 
     # 4) L/R chains re-matched.
@@ -189,6 +196,79 @@ def test_final_audio_lowpass_is_common_and_reconverges_after_stereo(rng):
     assert abs(d.deemph_left.prev_input - d.deemph_right.prev_input) < 1e-12
     assert abs(d.deemph_left.prev_output - d.deemph_right.prev_output) < 1e-12
     assert np.array_equal(left, right)
+
+
+def test_mono_stereo_switches_are_continuous():
+    """End-to-end mono <-> stereo switch contract (issue #29).
+
+    On main the NR chain froze during mono, so ~2 blocks of stale
+    pre-switch side audio replayed on stereo re-entry (measured side
+    RMS 0.31 / 0.19 / floor).  With the shared NR tail
+    (_apply_side_nr) plus stereo re-acquisition
+    (_reset_stereo_side_state), the stereo -> mono switch FLUSHES the
+    held side smoothly instead of dropping it, and re-entry side
+    stays at pilot-re-lock-noise level from block 0 (worst case
+    measured 4e-4 with the blend forced open; production adaptive
+    blend measures ~5e-5).  Both modes share one output latency, so
+    the timeline no longer jumps ~16 ms at each switch.
+    """
+    fs_c = 192_000
+    n_blk = 3072
+
+    def stereo_comp(n, p0):
+        t = (np.arange(n) + p0) / fs_c
+        lmr = 0.45 * np.sin(2 * np.pi * 700.0 * t)
+        return (lmr * np.cos(2 * np.pi * 38_000.0 * t)
+                + 0.1 * np.cos(2 * np.pi * 19_000.0 * t))
+
+    def mono_comp(n, p0):
+        t = (np.arange(n) + p0) / fs_c
+        return (0.45 * np.sin(2 * np.pi * 300.0 * t)
+                + 0.1 * np.cos(2 * np.pi * 19_000.0 * t))
+
+    def side_rms(l, r):
+        s = 0.5 * (l.astype(np.float64) - r.astype(np.float64))
+        return float(np.sqrt(np.mean(s ** 2))) if s.size else 0.0
+
+    d = FMDemodulator(stereo=True)
+    d.force_blend_factor = 1.0          # worst case: no blend protection
+    d.subcarrier_phase_offset_rad = 0.0
+    pos = 0
+    for _ in range(40):
+        d.demodulate(stereo_comp(n_blk, pos))
+        pos += n_blk
+
+    # stereo -> mono: the held side is flushed smoothly, then drains.
+    d.stereo = False
+    flush = []
+    for _ in range(4):
+        l, r = d.demodulate(mono_comp(n_blk, pos))
+        pos += n_blk
+        flush.append(side_rms(l, r))
+    assert flush[0] > 0.05, flush       # flushed, not dropped
+    assert flush[3] < 1e-4, flush       # fully drained within ~4 blocks
+    for _ in range(36):
+        d.demodulate(mono_comp(n_blk, pos))
+        pos += n_blk
+
+    # mono -> stereo: no stale side from block 0 (main: 0.31 / 0.19).
+    d.stereo = True
+    for b in range(5):
+        l, r = d.demodulate(mono_comp(n_blk, pos))
+        pos += n_blk
+        assert side_rms(l, r) < 5e-3, (b, side_rms(l, r))
+
+    # Mode-independent output latency: equal emitted counts for equal
+    # input (main: the mono path skipped the NR chain's ~16 ms).
+    comp = mono_comp(n_blk * 8, 0)
+    d_st = FMDemodulator(stereo=True)
+    d_st.subcarrier_phase_offset_rad = 0.0
+    d_mo = FMDemodulator(stereo=False)
+    n_st = sum(d_st.demodulate(comp[i:i + n_blk])[0].size
+               for i in range(0, comp.size, n_blk))
+    n_mo = sum(d_mo.demodulate(comp[i:i + n_blk])[0].size
+               for i in range(0, comp.size, n_blk))
+    assert n_st == n_mo
 
 
 def test_discriminator_is_default_and_pll_selectable(monkeypatch):
