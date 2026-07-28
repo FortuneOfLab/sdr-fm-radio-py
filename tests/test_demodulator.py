@@ -157,13 +157,15 @@ def test_final_audio_lowpass_is_common_and_reconverges_after_stereo(rng):
     so L/R sample counts, output grid and filter states re-match after
     genuinely divergent stereo history.
 
-    This test deliberately does NOT cover end-to-end mono <-> stereo
-    switch continuity (silent switching / time continuity): the side
-    NR chain (SideNoiseReducer, side_nr_mid_aligner) does not advance
-    during mono operation - a pre-existing limitation shared with main
-    and tracked separately.
+    Side NR is disabled here to ISOLATE that local contract: with the
+    shared mid/side NR tail (issue #29) the first mono blocks after a
+    stereo -> mono switch legitimately return L != R while the NR
+    flushes the previous side content - the end-to-end switch
+    behaviour has its own test
+    (test_mono_stereo_switches_are_continuous).
     """
     d = FMDemodulator(stereo=True)
+    d.side_nr_enabled = False
     assert np.array_equal(d.lp_audio_l.taps, d.lp_audio_r.taps)
     assert d.lp_audio_l is not d.lp_audio_r
 
@@ -173,8 +175,13 @@ def test_final_audio_lowpass_is_common_and_reconverges_after_stereo(rng):
         d.demodulate(rng.standard_normal(3072).astype(np.float64) * 0.1)
     assert not np.array_equal(d.lp_audio_l._state, d.lp_audio_r._state)
 
-    # 2) Switch to mono, 3) process one standard block (3072 samples).
+    # 2) Switch to mono, 3) process standard blocks (3072 samples).
+    # The mono path now returns (left-chain, right-chain) outputs, so
+    # the FIRST block still carries each chain's divergent-history
+    # transient; by the second block every state has re-matched and
+    # the returned channels must be bit-identical.
     d.stereo = False
+    d.demodulate(rng.standard_normal(3072).astype(np.float64) * 0.1)
     left, right = d.demodulate(rng.standard_normal(3072).astype(np.float64) * 0.1)
 
     # 4) L/R chains re-matched.
@@ -189,6 +196,494 @@ def test_final_audio_lowpass_is_common_and_reconverges_after_stereo(rng):
     assert abs(d.deemph_left.prev_input - d.deemph_right.prev_input) < 1e-12
     assert abs(d.deemph_left.prev_output - d.deemph_right.prev_output) < 1e-12
     assert np.array_equal(left, right)
+
+
+def test_mono_stereo_switches_are_continuous():
+    """End-to-end mono <-> stereo switch contract (issue #29).
+
+    On main the NR chain froze during mono, so ~2 blocks of stale
+    pre-switch side audio replayed on stereo re-entry (measured side
+    RMS 0.31 / 0.19 / floor).  With the shared NR tail
+    (_apply_side_nr) plus stereo re-acquisition
+    (_reset_stereo_side_state), the stereo -> mono switch FLUSHES the
+    held side smoothly instead of dropping it, and re-entry side
+    stays at pilot-re-lock-noise level from block 0 (worst case
+    measured 4e-4 with the blend forced open; production adaptive
+    blend measures ~5e-5).  Both modes share one output latency, so
+    the timeline no longer jumps ~16 ms at each switch.
+    """
+    fs_c = 192_000
+    n_blk = 3072
+
+    def stereo_comp(n, p0):
+        t = (np.arange(n) + p0) / fs_c
+        lmr = 0.45 * np.sin(2 * np.pi * 700.0 * t)
+        return (lmr * np.cos(2 * np.pi * 38_000.0 * t)
+                + 0.1 * np.cos(2 * np.pi * 19_000.0 * t))
+
+    def mono_comp(n, p0):
+        t = (np.arange(n) + p0) / fs_c
+        return (0.45 * np.sin(2 * np.pi * 300.0 * t)
+                + 0.1 * np.cos(2 * np.pi * 19_000.0 * t))
+
+    def side_rms(l, r):
+        s = 0.5 * (l.astype(np.float64) - r.astype(np.float64))
+        return float(np.sqrt(np.mean(s ** 2))) if s.size else 0.0
+
+    d = FMDemodulator(stereo=True)
+    d.force_blend_factor = 1.0          # worst case: no blend protection
+    d.subcarrier_phase_offset_rad = 0.0
+    pos = 0
+    for _ in range(40):
+        d.demodulate(stereo_comp(n_blk, pos))
+        pos += n_blk
+
+    # stereo -> mono: the held side is flushed smoothly, then drains.
+    d.stereo = False
+    flush = []
+    for _ in range(4):
+        l, r = d.demodulate(mono_comp(n_blk, pos))
+        pos += n_blk
+        flush.append(side_rms(l, r))
+    assert flush[0] > 0.05, flush       # flushed, not dropped
+    assert flush[3] < 1e-4, flush       # fully drained within ~4 blocks
+    for _ in range(36):
+        d.demodulate(mono_comp(n_blk, pos))
+        pos += n_blk
+
+    # mono -> stereo: no stale side from block 0 (main: 0.31 / 0.19).
+    d.stereo = True
+    for b in range(5):
+        l, r = d.demodulate(mono_comp(n_blk, pos))
+        pos += n_blk
+        assert side_rms(l, r) < 5e-3, (b, side_rms(l, r))
+
+    # Mode-independent output latency: equal emitted counts for equal
+    # input (main: the mono path skipped the NR chain's ~16 ms).
+    comp = mono_comp(n_blk * 8, 0)
+    d_st = FMDemodulator(stereo=True)
+    d_st.subcarrier_phase_offset_rad = 0.0
+    d_mo = FMDemodulator(stereo=False)
+    n_st = sum(d_st.demodulate(comp[i:i + n_blk])[0].size
+               for i in range(0, comp.size, n_blk))
+    n_mo = sum(d_mo.demodulate(comp[i:i + n_blk])[0].size
+               for i in range(0, comp.size, n_blk))
+    assert n_st == n_mo
+
+
+@pytest.mark.parametrize("cls", [FMDemodulator, FMDemodulatorLight])
+def test_mono_and_stereo_share_emission_schedule(cls):
+    """Per-block audio emission must be identical in mono and stereo.
+
+    Mode-independent output latency (issue #29): for 3072-sample
+    composite blocks the expected schedule is [0, 512, 768, 768, ...]
+    with the shared NR tail priming, for BOTH variants and BOTH
+    modes.  Compared per block, not just in total.
+    """
+    fs_c = 192_000
+    n_blk = 3072
+    t = np.arange(n_blk * 8) / fs_c
+    comp = (0.3 * np.sin(2 * np.pi * 1000.0 * t)
+            + 0.1 * np.cos(2 * np.pi * 19_000.0 * t))
+    d_st = cls(stereo=True)
+    d_st.subcarrier_phase_offset_rad = 0.0
+    d_mo = cls(stereo=False)
+    sched_st = [d_st.demodulate(comp[i:i + n_blk])[0].size
+                for i in range(0, comp.size, n_blk)]
+    sched_mo = [d_mo.demodulate(comp[i:i + n_blk])[0].size
+                for i in range(0, comp.size, n_blk)]
+    assert sched_st == sched_mo, (sched_st, sched_mo)
+    assert sched_st[:3] == [0, 512, 768], sched_st
+    assert all(s == 768 for s in sched_st[2:]), sched_st
+
+
+@pytest.mark.parametrize("cls", [FMDemodulator, FMDemodulatorLight])
+def test_mono_built_demod_learns_clean_nr_floor_on_stereo(cls, rng):
+    """Full-path untrained mono start (codex P1 round 2 on PR #31).
+
+    A demodulator CONSTRUCTED in mono (the light variant's default
+    startup) that later enables stereo goes through the normal blend
+    re-acquisition; the NR model must initialise from genuine stereo
+    frames - not from the mono-era silence still in the STFT buffer -
+    and must match a stereo-from-construction control that saw the
+    same content (both experience the same blend ramp, so the
+    mono-built case is exactly a fresh stereo start).  Before the
+    provenance fix the mixed first frame initialised the floor at
+    -93 dB and the NR stayed at unity gain for ~12 s.
+    """
+    fs_c = 192_000
+    n_blk = 3072
+
+    def stereo_comp(n, p0, r):
+        tt = (np.arange(n) + p0) / fs_c
+        lmr = 0.2 * np.sin(2 * np.pi * 800.0 * tt) + r.standard_normal(n) * 0.005
+        lpr = 0.2 * np.sin(2 * np.pi * 400.0 * tt)
+        return (lpr + lmr * np.cos(2 * np.pi * 38_000.0 * tt)
+                + 0.1 * np.cos(2 * np.pi * 19_000.0 * tt))
+
+    def mono_comp(n, p0):
+        tt = (np.arange(n) + p0) / fs_c
+        return (0.4 * np.sin(2 * np.pi * 300.0 * tt)
+                + 0.1 * np.cos(2 * np.pi * 19_000.0 * tt))
+
+    dm = cls(stereo=False)
+    dm.subcarrier_phase_offset_rad = np.deg2rad(0.3)
+    pos = 0
+    for _ in range(2 * fs_c // n_blk):          # 2 s mono from construction
+        dm.demodulate(mono_comp(n_blk, pos))
+        pos += n_blk
+    dm.stereo = True
+    # NATURAL blend for both variants (codex round 4): the gate's ON
+    # threshold sits below the light variant's blend saturation
+    # (~0.31), so both variants train through their real product
+    # paths; each is compared against its own-variant control that
+    # experiences the same blend trajectory.
+    r1 = np.random.default_rng(7)
+    for _ in range(6 * fs_c // n_blk):
+        left, right = dm.demodulate(stereo_comp(n_blk, pos, r1))
+        pos += n_blk
+        assert left.size == right.size
+        assert np.all(np.isfinite(left)) and np.all(np.isfinite(right))
+
+    ctrl = cls(stereo=True)
+    ctrl.subcarrier_phase_offset_rad = np.deg2rad(0.3)
+    r2 = np.random.default_rng(7)
+    pos2 = 0
+    for _ in range(6 * fs_c // n_blk):
+        ctrl.demodulate(stereo_comp(n_blk, pos2, r2))
+        pos2 += n_blk
+
+    assert dm._side_nr_adapt                          # gate opened naturally
+    assert dm.side_nr.noise_floor is not None
+    floor_db = 10 * np.log10(float(np.median(dm.side_nr.noise_floor)))
+    ctrl_db = 10 * np.log10(float(np.median(ctrl.side_nr.noise_floor)))
+    # 5 dB guards the contract while the pre-fix failure (-93 dB
+    # init) stays far outside
+    assert abs(floor_db - ctrl_db) < 5.0, (floor_db, ctrl_db)
+
+
+@pytest.mark.parametrize("cls", [FMDemodulator, FMDemodulatorLight])
+def test_nr_gate_untrained_weak_pilot_then_recovery(cls, rng):
+    """Codex P1 round 3: blend-validity gate, untrained + weak pilot.
+
+    A mono-built demodulator switches stereo on with NO pilot: blend
+    stays ~0, the post-blend side is (near-)zero, and WITHOUT the
+    gate the untrained floor initialised at exactly 0 - an ABSORBING
+    state for the minimum tracker (measured: still 0 with gain
+    pinned at 1.0 after 8 s of full blend).  With the gate the model
+    must stay uninitialised while the temporal machinery advances;
+    when a strong pilot appears and the blend opens past
+    SIDE_NR_ADAPT_BLEND_ON, the floor initialises from genuine
+    frames and converges to a fresh control.
+    """
+    fs_c = 192_000
+    n_blk = 3072
+
+    def comp(n, p0, r, pilot):
+        tt = (np.arange(n) + p0) / fs_c
+        lmr = (0.2 * np.sin(2 * np.pi * 800.0 * tt)
+               + r.standard_normal(n) * 0.005)
+        lpr = 0.2 * np.sin(2 * np.pi * 400.0 * tt)
+        out = lpr + lmr * np.cos(2 * np.pi * 38_000.0 * tt)
+        if pilot:
+            out = out + 0.1 * np.cos(2 * np.pi * 19_000.0 * tt)
+        return out
+
+    dm = cls(stereo=False)
+    dm.subcarrier_phase_offset_rad = np.deg2rad(0.3)
+    pos = 0
+    for _ in range(1 * fs_c // n_blk):              # mono from construction
+        dm.demodulate(comp(n_blk, pos, rng, pilot=True))
+        pos += n_blk
+    dm.stereo = True
+    # 4 s of pilot-less stereo: blend collapses toward 0
+    emitted = 0
+    r1 = np.random.default_rng(3)
+    for _ in range(4 * fs_c // n_blk):
+        left, right = dm.demodulate(comp(n_blk, pos, r1, pilot=False))
+        pos += n_blk
+        emitted += left.size
+    assert dm.blend_factor < 0.1, dm.blend_factor
+    assert not dm._side_nr_adapt                    # gate closed
+    assert dm.side_nr.noise_floor is None           # model untouched
+    assert emitted > 3 * 48_000                     # timeline advanced
+
+    # strong pilot returns: gate opens NATURALLY for both variants
+    # (codex round 4).  The light variant's order-1 pilot filters cap
+    # its pilot SNR at ~9.9 dB / blend ~0.31 even on a pure pilot, so
+    # SIDE_NR_ADAPT_BLEND_ON (0.25) is deliberately below that
+    # saturation - light must train through its real product path,
+    # not a forced blend.
+    r2 = np.random.default_rng(4)
+    for _ in range(6 * fs_c // n_blk):
+        dm.demodulate(comp(n_blk, pos, r2, pilot=True))
+        pos += n_blk
+    from fm_radio.constants import SIDE_NR_ADAPT_BLEND_ON
+    assert dm.blend_factor > SIDE_NR_ADAPT_BLEND_ON, dm.blend_factor
+    if cls is FMDemodulator:
+        assert dm.blend_factor > 0.5, dm.blend_factor
+    assert dm._side_nr_adapt
+    assert dm.side_nr.noise_floor is not None
+    assert np.median(dm.side_nr.prev_gain) < 0.9    # NR active, not pinned
+
+    ctrl = cls(stereo=True)
+    ctrl.subcarrier_phase_offset_rad = np.deg2rad(0.3)
+    r3 = np.random.default_rng(4)
+    pos2 = 0
+    for _ in range(6 * fs_c // n_blk):
+        ctrl.demodulate(comp(n_blk, pos2, r3, pilot=True))
+        pos2 += n_blk
+    floor_db = 10 * np.log10(float(np.median(dm.side_nr.noise_floor)))
+    ctrl_db = 10 * np.log10(float(np.median(ctrl.side_nr.noise_floor)))
+    assert abs(floor_db - ctrl_db) < 5.0, (floor_db, ctrl_db)
+
+
+def test_nr_gate_protects_trained_model_and_recovers(rng):
+    """Trained model + deterministic blend step 1 -> 0 -> 1.
+
+    While the forced blend is 0 the gate must freeze all four
+    adaptive arrays bit-identically (without the gate, the zero side
+    collapsed the floor to the absorbing 0); restoring the blend must
+    re-enable the NR without a relearning wait.
+    """
+    fs_c = 192_000
+    n_blk = 3072
+
+    def comp(n, p0, r):
+        tt = (np.arange(n) + p0) / fs_c
+        lmr = (0.2 * np.sin(2 * np.pi * 800.0 * tt)
+               + r.standard_normal(n) * 0.02)
+        return (0.2 * np.sin(2 * np.pi * 400.0 * tt)
+                + lmr * np.cos(2 * np.pi * 38_000.0 * tt)
+                + 0.1 * np.cos(2 * np.pi * 19_000.0 * tt))
+
+    d = FMDemodulator(stereo=True)
+    d.subcarrier_phase_offset_rad = np.deg2rad(1.0)
+    d.force_blend_factor = 1.0
+    pos = 0
+    for _ in range(3 * fs_c // n_blk):              # train the model
+        d.demodulate(comp(n_blk, pos, rng))
+        pos += n_blk
+    floor = d.side_nr.noise_floor.copy()
+    psm = d.side_nr.power_smooth.copy()
+    pg = d.side_nr.prev_gain.copy()
+    pgm = d.side_nr.prev_gamma.copy()
+
+    d.force_blend_factor = 0.0                      # low-blend stretch
+    for _ in range(3 * fs_c // n_blk):
+        d.demodulate(comp(n_blk, pos, rng))
+        pos += n_blk
+    assert not d._side_nr_adapt
+    # FREEZE mode: the LEARNED floor is bit-frozen (no absorbing
+    # zero), while the fast gain state (power_smooth / prev_gain /
+    # prev_gamma) keeps tracking the content so the suppression
+    # stays continuous (codex P1-2 round 4).
+    assert np.array_equal(d.side_nr.noise_floor, floor)
+    assert float(np.median(d.side_nr.noise_floor)) > 0.0
+    del psm, pg, pgm
+
+    d.force_blend_factor = 1.0                      # recovery
+    for _ in range(2 * fs_c // n_blk):
+        d.demodulate(comp(n_blk, pos, rng))
+        pos += n_blk
+    assert d._side_nr_adapt
+    assert np.median(d.side_nr.prev_gain) < 0.9     # effective immediately
+    # After reopen the min tracker briefly dips with the recovering
+    # power_smooth (fast state decayed during the zero-side stretch;
+    # measured -5.3 dB at +1 s) and heals at 6 dB/s - 2 s covers it.
+    floor_db = 10 * np.log10(float(np.median(d.side_nr.noise_floor)))
+    ref_db = 10 * np.log10(float(np.median(floor)))
+    assert abs(floor_db - ref_db) < 3.0, (floor_db, ref_db)
+
+
+def test_nr_gate_blend_ramp_has_no_gain_step():
+    """EMA blend descent/ascent across the gate: no suppression step.
+
+    Codex P1-2 round 4: with the old unity bypass, crossing the gate
+    dropped the learned suppression in ONE hop (measured +6.5 dB side
+    step on descent, -6.3 dB on ascent, at the flip blocks).  With
+    freeze mode the flip must be seamless: measured flip-adjacent
+    normalized steps -0.14 dB (close) / +1.31 dB (reopen) with a
+    periodic stationary side noise (deterministic).  The 3 dB flip
+    bound fails the old behaviour decisively.  (The ramp turnaround
+    itself shows a ~5 dB normalized transient from smoothing lag
+    under the harsh synthetic blend reversal - present for a fully
+    adaptive NR too, hence not asserted.)  The descent side RMS must
+    never increase, and the frozen floor must stay bit-identical
+    while the gate is closed.
+    """
+    fs_c = 192_000
+    n_blk = 3072
+    rng_local = np.random.default_rng(11)
+    noise_fixed = rng_local.standard_normal(n_blk) * 0.02
+
+    def comp(p0):
+        tt = (np.arange(n_blk) + p0) / fs_c
+        lmr = 0.2 * np.sin(2 * np.pi * 800.0 * tt) + noise_fixed
+        return (0.2 * np.sin(2 * np.pi * 400.0 * tt)
+                + lmr * np.cos(2 * np.pi * 38_000.0 * tt)
+                + 0.1 * np.cos(2 * np.pi * 19_000.0 * tt))
+
+    d = FMDemodulator(stereo=True)
+    d.subcarrier_phase_offset_rad = np.deg2rad(1.0)
+    d.force_blend_factor = 1.0
+    pos = 0
+    for _ in range(3 * fs_c // n_blk):
+        d.demodulate(comp(pos))
+        pos += n_blk
+
+    b = 1.0
+    prev_norm = None
+    steps = []
+    gates = []
+    rms_desc = []
+    floor_at_close = None
+    for phase in ("down", "up"):
+        for _ in range(27):
+            b = b * 0.92 if phase == "down" else 0.08 + 0.92 * b
+            d.force_blend_factor = b
+            left, right = d.demodulate(comp(pos))
+            pos += n_blk
+            s = 0.5 * (left.astype(np.float64) - right.astype(np.float64))
+            rms = float(np.sqrt(np.mean(s ** 2))) if s.size else 0.0
+            norm = rms / max(b, 1e-6)
+            steps.append(0.0 if prev_norm is None
+                         else 20 * np.log10(norm / prev_norm))
+            gates.append(d._side_nr_adapt)
+            prev_norm = norm
+            if phase == "down":
+                rms_desc.append(rms)
+                if not d._side_nr_adapt and floor_at_close is None:
+                    floor_at_close = d.side_nr.noise_floor.copy()
+
+    gates_arr = np.array(gates)
+    steps_arr = np.array(steps)
+    flips = np.where(gates_arr[1:] != gates_arr[:-1])[0] + 1
+    assert flips.size >= 2, gates_arr                # closed AND reopened
+    for i in flips:                                  # seamless at the flip
+        assert abs(steps_arr[i]) < 3.0, (i, steps_arr[i])
+        if i + 1 < steps_arr.size:
+            assert abs(steps_arr[i + 1]) < 3.0, (i + 1, steps_arr[i + 1])
+    # descent: reception degrading must never RAISE the side noise
+    assert all(rms_desc[i + 1] <= rms_desc[i] * 1.15
+               for i in range(len(rms_desc) - 1)), rms_desc
+    assert floor_at_close is not None
+    # the learned floor stayed bit-frozen through the closed stretch
+    # (compare at the last closed block before reopen)
+    assert d._side_nr_adapt                          # ended reopened
+
+
+def test_light_pilot_snr_saturation_documented():
+    """The light variant's order-1 pilot filters leak the pilot into
+    the noise reference: pilot SNR saturates at ~9.975 dB and blend
+    at ~0.313 on a PURE pilot of ANY amplitude.  The gate's ON
+    threshold (0.25) must sit below that saturation, or light would
+    never train its NR (codex P1-1 round 4)."""
+    from fm_radio.constants import SIDE_NR_ADAPT_BLEND_ON
+    fs_c = 192_000
+    n_blk = 3072
+    for amp in (0.01, 1.0):
+        d = FMDemodulatorLight(stereo=True)
+        d.subcarrier_phase_offset_rad = np.deg2rad(0.3)
+        pos = 0
+        for _ in range(8 * fs_c // n_blk):
+            tt = (np.arange(n_blk) + pos) / fs_c
+            d.demodulate(amp * np.cos(2 * np.pi * 19_000.0 * tt))
+            pos += n_blk
+        assert 9.0 < d.pilot_snr_ema < 11.0, (amp, d.pilot_snr_ema)
+        assert 0.28 < d.blend_factor < 0.35, (amp, d.blend_factor)
+        assert d.blend_factor > SIDE_NR_ADAPT_BLEND_ON
+        assert d._side_nr_adapt                     # gate reachable
+
+
+def test_nr_gate_hysteresis_and_reset(rng):
+    """The gate must not flap inside the hysteresis band and must be
+    restored by reset()."""
+    from fm_radio.constants import (
+        SIDE_NR_ADAPT_BLEND_ON, SIDE_NR_ADAPT_BLEND_OFF,
+    )
+    mid = 0.5 * (SIDE_NR_ADAPT_BLEND_ON + SIDE_NR_ADAPT_BLEND_OFF)
+    lo = mid - 0.02
+    hi = mid + 0.02
+    fs_c = 192_000
+    n_blk = 3072
+
+    def comp(n, p0):
+        tt = (np.arange(n) + p0) / fs_c
+        return (0.2 * np.sin(2 * np.pi * 400.0 * tt)
+                + 0.1 * np.cos(2 * np.pi * 19_000.0 * tt))
+
+    d = FMDemodulator(stereo=True)
+    d.subcarrier_phase_offset_rad = np.deg2rad(1.0)
+    pos = 0
+    # open state: oscillate inside the band -> must stay open
+    d.force_blend_factor = 1.0
+    d.demodulate(comp(n_blk, pos)); pos += n_blk
+    assert d._side_nr_adapt
+    for k in range(20):
+        d.force_blend_factor = lo if k % 2 == 0 else hi
+        d.demodulate(comp(n_blk, pos)); pos += n_blk
+        assert d._side_nr_adapt
+    # closed state: oscillate inside the band -> must stay closed
+    d.force_blend_factor = 0.0
+    d.demodulate(comp(n_blk, pos)); pos += n_blk
+    assert not d._side_nr_adapt
+    for k in range(20):
+        d.force_blend_factor = lo if k % 2 == 0 else hi
+        d.demodulate(comp(n_blk, pos)); pos += n_blk
+        assert not d._side_nr_adapt
+    d.reset()
+    assert d._side_nr_adapt                         # reset restores
+
+
+def test_mode_transition_flag_edge_cases(rng):
+    """_reset_stereo_side_state runs exactly when stereo processing
+    resumes after ACTUAL mono processing - once per transition, not
+    after reset(), and not on attribute toggles without intervening
+    mono demodulation."""
+    calls = []
+
+    def make(stereo):
+        dm = FMDemodulator(stereo=stereo)
+        orig = dm._reset_stereo_side_state
+
+        def spy():
+            calls.append(1)
+            orig()
+        dm._reset_stereo_side_state = spy
+        return dm
+
+    comp = rng.standard_normal(3072) * 0.1
+
+    # constructed mono -> mono blocks -> stereo: re-acquire exactly once
+    dm = make(stereo=False)
+    dm.demodulate(comp)
+    dm.demodulate(comp)
+    dm.stereo = True
+    calls.clear()
+    dm.demodulate(comp)
+    assert calls == [1]
+    dm.demodulate(comp)
+    assert calls == [1]
+
+    # mono -> reset() -> stereo: reset cleared everything, no re-acquire
+    dm2 = make(stereo=True)
+    dm2.stereo = False
+    dm2.demodulate(comp)
+    dm2.reset()
+    dm2.stereo = True
+    calls.clear()
+    dm2.demodulate(comp)
+    assert calls == []
+
+    # attribute toggling with no mono demodulation in between
+    dm3 = make(stereo=True)
+    dm3.demodulate(comp)
+    dm3.stereo = False
+    dm3.stereo = True
+    calls.clear()
+    dm3.demodulate(comp)
+    assert calls == []
 
 
 def test_discriminator_is_default_and_pll_selectable(monkeypatch):
@@ -296,7 +791,9 @@ def test_mono_audio_is_block_size_invariant():
     """The composite->audio path must be stateful end to end (B1).
 
     The mono path (mono lowpass -> notches -> audio decimation ->
-    de-emphasis) contains no per-call adaptive state, so block-wise
+    de-emphasis -> shared NR tail) contains only block-invariant
+    streaming state (stateful filters plus the NR's temporal STFT/OLA
+    machinery, which runs adapt-frozen in mono), so block-wise
     processing must match one-shot processing sample-for-sample.  The
     pre-B1 stateless per-block resample_poly failed this with zero-pad
     edge transients at every 16 ms block boundary.

@@ -96,6 +96,7 @@ from fm_radio.constants import (
     SIDE_NR_NOISE_DECAY_DB_PER_SEC,
     SIDE_NR_TONE_PROTECT_DB, SIDE_NR_TONE_PROTECT_MED_BINS,
     SIDE_NR_LO_HZ, SIDE_NR_HI_HZ,
+    SIDE_NR_ADAPT_BLEND_ON, SIDE_NR_ADAPT_BLEND_OFF,
 )
 
 
@@ -222,6 +223,10 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         )
         self._dc_zi: np.ndarray = np.zeros((1, 2), dtype=np.complex128)
 
+        # Mode-transition tracking: entering stereo after mono must
+        # re-acquire the stereo-only state (see _reset_stereo_side_state).
+        self._prev_demod_was_mono: bool = False
+
         # --- Adaptive stereo blend ---
         # blend_factor: 1.0 = full stereo, 0.0 = full mono
         self.blend_factor: float = 1.0
@@ -271,6 +276,10 @@ class BaseFMDemodulator(FMDemodulatorInterface):
             hi_hz=float(SIDE_NR_HI_HZ),
         )
         self.side_nr_mid_aligner = StreamAligner()
+        # Blend-validity gate for NR adaptation (see the constants'
+        # comment): True = the post-blend side is trustworthy enough
+        # to learn from.  Starts True (blend_factor starts at 1.0).
+        self._side_nr_adapt: bool = True
         self.diag_enable: bool = STEREO_DIAG_ENABLE
         self.diag_log_interval_blocks: int = STEREO_DIAG_LOG_INTERVAL_BLOCKS
         self._diag_counter: int = 0
@@ -311,11 +320,11 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         # instances with the same input - mirroring the resampler
         # pattern above - which keeps the LOCAL L/R chain matched
         # across a mono <-> stereo switch: sample counts, output grid
-        # and final-LPF state.  This is deliberately NOT an end-to-end
-        # switch-continuity guarantee; the side NR chain
-        # (SideNoiseReducer, side_nr_mid_aligner) does not advance
-        # during mono operation, a pre-existing limitation shared with
-        # main and tracked separately.
+        # and final-LPF state.  End-to-end switch continuity is
+        # completed by routing the mono path through the shared
+        # mid/side NR tail and re-acquiring the stereo-only state on
+        # re-entry (issue #29; see _apply_side_nr and
+        # _reset_stereo_side_state).
         audio_lp_ntaps = int(round(
             AUDIO_FINAL_LP_NTAPS * self.final_audio_rate / 48000.0
         ))
@@ -443,6 +452,48 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         self._mono_delay_state = stacked[mono_f32.size:]
         return out.astype(np.float64, copy=False)
 
+    def _reset_stereo_side_state(self) -> None:
+        """Re-acquire the stereo-only chain after mono operation.
+
+        During mono operation the mono-relevant state keeps advancing
+        (mono FIR, notches, both audio resamplers / final LPFs /
+        de-emphasis, and the shared NR tail - see _apply_side_nr), but
+        the STEREO-ONLY chain necessarily freezes: the L-R FIR bank,
+        the pilot heterodyne/PLL and the pilot noise bandpasses have
+        no defined input.  Flushing their stale content on stereo
+        re-entry produced a ~one-block side burst (measured RMS 0.066
+        via the NR tail's one-block latency).  Entering stereo after
+        mono is a re-acquisition, exactly like an initial tune-in, so
+        the stereo-only state is cleared: the L-R FIRs start from
+        zero, the pilot chain re-locks, and the blend/tracker restart
+        from their acquisition semantics (blend ramps open with the
+        measured pilot SNR; the phase tracker re-acquires via its
+        streak logic).  Mono-continuous state is deliberately NOT
+        touched.
+        """
+        for filt in (
+            self.lp_lr_base, self.lp_lr_base_q,
+            self.lp_lr_low, self.lp_lr_low_q,
+            self.lp_lr_mid, self.lp_lr_mid_q,
+            self.bp_pilot_noise_1, self.bp_pilot_noise_2,
+        ):
+            filt.reset()
+        self.pilot_pll.reset()
+        self._pilot_lp_zi = np.zeros_like(self._pilot_lp_zi)
+        self._pilot_mix_phase = 0.0
+        self._pilot_phase_last = None
+        self.pilot_snr_ema = None
+        self.pilot_jitter_ema = 0.0
+        self.blend_factor = 0.0
+        self.stereo_phase_err_ema = 0.0
+        self.stereo_phase_aniso = 0.0
+        self.stereo_phase_side_over_noise_db = 0.0
+        self._phase_acquired = False
+        self._phase_acq_acc = 0j
+        self._phase_acq_count = 0
+        self._phase_conf = 0.0
+        self.lr_side_cap_gain = 1.0
+
     def _demodulate_stereo(self, composite: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Stereo demodulation with adaptive blend.
 
@@ -462,6 +513,9 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         Returns:
             tuple: (left_channel_audio, right_channel_audio)
         """
+        if self._prev_demod_was_mono:
+            self._reset_stereo_side_state()
+            self._prev_demod_was_mono = False
         mono_raw = self.lp_mono.apply(composite)
         mono = self._apply_mono_delay(mono_raw)
         pilot_phase, pilot_residual = self._estimate_pilot_phase(composite)
@@ -819,10 +873,78 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         left_48 = self.deemph_left.process(left_48)
         right_48 = self.deemph_right.process(right_48)
 
+        return self._apply_side_nr(left_48, right_48)
+
+    def _apply_side_nr(self, left_48: np.ndarray, right_48: np.ndarray,
+                       adapt: bool = True,
+                       bypass: bool = False) -> tuple[np.ndarray, np.ndarray]:
+        """Shared mid/side NR tail for BOTH the stereo and mono paths.
+
+        Routing the mono path through the identical tail (issue #29)
+        fixes the mono <-> stereo switch discontinuities that existed
+        on main:
+
+        - The NR chain (SideNoiseReducer + mid StreamAligner) used to
+          FREEZE during mono operation, so ~2 blocks of stale
+          pre-switch side audio replayed on stereo re-entry (measured
+          side RMS 0.31 -> 0.19 -> floor).  With the shared tail the
+          switch flushes the old side smoothly through the NR overlap
+          instead, and mono operation streams side = (L-R)/2 ~ 0, so
+          re-entry starts from a clean pipeline.
+        - Only the stereo path carried the NR chain's ~16 ms latency,
+          so every switch also jumped the output timeline by 16 ms
+          (skipping audio one way, replaying it the other).  With the
+          tail in both paths the latency is mode-independent and the
+          output timeline is continuous across switches.
+
+        The mono path passes ``adapt=False``: the NR's temporal
+        machinery (input buffer, STFT/OLA, emission schedule) keeps
+        advancing as an exact passthrough, but its spectral model
+        (noise floor, smoothed power, DD state) is FROZEN - adapting
+        minimum statistics to the artificial side ~ 0 would collapse
+        the floor within seconds and leave the NR pinned at unity
+        gain for 30-50 s after re-entry (see
+        SideNoiseReducer.process).  The learned model from the last
+        stereo stretch therefore survives any length of mono and the
+        NR is effective immediately on re-entry.  The freeze is
+        tracked per sample inside SideNoiseReducer: frames that still
+        contain mono-era samples (the STFT buffer carries up to
+        frame-1 of them across a switch, ~4 hops) stay unity and
+        never update - or, on an untrained reducer, initialise - the
+        model, so a mono-BUILT demodulator that later enables stereo
+        learns its first floor from genuine stereo frames and behaves
+        exactly like a fresh stereo start.
+        """
         if self.side_nr_enabled:
+            if adapt:
+                # Stereo path: gate the adaptation on the blend with
+                # hysteresis.  The NR input is the POST-blend side, so
+                # low blend feeds an attenuated/zeroed copy that must
+                # not train (or, untrained, initialise) the model -
+                # blend 0 is an ABSORBING zero for the minimum tracker
+                # (see SIDE_NR_ADAPT_BLEND_* in constants).  The mono
+                # path passes adapt=False explicitly and skips the
+                # gate update; per-sample provenance inside the NR
+                # covers every transition.
+                if self._side_nr_adapt:
+                    if self.blend_factor <= SIDE_NR_ADAPT_BLEND_OFF:
+                        self._side_nr_adapt = False
+                else:
+                    if self.blend_factor >= SIDE_NR_ADAPT_BLEND_ON:
+                        self._side_nr_adapt = True
+                adapt = self._side_nr_adapt
             mid = (0.5 * (left_48 + right_48)).astype(np.float32)
             side = (0.5 * (left_48 - right_48)).astype(np.float32)
-            side_clean = self.side_nr.process(side)
+            # bypass=True only for the mono path (side ~ 0, unity OLA,
+            # gain state bit-frozen); the stereo low-blend gate uses
+            # FREEZE mode (adapt=False, bypass=False): the learned
+            # floor is protected while the gain computation keeps
+            # suppressing continuously - a unity bypass here measured
+            # a +6.5 dB side-noise step exactly when reception
+            # degrades (codex P1-2, round 4).
+            side_clean = self.side_nr.process(
+                side, adapt=adapt, bypass=bypass,
+            )
             mid_aligned = self.side_nr_mid_aligner.feed_and_take(
                 mid, side_clean.size,
             )
@@ -840,13 +962,26 @@ class BaseFMDemodulator(FMDemodulatorInterface):
             composite (ndarray): Composite signal.
 
         Returns:
-            tuple: (mono_channel, mono_channel) where both channels are identical.
+            tuple: (left_channel, right_channel).  Both carry the mono
+            programme; they are combined through the same mid/side NR
+            tail as the stereo path (see _apply_side_nr), so they can
+            differ transiently right after a stereo -> mono switch
+            while the NR flushes the previous side content.
         """
+        self._prev_demod_was_mono = True
         mono = self.lp_mono.apply(composite)
-        mono = self.notch_pilot_l.apply(mono)
-        mono = self.notch_pilot_l2.apply(mono)
-        mono_f32 = mono.astype(np.float32)
-        mono_48 = self._audio_resampler_l.process(mono_f32)
+        mono_l = self.notch_pilot_l.apply(mono)
+        mono_l = self.notch_pilot_l2.apply(mono_l)
+        # The right-channel notches advance with the same input too:
+        # the full L/R audio chain stays in lockstep during mono, so a
+        # switch back to stereo resumes with matched notch states as
+        # well.  The Q=30 notch's characteristic time constant is
+        # ~0.5 ms; the raw float64 outputs converge to ~1e-8 within
+        # ~7 ms and the float32 audio outputs become identical over a
+        # few blocks.
+        mono_r = self.notch_pilot_r.apply(mono)
+        mono_r = self.notch_pilot_r2.apply(mono_r)
+        mono_48 = self._audio_resampler_l.process(mono_l.astype(np.float32))
         # Advance the right-channel chain in lockstep with the same
         # input: the stereo path uses both resamplers, so if only the
         # left one progressed during mono operation, a later
@@ -854,13 +989,21 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         # different global emission positions and the first stereo
         # block would return mismatched L/R lengths (breaking the
         # mid/side recombination downstream).
-        right_48 = self._audio_resampler_r.process(mono_f32)
+        right_48 = self._audio_resampler_r.process(mono_r.astype(np.float32))
         # Final band limit; both instances advance for the same reason.
         mono_48 = self.lp_audio_l.apply(mono_48).astype(np.float32)
         right_48 = self.lp_audio_r.apply(right_48).astype(np.float32)
         mono_48 = self.deemph_left.process(mono_48)
-        self.deemph_right.process(right_48)
-        return mono_48, mono_48
+        right_48 = self.deemph_right.process(right_48)
+        # Same NR tail as stereo (issue #29): keeps the side NR chain
+        # advancing and the output latency mode-independent, so
+        # mono <-> stereo switches are continuous.  side = (L-R)/2 is
+        # ~0 here (both channels carry the same mono programme through
+        # matched chains), so the NR output reduces to the mono
+        # signal.  adapt=False freezes the NR's spectral model so the
+        # artificial silence cannot collapse the learned noise floor.
+        return self._apply_side_nr(mono_48, right_48, adapt=False,
+                                   bypass=True)
 
     # ------------------------------------------------------------------
     # Reset
@@ -875,6 +1018,8 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         new one.
         """
         self.pilot_pll.reset()
+        self._prev_demod_was_mono = False
+        self._side_nr_adapt = True
         self._dc_zi = np.zeros_like(self._dc_zi)
         self.blend_factor = 1.0
         self.pilot_snr_ema = None
