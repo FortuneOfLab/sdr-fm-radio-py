@@ -110,6 +110,57 @@ def test_blend_snr_ramp_protects_weak_signal():
 
 
 @pytest.mark.slow
+def test_front_end_separation_floor_under_realistic_conditions():
+    """The 8-12 kHz region must stay clean with realistic impairments.
+
+    Root cause of the historical "8-12 kHz dip": near-zero carrier
+    offsets put the synthetic tone's discrete carrier line inside the
+    DC remover's notch; the removed component intermodulates across
+    the composite.  With a realistic carrier offset (this hardware
+    measures ~60 Hz residual; 1237 Hz chosen off the synthetic tone
+    comb) and a large injected LO-leak DC, the DC blocker must remove
+    the DC with no separation cost: measured 47.3 dB at 10 kHz and
+    48.8 dB at 12 kHz (NR and corrector off, fixed blend, DSP
+    offset).  Per-frequency floors ~1 dB under the measured values;
+    mutation-checked: bypassing _remove_dc entirely measures
+    44.96/46.98 dB, which the floors reject.
+    """
+    from fm_radio.demodulator import FMDemodulator
+    from fm_radio.quality_selftest import (
+        _synthesize_iq_tone, _apply_channel, _stereo_separation_ls_db,
+    )
+    from fm_radio.constants import SDR_BLOCK_SIZE
+    fs_a = 48_000
+    floors = {10_000.0: 46.0, 12_000.0: 47.5}
+    for tone in (10_000.0, 12_000.0):
+        iq = _synthesize_iq_tone(
+            5.0, 1_024_000, tone, 1.0, 0.0, 0.1, 75_000.0,
+            constant_modulation=True,
+        ).astype(np.complex64)
+        iq = _apply_channel(iq, 1_024_000, None, carrier_offset_hz=1237.0)
+        iq = (iq + np.complex64(0.05 + 0.03j)).astype(np.complex64)
+        d = FMDemodulator(stereo=True)
+        d.force_blend_factor = 1.0
+        d.side_nr_enabled = False
+        d.iq_phase_correction_enabled = False
+        from fm_radio.constants import STEREO_SUBCARRIER_PHASE_OFFSET_DEG
+        d.subcarrier_phase_offset_rad = np.deg2rad(
+            STEREO_SUBCARRIER_PHASE_OFFSET_DEG)
+        ls, rs = [], []
+        for i in range(0, iq.size, SDR_BLOCK_SIZE):
+            ch = iq[i:i + SDR_BLOCK_SIZE]
+            if ch.size < 8:
+                break
+            l, r = d.demodulate(d.process_iq_samples(ch))
+            ls.append(l.astype(np.float32))
+            rs.append(r.astype(np.float32))
+        left = np.concatenate(ls)[int(1.5 * fs_a):]
+        right = np.concatenate(rs)[int(1.5 * fs_a):]
+        sep = _stereo_separation_ls_db(left, right, max_lag=96)
+        assert sep > floors[tone], (tone, sep)
+
+
+@pytest.mark.slow
 def test_hf_separation_maintained_at_14k():
     """The FIR bank's headline win must not regress.
 

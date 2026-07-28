@@ -80,7 +80,7 @@ from fm_radio.constants import (
     AUDIO_FINAL_LP_NTAPS, AUDIO_FINAL_LP_CUTOFF_HZ, AUDIO_FINAL_LP_STOP_HZ,
     STEREO_LR_DEMOD_GAIN,
     STEREO_DIAG_ENABLE, STEREO_DIAG_LOG_INTERVAL_BLOCKS,
-    DEEMPHASIS_TAU, DC_OFFSET_ALPHA,
+    DEEMPHASIS_TAU, DC_BLOCK_CUTOFF_HZ,
     AUDIO_OUTPUT_RATE, COMPOSITE_RATE, LIGHT_COMPOSITE_SCALE,
     STANDARD_RESAMPLE_KAISER_BETA,
     STEREO_BLEND_PILOT_SNR_DB_HI, STEREO_BLEND_PILOT_SNR_DB_LO,
@@ -107,7 +107,7 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         lowpass, de-emphasis).
       - Resampling ratio calculation (IQ -> composite, composite -> audio).
       - Stereo/mono demodulation from the composite signal.
-      - DC offset tracking.
+      - DC blocking (complex one-pole LTI highpass on the IQ).
 
     Subclasses must implement:
       - ``process_iq_samples``: convert raw IQ to composite signal.
@@ -214,9 +214,13 @@ class BaseFMDemodulator(FMDemodulatorInterface):
             sample_rate=self.composite_rate,
         )
 
-        # --- DC offset tracking ---
-        self.dc_offset = 0.0
-        self.dc_alpha = DC_OFFSET_ALPHA
+        # --- DC blocker (complex one-pole highpass, LTI) ---
+        # See _remove_dc for why this replaced the block-mean EMA.
+        rho = 1.0 - 2.0 * np.pi * DC_BLOCK_CUTOFF_HZ / self.iq_sample_rate
+        self._dc_sos: np.ndarray = np.array(
+            [[1.0, -1.0, 0.0, 1.0, -rho, 0.0]]
+        )
+        self._dc_zi: np.ndarray = np.zeros((1, 2), dtype=np.complex128)
 
         # --- Adaptive stereo blend ---
         # blend_factor: 1.0 = full stereo, 0.0 = full mono
@@ -342,6 +346,49 @@ class BaseFMDemodulator(FMDemodulatorInterface):
             return self._demodulate_stereo(composite)
         else:
             return self._demodulate_mono(composite)
+
+    def _remove_dc(self, iq_samples: np.ndarray) -> np.ndarray:
+        """Remove the front-end DC offset with a narrow LTI blocker.
+
+        Replaces the old per-block block-mean EMA subtraction.  To
+        first order, removing an offset c from an FM signal
+        y = exp(j*phi) - c adds a phase error -Im(c*e^{-j*phi}): the
+        removed component is an additive error whose phase-direction
+        part the discriminator's nonlinearity turns into
+        modulation-correlated products across the composite.  On FM
+        the block mean is NOT a clean DC read (it is dominated by the
+        modulation), so the EMA estimate wandered: measured -22 dB
+        products relative to a 12 kHz side tone, the dominant cause of
+        the zero-offset synthetic separation dip at 8-12 kHz.  A
+        first-order-hold ramp of the same estimate did not help (the
+        error magnitude, not the block-boundary step, is what mixes).
+
+        The complex one-pole DC-blocking highpass (cutoff
+        DC_BLOCK_CUTOFF_HZ = 0.1 Hz, the old EMA's effective
+        bandwidth - see the constant's comment for the measured
+        bandwidth/noise trade) removes the hardware LO-leak DC
+        exactly in steady state and, at any REALISTIC carrier offset
+        (the LO leak sits at 0 Hz, the signal centre at the tuner's
+        ppm error; the reference captures measure ~60 Hz), costs no
+        measurable separation (47-49 dB at 8-14 kHz with or without
+        an injected DC of 0.05) and no pilot SNR (parity with the EMA
+        to 0.01 dB on the reference captures).  The residual
+        pathology is continuous across the notch transition (roughly
+        |offset| < 0.1-0.3 Hz; see the constant's comment for the
+        measured curve): there the signal's own spectrum around its
+        carrier overlaps the notch and no remover can separate it
+        from the LO DC.  This hardware's measured residual offset
+        (~60 Hz) sits far outside the notch; synthetic periodic tones
+        hit it strongly because their discrete carrier lines can land
+        exactly in the notch.  Settle matches the old EMA
+        (~1.6 s); stateful across blocks, so blocked processing
+        equals one-shot exactly - the same AC-coupling behaviour as a
+        hardware capacitor.
+        """
+        out, self._dc_zi = signal.sosfilt(
+            self._dc_sos, iq_samples, zi=self._dc_zi,
+        )
+        return out
 
     def _estimate_pilot_phase(
         self, composite: np.ndarray,
@@ -828,7 +875,7 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         new one.
         """
         self.pilot_pll.reset()
-        self.dc_offset = 0.0
+        self._dc_zi = np.zeros_like(self._dc_zi)
         self.blend_factor = 1.0
         self.pilot_snr_ema = None
         self.pilot_jitter_ema = 0.0
@@ -956,12 +1003,9 @@ class FMDemodulator(BaseFMDemodulator):
             Composite signal after resampling.
         """
         try:
-            self.dc_offset = (
-                self.dc_alpha * np.mean(iq_samples)
-                + (1 - self.dc_alpha) * self.dc_offset
+            iq_processed = self._remove_dc(iq_samples).astype(
+                np.complex64, copy=False,
             )
-            iq_processed = iq_samples - self.dc_offset
-            iq_processed = np.asarray(iq_processed, dtype=np.complex64, copy=False)
             iq_filtered, self._iq_zi = signal.sosfilt(
                 self.iq_sos, iq_processed, zi=self._iq_zi,
             )
@@ -1047,11 +1091,15 @@ class FMDemodulatorLight(BaseFMDemodulator):
             Composite signal after resampling.
         """
         try:
-            self.dc_offset = (
-                self.dc_alpha * np.mean(iq_samples)
-                + (1 - self.dc_alpha) * self.dc_offset
+            # Back to complex64 right after the blocker, same position
+            # and semantics as the standard chain: the float64 blocker
+            # state is precision-critical (pole at 1 - 2.5e-6), the
+            # discriminator is not (measured composite delta of the
+            # cast: 8.9e-8 max vs signal RMS ~0.079), and keeping the
+            # light chain in complex128 cost ~10% of its block budget.
+            iq_processed = self._remove_dc(iq_samples).astype(
+                np.complex64, copy=False,
             )
-            iq_processed = iq_samples - self.dc_offset
             # Arctan discriminator, same form as the standard chain:
             # angle(x[n]*conj(x[n-1])) is the wrapped per-sample phase
             # step - identical to the previous angle->unwrap->diff

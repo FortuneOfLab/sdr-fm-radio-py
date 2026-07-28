@@ -14,7 +14,7 @@ flowchart TD
     %% Stage 1: IQ Front-End
     %% ============================================================
     IQ["IQ Samples\n(1.024 MHz complex)"]
-    IQ --> DC["DC Offset Removal\n(EMA α=0.01)"]
+    IQ --> DC["DC Blocker\ncomplex one-pole LTI highpass\nfc = 0.1 Hz (exact null at 0 Hz)"]
     DC --> IQLPF["IQ Lowpass Filter\nButterworth N=5, SOS + carried state\nfc = 200 kHz"]
     IQLPF --> DEMOD["FM Demodulation\ndefault: arctan discriminator\nangle(x[n]·conj(x[n-1]))\n(PLL selectable via MAIN_DEMOD_USE_PLL)"]
     DEMOD --> RS1["StatefulResampler\n3 : 16 (Kaiser β=10)\n1.024 MHz → 192 kHz\n(grid-aligned, exact prefix)"]
@@ -124,7 +124,7 @@ flowchart TD
 ```mermaid
 flowchart TD
     IQ["IQ Samples\n(250 kHz complex)"]
-    IQ --> DC["DC Offset Removal\n(EMA α=0.01)"]
+    IQ --> DC["DC Blocker\ncomplex one-pole LTI highpass\nfc = 0.1 Hz (exact null at 0 Hz)"]
     DC --> DISC["FM Demodulation\narctan discriminator\nangle(x[n]·conj(x[n-1]))\n(same as Standard)"]
     DISC --> RS1["StatefulResampler\n96 : 125 (grid-aligned)\n250 kHz → 192 kHz"]
     RS1 --> SCALE["× 0.35\n(LIGHT_COMPOSITE_SCALE)"]
