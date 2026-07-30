@@ -840,11 +840,68 @@ def test_light_real_block_pilotless_transients():
             t_full = t_now
     assert t_half is not None and t_half < 0.30, t_half
     assert t_full is not None and t_full < 0.60, t_full
-    # No fast-close/EMA chatter on the way up.  The first block is
-    # excluded: it still carries pilot-less composite through the
-    # pipeline latency, so the rise starts from block 1.
-    steps = np.diff(np.asarray(trace[1:], dtype=np.float64))
-    assert steps.min() >= -1e-9, (float(steps.min()), trace[:8])
+    # No fast-close/EMA chatter on the way up.  The check starts at
+    # the FIRST RISING block rather than a fixed index (codex P3 on
+    # PR #32 round 5): the leading blocks still carry pilot-less
+    # composite through the pipeline latency, but pinning that to an
+    # index would both track the latency and hide a fast-close dip in
+    # the block right after the first rise.
+    steps = np.diff(np.asarray(trace, dtype=np.float64))
+    assert (steps > 0).any(), trace[:8]
+    rise = int(np.argmax(steps > 0))
+    assert steps[rise:].min() >= -1e-9, (rise, float(steps[rise:].min()),
+                                         trace[:8])
+
+
+def test_light_real_block_noise_step_closes_blend():
+    """Codex P2 on PR #32 round 5: noise rises, pilot stays intact.
+
+    The pilot-power-collapse trigger cannot fire (the pilot is
+    unchanged) and the EMA trigger waits for the slow SNR EMA to
+    cross LO: measured 0.524 s to reach blend < 0.5 and 0.655 s to
+    close, with side/mid ~0.67-0.75 - noise, not programme - through
+    the first 0.2 s.  The sustained-sub-LO debounce bounds it.
+    """
+    fs_c = int(COMPOSITE_RATE)
+    n_blk = 12_583                                  # light's real block
+    dt = n_blk / fs_c
+    rng = np.random.default_rng(7)
+    d = FMDemodulatorLight(stereo=True)
+    pos = 0
+
+    def feed(noise_amp):
+        nonlocal pos
+        tt = (np.arange(n_blk) + pos) / fs_c
+        pos += n_blk
+        x = (0.20 * np.sin(2 * np.pi * 400.0 * tt)
+             + 0.10 * np.cos(2 * np.pi * 19_000.0 * tt)     # pilot: constant
+             + 0.10 * np.sin(2 * np.pi * 700.0 * tt)
+             * np.cos(2 * np.pi * 38_000.0 * tt)
+             + noise_amp * rng.standard_normal(n_blk))
+        return d.demodulate(x)
+
+    for _ in range(round(3.0 / dt)):                # clean acquisition
+        feed(0.001)
+    assert d.blend_factor > 0.9, d.blend_factor
+
+    t_now = 0.0
+    t_half = None
+    t_closed = None
+    for _ in range(20):
+        left, right = feed(0.35)                    # noise floor steps up
+        t_now += dt
+        if t_half is None and d.blend_factor < 0.5:
+            t_half = t_now
+        if t_closed is None and d.blend_factor < 0.05:
+            t_closed = t_now
+        if t_now > 0.4:
+            side = 0.5 * (left.astype(np.float64) - right.astype(np.float64))
+            mid = 0.5 * (left.astype(np.float64) + right.astype(np.float64))
+            ratio = (np.sqrt(np.mean(side ** 2))
+                     / (np.sqrt(np.mean(mid ** 2)) + 1e-12))
+            assert ratio < 0.05, (t_now, ratio)
+    assert t_half is not None and t_half < 0.30, t_half      # was 0.524 s
+    assert t_closed is not None and t_closed < 0.35, t_closed  # was 0.655 s
 
 
 def test_pending_iq_duration_is_consumed_once():
@@ -897,6 +954,21 @@ def test_pending_iq_duration_is_consumed_once():
     # the mono -> stereo re-entry zeroes the settle counter first, so
     # the whole counter is this one composite block's own duration
     assert d._pilot_settled_ref == pytest.approx(1.0)
+
+    # --- a FAILED preprocessing must not publish a duration at all
+    # (codex P2 on PR #32 round 5): the pending token is set only
+    # after the composite exists, so a block that never reaches
+    # demodulate() leaves nothing for a later composite-direct call
+    # to consume.  Both chains raise DemodulationError on an empty
+    # input block.
+    from fm_radio.exceptions import DemodulationError
+    for cls in (FMDemodulator, FMDemodulatorLight):
+        dx = cls(stereo=True)
+        with pytest.raises(DemodulationError):
+            dx.process_iq_samples(np.empty(0, dtype=np.complex64))
+        assert dx._pending_block_iq_s is None, cls.__name__
+        dx.demodulate(comp16)
+        assert dx._pilot_settled_ref == pytest.approx(1.0), cls.__name__
 
     # --- an exception in the demodulation must not strand it ---
     d = FMDemodulatorLight(stereo=True)

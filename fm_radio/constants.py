@@ -426,19 +426,47 @@ STEREO_BLEND_DROPOUT_POWER_DROP_DB = 15.0  # Pilot-power collapse (dB below its 
                                     # size (CATV max +0.19 dB / p99 +0.11, antenna
                                     # max +1.13 / p99 +0.85), so 15 dB clears the
                                     # worst real-programme excursion by ~14 dB.
+STEREO_BLEND_DROPOUT_SNR_DEBOUNCE_REF = 12.0  # Reference (16 ms) blocks of CONTINUOUS
+                                    # sub-STEREO_BLEND_PILOT_SNR_DB_LO instantaneous
+                                    # pilot SNR that identifies a SUSTAINED degradation
+                                    # (~190 ms).  Third fast-close trigger, for the case
+                                    # the other two miss: a noise floor that rises while
+                                    # the pilot itself stays intact leaves the pilot
+                                    # power flat (so the collapse test cannot fire) and
+                                    # only crosses the slow SNR EMA after ~0.65 s, which
+                                    # left side/mid ~0.7 for the first ~0.2 s.  Real
+                                    # programme dips the instantaneous SNR below LO too
+                                    # (noise-band spill), but only in bursts: measured
+                                    # over 60 s of each reference capture, the longest
+                                    # CONTINUOUS sub-LO run is 48 ms (CATV) / 80 ms
+                                    # (optical 82.5) at the 16 ms block, and both
+                                    # quantise up to 131 ms (2 blocks) at light's
+                                    # 65.5 ms block; the antenna and optical-80 captures
+                                    # never dip at all.  192 ms therefore clears the
+                                    # worst measured burst by ~1.5x (2.4x against the
+                                    # true, unquantised 80 ms) and fires on none of
+                                    # them (blend floor 0.90-1.00 across all four, from
+                                    # the ordinary EMA - the fast-close stays out).
+                                    # Accumulated in reference-block TIME, so it means
+                                    # the same duration at either block size.
 STEREO_BLEND_FAST_CLOSE_SETTLE_REF = 12.0  # Reference (16 ms) blocks after a pilot-chain
                                     # (re)start before the fast-close may trigger
                                     # (~190 ms): the resampler's priming blocks read
                                     # instantaneous SNR ~ 0 even on a strong capture,
                                     # and tripping there broke bit-identity with main.
 STEREO_BLEND_FAST_CLOSE_FACTOR = 0.5  # Per-16 ms-reference-block blend decay while the
-                                    # two-part dropout detector holds (see
-                                    # _demodulate_stereo): EITHER the pilot POWER has
+                                    # three-part dropout detector holds (see
+                                    # _demodulate_stereo): the pilot POWER has
                                     # collapsed >= STEREO_BLEND_DROPOUT_POWER_DROP_DB
                                     # below its own EMA, OR the instantaneous AND the
                                     # EMA pilot SNR are both under
                                     # STEREO_BLEND_PILOT_SNR_DB_LO (steady pilot-less
-                                    # content).  An instantaneous-SNR-only trigger was
+                                    # content), OR the instantaneous SNR has sat below
+                                    # LO continuously for
+                                    # STEREO_BLEND_DROPOUT_SNR_DEBOUNCE_REF reference
+                                    # blocks (noise floor up, pilot intact - the case
+                                    # the first two miss).  An instantaneous-SNR-only
+                                    # trigger, with no debounce, was
                                     # measured and rejected: programme spill into the
                                     # NOISE bands dips the per-block SNR under LO for
                                     # several consecutive blocks on real music, which

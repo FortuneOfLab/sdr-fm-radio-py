@@ -515,7 +515,8 @@ IQ (250 kHz)
 | `STEREO_MONO_DELAY_SAMPLES` | 0 | モノ遅延補償（FIR バンクの群遅延一致により不要） |
 | `STEREO_BLEND_FAST_CLOSE_FACTOR` | 0.5 | ドロップアウト検出時の blend 減衰（16 ms 基準ブロックあたり） |
 | `STEREO_BLEND_FAST_CLOSE_SETTLE_REF` | 12.0 | fast-close を許可するまでの整定時間（基準ブロック数 ≈ 190 ms） |
-| `STEREO_BLEND_DROPOUT_POWER_DROP_DB` | 15.0 | パイロット電力が自 EMA から崩落したと判定する量（実プログラムの最大励振は +1.13 dB） |
+| `STEREO_BLEND_DROPOUT_SNR_DEBOUNCE_REF` | 12.0 | 瞬時 SNR が LO 未満のまま継続したら持続的劣化と判定する時間（基準ブロック数 ≈ 190 ms。実プログラムの連続 LO 割れは最長 131 ms＝軽量ブロック量子化後） |
+| `STEREO_BLEND_DROPOUT_POWER_DROP_DB` | 15.0 | パイロット電力が自 EMA から崩落したと判定する量（`pow_drop_db = 10log10(EMA / 現在値)`。実プログラムでの最大電力降下は +1.13 dB） |
 
 **ブレンド EMA の時間正規化とドロップアウト fast-close**: blend / パイロット
 SNR 系の EMA 係数はすべて 16 ms 基準ブロックに正規化されます
@@ -524,14 +525,21 @@ SNR 系の EMA 係数はすべて 16 ms 基準ブロックに正規化されま�
 `demodulate()` 1 回だけが消費します（composite 直接呼び出しは composite 長へ
 フォールバック）。これにより、実運用ブロックが 16384 サンプル @ 250 kHz
 （≈65.5 ms）の軽量モードでも、標準モード（16384 @ 1.024 MHz = 厳密に 16 ms）と
-同一の時定数になります。加えて、パイロット消失時は 2 系統の検出器
+同一の時定数になります。加えて、パイロット劣化時は 3 系統の検出器
 ——(a) パイロット電力が自 EMA 比 `STEREO_BLEND_DROPOUT_POWER_DROP_DB` 以上の崩落、
-または (b) 瞬時と EMA の両パイロット SNR が `STEREO_BLEND_PILOT_SNR_DB_LO` 未満——
-が成立し、かつ整定ガードを越えている間、blend を基準ブロックあたり
-`STEREO_BLEND_FAST_CLOSE_FACTOR` 倍で閉じます（瞬時 SNR 単独のトリガは実音楽の
-ノイズ帯スピルで誤作動したため不採用）。実測: 軽量モードの実運用ブロックで
-パイロットレス同調・ドロップアウトとも 0.197 s で閉鎖、復帰は blend&gt;0.5 が
-0.197 s / blend&gt;0.9 が 0.524 s。標準モードの通常ブロックは指数が厳密に 1.0 と
+(b) 瞬時と EMA の両パイロット SNR が `STEREO_BLEND_PILOT_SNR_DB_LO` 未満、
+(c) 瞬時 SNR が LO 未満のまま `STEREO_BLEND_DROPOUT_SNR_DEBOUNCE_REF` 基準ブロック
+継続——のいずれかが成立し、かつ整定ガードを越えている間、blend を基準ブロック
+あたり `STEREO_BLEND_FAST_CLOSE_FACTOR` 倍で閉じます。(c) は「パイロットは
+健在のまま雑音床だけが上がる」劣化のための経路で、(a) は電力が変わらないため
+発火せず、(b) は遅い SNR EMA が LO を割るまで約 0.65 s かかります。デバウンス
+なしの瞬時 SNR 単独トリガは実音楽のノイズ帯スピルで誤作動するため不採用
+（実測: 4 つの参照録音 60 s ずつでの最長連続 LO 割れは 16 ms ブロックで 48 ms
+(CATV) / 80 ms (光 82.5)、軽量の 65.5 ms ブロックでは量子化されて 131 ms。
+デバウンス 192 ms はこれを ~1.5 倍で上回り、どの録音でも発火しない）。
+実測: 軽量モードの実運用ブロックで、パイロットレス同調・ドロップアウトとも
+0.197 s で閉鎖、雑音床ステップは blend&lt;0.5 が 0.197 s / blend&lt;0.05 が 0.262 s
+（対策前は 0.524 / 0.655 s）、復帰は blend&gt;0.5 が 0.197 s / blend&gt;0.9 が 0.524 s。標準モードの通常ブロックは指数が厳密に 1.0 と
 なる恒等ショートカットにより、従来と bit 同一です。
 
 ### 6.5 Side NR 設定

@@ -92,6 +92,7 @@ from fm_radio.constants import (
     STEREO_BLEND_SMOOTHING, STEREO_BLEND_FAST_CLOSE_FACTOR,
     STEREO_BLEND_FAST_CLOSE_SETTLE_REF,
     STEREO_BLEND_DROPOUT_POWER_DROP_DB,
+    STEREO_BLEND_DROPOUT_SNR_DEBOUNCE_REF,
     STEREO_HF_BLEND_PILOT_SNR_DB_HI, STEREO_HF_BLEND_PILOT_SNR_DB_LO,
     PILOT_NOTCH_FREQ, PILOT_NOTCH_Q,
     SIDE_NR_ENABLE, SIDE_NR_FRAME, SIDE_NR_HOP,
@@ -287,6 +288,10 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         # walked to 0.12 with an SNR-threshold trigger) leaves the
         # pilot power itself stable.
         self._pilot_pow_ema: float | None = None
+        # Continuous reference-block time whose INSTANTANEOUS pilot
+        # SNR sat below the blend LO threshold; the debounce for the
+        # sustained-degradation fast-close trigger.
+        self._snr_sub_lo_ref: float = 0.0
 
         # --- Adaptive stereo blend ---
         # blend_factor: 1.0 = full stereo, 0.0 = full mono
@@ -576,6 +581,7 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         self._pilot_phase_last = None
         self._pilot_settled_ref = 0.0
         self._pilot_pow_ema = None
+        self._snr_sub_lo_ref = 0.0
         self.pilot_snr_ema = None
         self.pilot_jitter_ema = 0.0
         self.blend_factor = 0.0
@@ -694,10 +700,25 @@ class BaseFMDemodulator(FMDemodulatorInterface):
             + (1.0 - stability_min_factor) * stability
         )
         target = snr_score * stability_factor
+        # Continuous sub-LO time, in reference blocks (codex P2 on
+        # PR #32 round 5).  The other two triggers both miss a
+        # degradation that leaves the PILOT intact and only raises the
+        # noise floor: the power test reads the pilot, which is
+        # unchanged, and the EMA test waits for the slow SNR EMA to
+        # cross LO - measured 0.655 s to close with side/mid ~0.7
+        # through the first 0.2 s.  Real programme dips the
+        # instantaneous SNR below LO as well (noise-band spill), so
+        # the distinction is duration, not depth: see the debounce
+        # constant for the measured burst lengths.
+        if snr_db < STEREO_BLEND_PILOT_SNR_DB_LO:
+            self._snr_sub_lo_ref += n_ref
+        else:
+            self._snr_sub_lo_ref = 0.0
         dropout_now = (
             pow_drop_db >= STEREO_BLEND_DROPOUT_POWER_DROP_DB
             or (snr_db < STEREO_BLEND_PILOT_SNR_DB_LO
                 and snr_for_blend < STEREO_BLEND_PILOT_SNR_DB_LO)
+            or self._snr_sub_lo_ref >= STEREO_BLEND_DROPOUT_SNR_DEBOUNCE_REF
         )
         if (dropout_now
                 and self._pilot_settled_ref
@@ -1224,6 +1245,7 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         self._pending_block_iq_s = None
         self._pilot_settled_ref = 0.0
         self._pilot_pow_ema = None
+        self._snr_sub_lo_ref = 0.0
         self._dc_zi = np.zeros_like(self._dc_zi)
         self.blend_factor = 1.0
         self.pilot_snr_ema = None
@@ -1353,7 +1375,6 @@ class FMDemodulator(BaseFMDemodulator):
             Composite signal after resampling.
         """
         try:
-            self._pending_block_iq_s = iq_samples.size / self.iq_sample_rate
             iq_processed = self._remove_dc(iq_samples).astype(
                 np.complex64, copy=False,
             )
@@ -1379,6 +1400,13 @@ class FMDemodulator(BaseFMDemodulator):
                 ).astype(np.float32, copy=False)
                 self._disc_last = iq_filtered[-1:].copy()
             composite = self._iq_resampler.process(main_output)
+            # Publish the pending EMA time base only once the block has
+            # actually produced a composite (codex P2 on PR #32 round
+            # 5): set on entry, a preprocessing failure would leave a
+            # duration behind for a block that never reaches
+            # demodulate(), and the next composite-direct call would
+            # consume it.
+            self._pending_block_iq_s = iq_samples.size / self.iq_sample_rate
             return composite.astype(np.float32, copy=False)
         except (ValueError, TypeError) as e:
             self.logger.error(f"Error processing IQ samples: {e}", exc_info=True)
@@ -1442,7 +1470,6 @@ class FMDemodulatorLight(BaseFMDemodulator):
             Composite signal after resampling.
         """
         try:
-            self._pending_block_iq_s = iq_samples.size / self.iq_sample_rate
             # Back to complex64 right after the blocker, same position
             # and semantics as the standard chain: the float64 blocker
             # state is precision-critical (pole at 1 - 2.5e-6), the
@@ -1475,6 +1502,10 @@ class FMDemodulatorLight(BaseFMDemodulator):
             composite = (
                 self._iq_resampler.process(fm_demod) * LIGHT_COMPOSITE_SCALE
             )
+            # Publish the pending EMA time base only after the composite
+            # exists - see the standard chain for why (codex P2 on
+            # PR #32 round 5).
+            self._pending_block_iq_s = iq_samples.size / self.iq_sample_rate
             return np.asarray(composite, dtype=np.float32, copy=False)
         except (ValueError, TypeError) as e:
             self.logger.error(f"Error processing IQ samples (Light): {e}", exc_info=True)
