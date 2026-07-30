@@ -432,17 +432,26 @@ STEREO_BLEND_FAST_CLOSE_SETTLE_REF = 12.0  # Reference (16 ms) blocks after a pi
                                     # instantaneous SNR ~ 0 even on a strong capture,
                                     # and tripping there broke bit-identity with main.
 STEREO_BLEND_FAST_CLOSE_FACTOR = 0.5  # Per-16 ms-reference-block blend decay while the
-                                    # INSTANTANEOUS pilot SNR sits below the blend LO
-                                    # threshold (pilot dropout / pilot-less content):
-                                    # the regular smoothed EMA lagged for seconds on
-                                    # the light variant's 65.5 ms blocks (blend 0.716
-                                    # at 0.26 s of a pilot-less cold start, 2.4-3.6 s
-                                    # to close), leaving audible false side driven by
-                                    # programme leakage.  Halving per reference block
-                                    # closes 1.0 -> <0.05 in ~80 ms; a valid pilot
-                                    # never trips the instantaneous test, so healthy
-                                    # streams are untouched.  All blend/SNR EMAs are
-                                    # additionally time-normalised to the 16 ms
+                                    # two-part dropout detector holds (see
+                                    # _demodulate_stereo): EITHER the pilot POWER has
+                                    # collapsed >= STEREO_BLEND_DROPOUT_POWER_DROP_DB
+                                    # below its own EMA, OR the instantaneous AND the
+                                    # EMA pilot SNR are both under
+                                    # STEREO_BLEND_PILOT_SNR_DB_LO (steady pilot-less
+                                    # content).  An instantaneous-SNR-only trigger was
+                                    # measured and rejected: programme spill into the
+                                    # NOISE bands dips the per-block SNR under LO for
+                                    # several consecutive blocks on real music, which
+                                    # walked the blend to 0.12 on the CATV reference.
+                                    # Why a fast path at all: the regular smoothed EMA
+                                    # lagged for seconds on the light variant's 65.5 ms
+                                    # blocks (blend 0.716 at 0.26 s of a pilot-less
+                                    # cold start, 2.4-3.6 s to close), leaving audible
+                                    # false side driven by programme leakage.  Halving
+                                    # per reference block closes 1.0 -> <0.05 in
+                                    # ~80 ms; a healthy pilot trips neither branch, so
+                                    # valid streams are untouched.  All blend/SNR EMAs
+                                    # are additionally time-normalised to the 16 ms
                                     # reference block, so light's real block size
                                     # gets identical time constants to standard.
 

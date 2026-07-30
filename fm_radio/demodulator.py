@@ -262,11 +262,16 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         # Mode-transition tracking: entering stereo after mono must
         # re-acquire the stereo-only state (see _reset_stereo_side_state).
         self._prev_demod_was_mono: bool = False
-        # Duration of the last IQ block fed to process_iq_samples
-        # (seconds); the EMA time base (see n_ref in
-        # _demodulate_stereo).  None until the first IQ block, and for
-        # composite-direct callers.
-        self._last_block_iq_s: float | None = None
+        # PENDING duration (seconds) of the IQ block that
+        # process_iq_samples just turned into a composite block; the
+        # EMA time base (see n_ref in _demodulate_stereo).  Valid for
+        # exactly ONE demodulate() call - the streaming contract is
+        # one process_iq_samples() per demodulate() - and cleared
+        # there, so a later composite-direct call (tests, offline
+        # tools) falls back to its own composite duration instead of
+        # inheriting a stale IQ block's.  None until the first IQ
+        # block and for composite-direct callers.
+        self._pending_block_iq_s: float | None = None
         # Reference-block time since the pilot chain last (re)started
         # (construction, reset, stereo re-entry); the fast-close is
         # suppressed until the chain has settled - the resampler's
@@ -401,16 +406,32 @@ class BaseFMDemodulator(FMDemodulatorInterface):
     def demodulate(self, composite: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Generate stereo or mono audio signals from the composite signal.
 
+        Streaming contract: ONE process_iq_samples() call feeds ONE
+        demodulate() call.  The IQ block's duration
+        (_pending_block_iq_s) is the EMA time base for that one block
+        and is consumed here - in a finally, so an exception in the
+        demodulation cannot leave a stale duration behind, and in both
+        the stereo and the mono path, so a mono stretch cannot hand an
+        old IQ duration to a later stereo block.  Callers that feed
+        composite blocks directly (tests, offline tools) therefore
+        always fall back to the composite's own duration, even after
+        an earlier IQ-fed block.  Queueing several
+        process_iq_samples() calls before demodulating is NOT
+        supported: each one overwrites the pending duration.
+
         Args:
             composite (ndarray): Composite signal.
 
         Returns:
             tuple: (left_channel, right_channel)
         """
-        if self.stereo:
-            return self._demodulate_stereo(composite)
-        else:
-            return self._demodulate_mono(composite)
+        try:
+            if self.stereo:
+                return self._demodulate_stereo(composite)
+            else:
+                return self._demodulate_mono(composite)
+        finally:
+            self._pending_block_iq_s = None
 
     def _remove_dc(self, iq_samples: np.ndarray) -> np.ndarray:
         """Remove the front-end DC offset with a narrow LTI blocker.
@@ -614,15 +635,16 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         # seconds.  Scaling each alpha by the block's duration in
         # 16 ms reference units keeps every time constant identical
         # across variants and block sizes.  The time step comes from
-        # the IQ side (_last_block_iq_s): the standard chain's
+        # the IQ side (_pending_block_iq_s): the standard chain's
         # 16384-sample IQ block is EXACTLY 16 ms, so its exponent is
         # exactly 1.0 on every call - including resampler priming,
         # where the emitted composite size varies and a
         # composite-derived step would deviate and break bit-identity
-        # with main.  Composite-direct callers (tests) have no IQ
-        # block and fall back to composite.size / composite_rate.
-        if self._last_block_iq_s is not None:
-            n_ref = self._last_block_iq_s / 0.016
+        # with main.  The pending duration covers exactly this one
+        # block (demodulate() clears it); composite-direct callers
+        # have none and fall back to composite.size / composite_rate.
+        if self._pending_block_iq_s is not None:
+            n_ref = self._pending_block_iq_s / 0.016
         else:
             n_ref = composite.size / (0.016 * self.composite_rate)
         self._pilot_settled_ref += n_ref
@@ -800,7 +822,11 @@ class BaseFMDemodulator(FMDemodulatorInterface):
             # (the instantaneous reading collapses within one block).
             # Below the gate the existing uninformative semantics
             # apply (no acquisition, streak reset, confidence decay,
-            # leak home) and the blend is closed anyway.
+            # leak home).  This gate governs the TRACKER only; closing
+            # the blend is the separate fast-close detector's job
+            # (which additionally waits out the settle guard and then
+            # takes finite time to close), so the blend can still be
+            # open while this gate reads False.
             pilot_valid = (
                 snr_db >= STEREO_BLEND_PILOT_SNR_DB_LO
                 and snr_for_blend >= STEREO_BLEND_PILOT_SNR_DB_LO
@@ -1195,7 +1221,7 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         self.pilot_pll.reset()
         self._prev_demod_was_mono = False
         self._side_nr_adapt = True
-        self._last_block_iq_s = None
+        self._pending_block_iq_s = None
         self._pilot_settled_ref = 0.0
         self._pilot_pow_ema = None
         self._dc_zi = np.zeros_like(self._dc_zi)
@@ -1327,7 +1353,7 @@ class FMDemodulator(BaseFMDemodulator):
             Composite signal after resampling.
         """
         try:
-            self._last_block_iq_s = iq_samples.size / self.iq_sample_rate
+            self._pending_block_iq_s = iq_samples.size / self.iq_sample_rate
             iq_processed = self._remove_dc(iq_samples).astype(
                 np.complex64, copy=False,
             )
@@ -1416,7 +1442,7 @@ class FMDemodulatorLight(BaseFMDemodulator):
             Composite signal after resampling.
         """
         try:
-            self._last_block_iq_s = iq_samples.size / self.iq_sample_rate
+            self._pending_block_iq_s = iq_samples.size / self.iq_sample_rate
             # Back to complex64 right after the blocker, same position
             # and semantics as the standard chain: the float64 blocker
             # state is precision-critical (pole at 1 - 2.5e-6), the

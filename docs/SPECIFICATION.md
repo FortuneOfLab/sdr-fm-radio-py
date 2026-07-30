@@ -513,6 +513,26 @@ IQ (250 kHz)
 | `STEREO_SUBCARRIER_PHASE_OFFSET_DEG_PLL` | 331.1 | 同（PLL 選択時） |
 | `STEREO_SUBCARRIER_PHASE_OFFSET_DEG_LIGHT` | 0.3 | 同（軽量モード） |
 | `STEREO_MONO_DELAY_SAMPLES` | 0 | モノ遅延補償（FIR バンクの群遅延一致により不要） |
+| `STEREO_BLEND_FAST_CLOSE_FACTOR` | 0.5 | ドロップアウト検出時の blend 減衰（16 ms 基準ブロックあたり） |
+| `STEREO_BLEND_FAST_CLOSE_SETTLE_REF` | 12.0 | fast-close を許可するまでの整定時間（基準ブロック数 ≈ 190 ms） |
+| `STEREO_BLEND_DROPOUT_POWER_DROP_DB` | 15.0 | パイロット電力が自 EMA から崩落したと判定する量（実プログラムの最大励振は +1.13 dB） |
+
+**ブレンド EMA の時間正規化とドロップアウト fast-close**: blend / パイロット
+SNR 系の EMA 係数はすべて 16 ms 基準ブロックに正規化されます
+（`alpha_eff = 1 − (1 − alpha)^(block / 16 ms)`）。時間刻みは IQ ブロック長
+（`iq_samples.size / iq_sample_rate`）から取り、`process_iq_samples()` 1 回に対する
+`demodulate()` 1 回だけが消費します（composite 直接呼び出しは composite 長へ
+フォールバック）。これにより、実運用ブロックが 16384 サンプル @ 250 kHz
+（≈65.5 ms）の軽量モードでも、標準モード（16384 @ 1.024 MHz = 厳密に 16 ms）と
+同一の時定数になります。加えて、パイロット消失時は 2 系統の検出器
+——(a) パイロット電力が自 EMA 比 `STEREO_BLEND_DROPOUT_POWER_DROP_DB` 以上の崩落、
+または (b) 瞬時と EMA の両パイロット SNR が `STEREO_BLEND_PILOT_SNR_DB_LO` 未満——
+が成立し、かつ整定ガードを越えている間、blend を基準ブロックあたり
+`STEREO_BLEND_FAST_CLOSE_FACTOR` 倍で閉じます（瞬時 SNR 単独のトリガは実音楽の
+ノイズ帯スピルで誤作動したため不採用）。実測: 軽量モードの実運用ブロックで
+パイロットレス同調・ドロップアウトとも 0.197 s で閉鎖、復帰は blend&gt;0.5 が
+0.197 s / blend&gt;0.9 が 0.524 s。標準モードの通常ブロックは指数が厳密に 1.0 と
+なる恒等ショートカットにより、従来と bit 同一です。
 
 ### 6.5 Side NR 設定
 

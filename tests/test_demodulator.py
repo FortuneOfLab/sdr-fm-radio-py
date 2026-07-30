@@ -816,6 +816,113 @@ def test_light_real_block_pilotless_transients():
     # latency still carries pilot-era composite, then fast-close
     assert t_closed is not None and t_closed < 0.35, t_closed
 
+    # --- recovery on the SAME instance: the open side is time-
+    # normalised too (codex P3 on PR #32 round 4).  The close side is
+    # the fast path; re-opening runs through the ordinary blend EMA,
+    # so it is the direct check that alpha_eff - not just the
+    # fast-close - carries the 16 ms time constants onto 65.5 ms
+    # blocks.  Measured here: blend > 0.5 at 0.197 s, > 0.9 at
+    # 0.524 s, and monotonic from the first rising block.
+    t_now = 0.0
+    t_half = None
+    t_full = None
+    trace = []
+    for i in range(0, iq_st.size, blk):
+        ch = iq_st[i:i + blk]
+        if ch.size < 8:
+            break
+        d.demodulate(d.process_iq_samples(ch))
+        t_now += ch.size / fs_iq
+        trace.append(d.blend_factor)
+        if t_half is None and d.blend_factor > 0.5:
+            t_half = t_now
+        if t_full is None and d.blend_factor > 0.9:
+            t_full = t_now
+    assert t_half is not None and t_half < 0.30, t_half
+    assert t_full is not None and t_full < 0.60, t_full
+    # No fast-close/EMA chatter on the way up.  The first block is
+    # excluded: it still carries pilot-less composite through the
+    # pipeline latency, so the rise starts from block 1.
+    steps = np.diff(np.asarray(trace[1:], dtype=np.float64))
+    assert steps.min() >= -1e-9, (float(steps.min()), trace[:8])
+
+
+def test_pending_iq_duration_is_consumed_once():
+    """Codex P2 on PR #32 round 4: the IQ time step is per-block.
+
+    _pending_block_iq_s is the duration of the IQ block that
+    process_iq_samples just converted, and it is the EMA time base
+    for exactly ONE demodulate() call.  It used to persist, so once a
+    light instance had seen its 65.5 ms production block, any later
+    composite-direct call inherited that stale duration and ran the
+    EMAs, the settle guard and the fast-close 4.096x too fast.
+    """
+    fs_iq = 250_000
+    blk = 16384
+    n_comp = int(round(0.016 * COMPOSITE_RATE))     # 3072 = one 16 ms block
+    tt = np.arange(n_comp) / float(COMPOSITE_RATE)
+    comp16 = (0.2 * np.sin(2 * np.pi * 400.0 * tt)
+              + 0.1 * np.cos(2 * np.pi * 19_000.0 * tt))
+
+    from fm_radio.quality_selftest import _synthesize_iq_tone
+    iq = _synthesize_iq_tone(
+        0.5, fs_iq, 700.0, 1.0, 0.0, 0.1, 75_000.0,
+    ).astype(np.complex64)[:blk]
+
+    # --- production 1:1 path keeps the IQ-derived step ---
+    d = FMDemodulatorLight(stereo=True)
+    d.demodulate(d.process_iq_samples(iq))
+    assert d._pilot_settled_ref == pytest.approx(4.096)   # 65.536 / 16 ms
+    assert d._pending_block_iq_s is None                  # consumed
+
+    # --- a composite-direct call after it must NOT reuse 65.536 ms ---
+    before = d._pilot_settled_ref
+    d.demodulate(comp16)
+    assert d._pilot_settled_ref - before == pytest.approx(1.0)
+
+    # --- standard's production block is exactly the 16 ms reference ---
+    ds = FMDemodulator(stereo=True)
+    iq_std = _synthesize_iq_tone(
+        0.5, 1_024_000, 700.0, 1.0, 0.0, 0.1, 75_000.0,
+    ).astype(np.complex64)[:int(SDR_BLOCK_SIZE)]
+    ds.demodulate(ds.process_iq_samples(iq_std))
+    assert ds._pilot_settled_ref == pytest.approx(1.0)
+
+    # --- a mono block consumes the pending duration as well ---
+    d = FMDemodulatorLight(stereo=False)
+    d.demodulate(d.process_iq_samples(iq))                # mono path
+    assert d._pending_block_iq_s is None
+    d.stereo = True
+    d.demodulate(comp16)
+    # the mono -> stereo re-entry zeroes the settle counter first, so
+    # the whole counter is this one composite block's own duration
+    assert d._pilot_settled_ref == pytest.approx(1.0)
+
+    # --- an exception in the demodulation must not strand it ---
+    d = FMDemodulatorLight(stereo=True)
+    d.process_iq_samples(iq)
+    assert d._pending_block_iq_s == pytest.approx(blk / fs_iq)
+
+    def _boom(_composite):
+        raise RuntimeError('boom')
+
+    d._demodulate_stereo = _boom
+    with pytest.raises(RuntimeError):
+        d.demodulate(comp16)
+    assert d._pending_block_iq_s is None
+
+    # --- reset() restores the initial state ---
+    d = FMDemodulatorLight(stereo=True)
+    d.demodulate(d.process_iq_samples(iq))
+    d.process_iq_samples(iq)                              # leave one pending
+    assert d._pending_block_iq_s is not None
+    assert d._pilot_settled_ref > 0.0
+    assert d._pilot_pow_ema is not None
+    d.reset()
+    assert d._pending_block_iq_s is None
+    assert d._pilot_settled_ref == 0.0
+    assert d._pilot_pow_ema is None
+
 
 def test_light_pilot_snr_matches_standard_on_pure_pilot():
     """Light's pilot SNR must track signal quality like standard's.
