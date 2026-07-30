@@ -12,7 +12,9 @@ import pytest
 import scipy.signal as sg
 
 import fm_radio.demodulator as dm
-from fm_radio.constants import COMPOSITE_RATE, SDR_BLOCK_SIZE
+from fm_radio.constants import (
+    COMPOSITE_RATE, SDR_BLOCK_SIZE, STEREO_BLEND_DROPOUT_SNR_DEBOUNCE_REF,
+)
 from fm_radio.demodulator import FMDemodulator, FMDemodulatorLight
 
 
@@ -900,8 +902,113 @@ def test_light_real_block_noise_step_closes_blend():
             ratio = (np.sqrt(np.mean(side ** 2))
                      / (np.sqrt(np.mean(mid ** 2)) + 1e-12))
             assert ratio < 0.05, (t_now, ratio)
-    assert t_half is not None and t_half < 0.30, t_half      # was 0.524 s
-    assert t_closed is not None and t_closed < 0.35, t_closed  # was 0.655 s
+    # Floors carry one light block (65.5 ms) of headroom over the
+    # measured 0.262 / 0.328 s; they were 0.30 / 0.35 while the
+    # debounce was 12 reference blocks (codex round 6 raised it to 16
+    # for false-positive margin, which costs one block of closing).
+    assert t_half is not None and t_half < 0.35, t_half      # was 0.524 s
+    assert t_closed is not None and t_closed < 0.40, t_closed  # was 0.655 s
+
+
+def test_dropout_debounce_and_latch_contract():
+    """Codex P2/P3 on PR #32 round 6: attack debounce + release hold.
+
+    The sustained-degradation trigger counts CONTINUOUS sub-LO time,
+    so an intermittent dip must not reach it, and once any trigger has
+    fired the latch must hold until the SNR has been healthy for a
+    while - releasing on a single good block made the blend pump
+    (measured 0.01 <-> 0.26 with 37 sign flips in 5 s).
+    """
+    fs_c = int(COMPOSITE_RATE)
+    n_ref_blk = int(round(0.016 * COMPOSITE_RATE))          # 16 ms
+
+    def composite(n, p0, pilot_amp, noise_amp, rng):
+        tt = (np.arange(n) + p0) / fs_c
+        out = (0.20 * np.sin(2 * np.pi * 400.0 * tt)
+               + pilot_amp * np.cos(2 * np.pi * 19_000.0 * tt)
+               + 0.10 * np.sin(2 * np.pi * 700.0 * tt)
+               * np.cos(2 * np.pi * 38_000.0 * tt))
+        if noise_amp:
+            out = out + noise_amp * rng.standard_normal(n)
+        return out
+
+    # --- the counters zero on every reset path ---
+    rng = np.random.default_rng(3)
+    d = FMDemodulatorLight(stereo=True)
+    for k in range(60):                                     # drive it degraded
+        d.demodulate(composite(n_ref_blk, k * n_ref_blk, 0.10, 0.35, rng))
+    assert d._snr_sub_lo_ref > 0.0
+    assert d._dropout_latched
+    d.reset()
+    assert d._snr_sub_lo_ref == 0.0
+    assert d._snr_ok_ref == 0.0
+    assert not d._dropout_latched
+
+    d = FMDemodulatorLight(stereo=True)
+    for k in range(60):
+        d.demodulate(composite(n_ref_blk, k * n_ref_blk, 0.10, 0.35, rng))
+    assert d._dropout_latched
+    d.stereo = False                                        # mono stretch
+    d.demodulate(composite(n_ref_blk, 0, 0.10, 0.0, rng))
+    d.stereo = True                                         # re-entry resets
+    d.demodulate(composite(n_ref_blk, 0, 0.10, 0.0, rng))
+    assert d._snr_sub_lo_ref == 0.0
+    assert not d._dropout_latched
+
+    # --- an INTERMITTENT dip never reaches the attack debounce ---
+    rng = np.random.default_rng(4)
+    d = FMDemodulatorLight(stereo=True)
+    peak = 0.0
+    for k in range(120):
+        noise = 0.35 if (k % 3) < 2 else 0.0                # 2 bad, 1 good
+        d.demodulate(composite(n_ref_blk, k * n_ref_blk, 0.10, noise, rng))
+        peak = max(peak, d._snr_sub_lo_ref)
+    assert peak < STEREO_BLEND_DROPOUT_SNR_DEBOUNCE_REF, peak
+
+    # --- a CONTINUOUS dip fires on REAL TIME, at either block size ---
+    fired = {}
+    for cls, blk in ((FMDemodulator, n_ref_blk), (FMDemodulatorLight, 12_583)):
+        rng = np.random.default_rng(5)
+        d = cls(stereo=True)
+        t_now = 0.0
+        for k in range(200):
+            d.demodulate(composite(blk, k * blk, 0.10, 0.35, rng))
+            t_now += blk / fs_c
+            if cls not in fired and d._dropout_latched:
+                fired[cls] = t_now
+        assert cls in fired, cls.__name__
+        # cannot fire before the ~190 ms settle guard, and one of the
+        # three triggers must have caught it well inside a second
+        assert 0.19 <= fired[cls] < 0.75, (cls.__name__, fired[cls])
+    # the whole point of the reference-block accounting: the 65.5 ms
+    # chain must not take ~4x longer than the 16 ms one.  The bound is
+    # two light blocks, which is the quantisation of its own grid.
+    assert abs(fired[FMDemodulator] - fired[FMDemodulatorLight]) < 0.14, fired
+
+    # --- once latched, an intermittent recovery must not pump ---
+    rng = np.random.default_rng(6)
+    d = FMDemodulatorLight(stereo=True)
+    blk = 12_583
+    for k in range(46):                                     # clean acquisition
+        d.demodulate(composite(blk, k * blk, 0.10, 0.001, rng))
+    assert d.blend_factor > 0.9
+    trace = []
+    fired_at = None
+    for k in range(60):
+        # 4 bad, 1 good: four 65.5 ms blocks reach the 16-reference
+        # block attack debounce, and the single good block (4.096) is
+        # short of the 8-reference block release hold, so the latch
+        # must survive every cycle.  Without the hold this pattern
+        # pumped the blend on every good block.
+        noise = 0.001 if (k % 5) == 4 else 0.35
+        d.demodulate(composite(blk, (46 + k) * blk, 0.10, noise, rng))
+        trace.append(d.blend_factor)
+        if fired_at is None and d._dropout_latched:
+            fired_at = len(trace) - 1
+    assert fired_at is not None
+    assert d._dropout_latched                               # held through
+    steps = np.diff(np.asarray(trace[fired_at:], dtype=np.float64))
+    assert steps.max() <= 1e-9, (float(steps.max()), trace[fired_at:fired_at + 12])
 
 
 def test_pending_iq_duration_is_consumed_once():

@@ -515,7 +515,8 @@ IQ (250 kHz)
 | `STEREO_MONO_DELAY_SAMPLES` | 0 | モノ遅延補償（FIR バンクの群遅延一致により不要） |
 | `STEREO_BLEND_FAST_CLOSE_FACTOR` | 0.5 | ドロップアウト検出時の blend 減衰（16 ms 基準ブロックあたり） |
 | `STEREO_BLEND_FAST_CLOSE_SETTLE_REF` | 12.0 | fast-close を許可するまでの整定時間（基準ブロック数 ≈ 190 ms） |
-| `STEREO_BLEND_DROPOUT_SNR_DEBOUNCE_REF` | 12.0 | 瞬時 SNR が LO 未満のまま継続したら持続的劣化と判定する時間（基準ブロック数 ≈ 190 ms。実プログラムの連続 LO 割れは最長 131 ms＝軽量ブロック量子化後） |
+| `STEREO_BLEND_DROPOUT_SNR_DEBOUNCE_REF` | 16.0 | 瞬時 SNR が LO 未満のまま継続したら持続的劣化と判定する時間（基準ブロック数 ≈ 256 ms。実プログラムの連続 LO 割れは最長 131 ms＝軽量ブロック量子化後） |
+| `STEREO_BLEND_DROPOUT_RELEASE_REF` | 8.0 | fast-close ラッチを解除するのに要する健全 SNR の連続時間（基準ブロック数 ≈ 130 ms） |
 | `STEREO_BLEND_DROPOUT_POWER_DROP_DB` | 15.0 | パイロット電力が自 EMA から崩落したと判定する量（`pow_drop_db = 10log10(EMA / 現在値)`。実プログラムでの最大電力降下は +1.13 dB） |
 
 **ブレンド EMA の時間正規化とドロップアウト fast-close**: blend / パイロット
@@ -530,7 +531,14 @@ SNR 系の EMA 係数はすべて 16 ms 基準ブロックに正規化されま�
 (b) 瞬時と EMA の両パイロット SNR が `STEREO_BLEND_PILOT_SNR_DB_LO` 未満、
 (c) 瞬時 SNR が LO 未満のまま `STEREO_BLEND_DROPOUT_SNR_DEBOUNCE_REF` 基準ブロック
 継続——のいずれかが成立し、かつ整定ガードを越えている間、blend を基準ブロック
-あたり `STEREO_BLEND_FAST_CLOSE_FACTOR` 倍で閉じます。(c) は「パイロットは
+あたり `STEREO_BLEND_FAST_CLOSE_FACTOR` 倍で閉じます。発火した fast-close は
+**ラッチ**され、瞬時 SNR が `STEREO_BLEND_DROPOUT_RELEASE_REF` 基準ブロック連続で
+健全になるまで解除されません（アタック速・リリース遅の受信機的挙動）。解除条件を
+1 ブロックの回復にしていた時点では、断続的劣化（劣化 3 ブロック + 正常 1 ブロック）で
+blend が 0.01↔0.26 を 5 秒間に 37 回往復し、可聴なステレオ幅ポンピングになりました。
+解除側は LO より高い復帰レベルではなく**同一 LO のホールド**にしています——
+レベルヒステリシスにすると中 SNR（7–16 dB、blend が部分的に開くべき領域）の信号が
+モノに固定されてしまうためです。(c) は「パイロットは
 健在のまま雑音床だけが上がる」劣化のための経路で、(a) は電力が変わらないため
 発火せず、(b) は遅い SNR EMA が LO を割るまで約 0.65 s かかります。デバウンス
 なしの瞬時 SNR 単独トリガは実音楽のノイズ帯スピルで誤作動するため不採用

@@ -426,7 +426,7 @@ STEREO_BLEND_DROPOUT_POWER_DROP_DB = 15.0  # Pilot-power collapse (dB below its 
                                     # size (CATV max +0.19 dB / p99 +0.11, antenna
                                     # max +1.13 / p99 +0.85), so 15 dB clears the
                                     # worst real-programme excursion by ~14 dB.
-STEREO_BLEND_DROPOUT_SNR_DEBOUNCE_REF = 12.0  # Reference (16 ms) blocks of CONTINUOUS
+STEREO_BLEND_DROPOUT_SNR_DEBOUNCE_REF = 16.0  # Reference (16 ms) blocks of CONTINUOUS
                                     # sub-STEREO_BLEND_PILOT_SNR_DB_LO instantaneous
                                     # pilot SNR that identifies a SUSTAINED degradation
                                     # (~190 ms).  Third fast-close trigger, for the case
@@ -447,8 +447,29 @@ STEREO_BLEND_DROPOUT_SNR_DEBOUNCE_REF = 12.0  # Reference (16 ms) blocks of CONT
                                     # true, unquantised 80 ms) and fires on none of
                                     # them (blend floor 0.90-1.00 across all four, from
                                     # the ordinary EMA - the fast-close stays out).
+                                    # Raised 12 -> 16 on codex round 6: at light's
+                                    # 65.5 ms block the counter steps 4.096 at a time,
+                                    # so 12 fired on the 3rd block against a measured
+                                    # worst of 2 - one block of margin.  16 fires on
+                                    # the 4th and costs 66 ms of closing time.
                                     # Accumulated in reference-block TIME, so it means
                                     # the same duration at either block size.
+STEREO_BLEND_DROPOUT_RELEASE_REF = 8.0  # Reference (16 ms) blocks of CONTINUOUS healthy
+                                    # instantaneous SNR before the sustained-degradation
+                                    # latch releases (~130 ms).  Debouncing only the
+                                    # ATTACK let a single good block release the
+                                    # trigger, so an intermittently degraded stream
+                                    # (3 bad blocks, 1 good, at light's real block size)
+                                    # fast-closed and re-opened every cycle: blend
+                                    # swinging 0.01 <-> 0.26 with 37 sign flips in 5 s -
+                                    # audible stereo-width pumping.  The hold makes the
+                                    # mechanism behave like a normal receiver blend:
+                                    # fast to mono, deliberate back to stereo (it costs
+                                    # ~130 ms on a clean recovery).  Deliberately a HOLD
+                                    # at the same LO threshold, not a higher release
+                                    # level: a level hysteresis would strand a
+                                    # legitimately mid-SNR signal (7-16 dB, where the
+                                    # blend is meant to sit partially open) in mono.
 STEREO_BLEND_FAST_CLOSE_SETTLE_REF = 12.0  # Reference (16 ms) blocks after a pilot-chain
                                     # (re)start before the fast-close may trigger
                                     # (~190 ms): the resampler's priming blocks read
@@ -477,7 +498,7 @@ STEREO_BLEND_FAST_CLOSE_FACTOR = 0.5  # Per-16 ms-reference-block blend decay wh
                                     # cold start, 2.4-3.6 s to close), leaving audible
                                     # false side driven by programme leakage.  Halving
                                     # per reference block closes 1.0 -> <0.05 in
-                                    # ~80 ms; a healthy pilot trips neither branch, so
+                                    # ~80 ms; a healthy pilot trips none of the three, so
                                     # valid streams are untouched.  All blend/SNR EMAs
                                     # are additionally time-normalised to the 16 ms
                                     # reference block, so light's real block size
