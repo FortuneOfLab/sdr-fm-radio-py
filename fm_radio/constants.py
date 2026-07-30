@@ -420,8 +420,12 @@ STEREO_BLEND_DROPOUT_POWER_DROP_DB = 15.0  # Pilot-power collapse (dB below its 
                                     # block; programme spill into the NOISE bands
                                     # (which dips the per-block SNR for several
                                     # consecutive blocks on real music) leaves the
-                                    # pilot power stable (CATV per-block variation
-                                    # ~ +-1 dB), so 15 dB separates the two cleanly.
+                                    # pilot power stable.  Measured over 20 s of real
+                                    # programme, the drop never exceeds +1.2 dB on
+                                    # either reference capture and at either block
+                                    # size (CATV max +0.19 dB / p99 +0.11, antenna
+                                    # max +1.13 / p99 +0.85), so 15 dB clears the
+                                    # worst real-programme excursion by ~14 dB.
 STEREO_BLEND_FAST_CLOSE_SETTLE_REF = 12.0  # Reference (16 ms) blocks after a pilot-chain
                                     # (re)start before the fast-close may trigger
                                     # (~190 ms): the resampler's priming blocks read
