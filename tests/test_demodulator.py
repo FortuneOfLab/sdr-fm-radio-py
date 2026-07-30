@@ -965,25 +965,82 @@ def test_dropout_debounce_and_latch_contract():
         peak = max(peak, d._snr_sub_lo_ref)
     assert peak < STEREO_BLEND_DROPOUT_SNR_DEBOUNCE_REF, peak
 
-    # --- a CONTINUOUS dip fires on REAL TIME, at either block size ---
+    # --- trigger (c) attack and the latch release, on REAL TIME, at
+    # either block size (codex P3 on PR #32 round 7).  The measurement
+    # starts from a CLEAN acquisition so the SNR EMA is high and
+    # trigger (b) cannot fire - driving a cold instance with noise
+    # instead fires (b) right after the settle guard and never
+    # exercises (c) at all.  The degradation must also be clearly
+    # sub-LO rather than marginal: at a noise level that leaves the
+    # SNR straddling LO, the 16 ms chain's noisier per-block estimate
+    # keeps breaking the CONTINUOUS run (measured: it fired at
+    # 0.416 s against light's 0.262 s), which says more about
+    # estimator variance than about the debounce.
     fired = {}
+    released = {}
     for cls, blk in ((FMDemodulator, n_ref_blk), (FMDemodulatorLight, 12_583)):
         rng = np.random.default_rng(5)
         d = cls(stereo=True)
+        pos = 0
+        dt = blk / fs_c
+        for _ in range(int(round(3.0 / dt))):            # clean acquisition
+            d.demodulate(composite(blk, pos, 0.10, 0.0, rng))
+            pos += blk
+        assert d.blend_factor > 0.9, (cls.__name__, d.blend_factor)
         t_now = 0.0
-        for k in range(200):
-            d.demodulate(composite(blk, k * blk, 0.10, 0.35, rng))
-            t_now += blk / fs_c
+        for _ in range(int(round(1.5 / dt))):            # sustained noise
+            d.demodulate(composite(blk, pos, 0.10, 0.5, rng))
+            pos += blk
+            t_now += dt
             if cls not in fired and d._dropout_latched:
-                fired[cls] = t_now
+                fired[cls] = (t_now, d._snr_sub_lo_ref)
         assert cls in fired, cls.__name__
-        # cannot fire before the ~190 ms settle guard, and one of the
-        # three triggers must have caught it well inside a second
-        assert 0.19 <= fired[cls] < 0.75, (cls.__name__, fired[cls])
+        t_now = 0.0
+        for _ in range(int(round(1.5 / dt))):            # clean again
+            d.demodulate(composite(blk, pos, 0.10, 0.0, rng))
+            pos += blk
+            t_now += dt
+            if cls not in released and not d._dropout_latched:
+                released[cls] = t_now
+        assert cls in released, cls.__name__
+        t_fire, sub_lo = fired[cls]
+        # it was (c) that fired: the attack debounce was actually met
+        assert sub_lo >= STEREO_BLEND_DROPOUT_SNR_DEBOUNCE_REF, (
+            cls.__name__, sub_lo)
+        assert 0.20 < t_fire < 0.40, (cls.__name__, t_fire)
+        assert 0.05 < released[cls] < 0.25, (cls.__name__, released[cls])
     # the whole point of the reference-block accounting: the 65.5 ms
-    # chain must not take ~4x longer than the 16 ms one.  The bound is
-    # two light blocks, which is the quantisation of its own grid.
-    assert abs(fired[FMDemodulator] - fired[FMDemodulatorLight]) < 0.14, fired
+    # chain must not take ~4x longer than the 16 ms one.  Measured
+    # 0.256 / 0.262 s to fire and 0.128 / 0.131 s to release, so the
+    # bound is one light block.
+    assert abs(fired[FMDemodulator][0]
+               - fired[FMDemodulatorLight][0]) < 0.07, fired
+    assert abs(released[FMDemodulator]
+               - released[FMDemodulatorLight]) < 0.07, released
+
+    # --- the release timer starts at the LAST trigger, not before the
+    # latch (codex P2 on PR #32 round 7).  A pilot POWER collapse can
+    # fire while the SNR RATIO is still above LO - an overall level
+    # drop scales pilot and noise together - and the healthy time
+    # banked before that used to release the latch on the very next
+    # block, skipping the hold entirely.
+    rng = np.random.default_rng(9)
+    d = FMDemodulatorLight(stereo=True)
+    blk = 12_583
+    pos = 0
+    for _ in range(46):
+        d.demodulate(composite(blk, pos, 0.10, 0.0, rng))
+        pos += blk
+    assert d._snr_ok_ref > STEREO_BLEND_DROPOUT_SNR_DEBOUNCE_REF   # banked
+    d.demodulate(0.1 * composite(blk, pos, 0.10, 0.0, rng))        # -20 dB
+    pos += blk
+    assert d._dropout_latched                                      # (a) fired
+    assert d._snr_ok_ref == 0.0                                    # timer reset
+    blend_at_latch = d.blend_factor
+    d.demodulate(composite(blk, pos, 0.10, 0.0, rng))              # healthy
+    pos += blk
+    assert d._dropout_latched, 'released without serving the hold'
+    assert d.blend_factor < blend_at_latch                         # still closing
 
     # --- once latched, an intermittent recovery must not pump ---
     rng = np.random.default_rng(6)

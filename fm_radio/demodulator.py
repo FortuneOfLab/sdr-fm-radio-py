@@ -749,10 +749,22 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         # latch is only ARMED once the chain has settled, so the
         # resampler's priming blocks (instantaneous SNR ~ 0 even on a
         # strong capture) cannot leave it set when the guard opens.
+        # The release timer is zeroed on EVERY block a trigger holds,
+        # not just on the latching edge (codex P2 on PR #32 round 7):
+        # _snr_ok_ref counts healthy instantaneous SNR, and trigger
+        # (a) - a pilot POWER collapse - can fire while the SNR RATIO
+        # is still above LO (an overall level drop scales pilot and
+        # noise together).  Without this, the healthy time accumulated
+        # BEFORE the latch stayed on the clock and the very next block
+        # released it, skipping the hold entirely (measured: latch set
+        # with blend 0.0585, released one block later at 0.3309).
+        # Zeroing while the trigger holds also makes the hold mean
+        # what it says: time since the LAST trigger ended.
         settled = (self._pilot_settled_ref
                    >= STEREO_BLEND_FAST_CLOSE_SETTLE_REF)
         if settled and fast_close_now:
             self._dropout_latched = True
+            self._snr_ok_ref = 0.0
         elif (self._dropout_latched
                 and self._snr_ok_ref >= STEREO_BLEND_DROPOUT_RELEASE_REF):
             self._dropout_latched = False

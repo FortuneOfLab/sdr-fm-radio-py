@@ -429,7 +429,7 @@ STEREO_BLEND_DROPOUT_POWER_DROP_DB = 15.0  # Pilot-power collapse (dB below its 
 STEREO_BLEND_DROPOUT_SNR_DEBOUNCE_REF = 16.0  # Reference (16 ms) blocks of CONTINUOUS
                                     # sub-STEREO_BLEND_PILOT_SNR_DB_LO instantaneous
                                     # pilot SNR that identifies a SUSTAINED degradation
-                                    # (~190 ms).  Third fast-close trigger, for the case
+                                    # (~256 ms).  Third fast-close trigger, for the case
                                     # the other two miss: a noise floor that rises while
                                     # the pilot itself stays intact leaves the pilot
                                     # power flat (so the collapse test cannot fire) and
@@ -442,8 +442,8 @@ STEREO_BLEND_DROPOUT_SNR_DEBOUNCE_REF = 16.0  # Reference (16 ms) blocks of CONT
                                     # (optical 82.5) at the 16 ms block, and both
                                     # quantise up to 131 ms (2 blocks) at light's
                                     # 65.5 ms block; the antenna and optical-80 captures
-                                    # never dip at all.  192 ms therefore clears the
-                                    # worst measured burst by ~1.5x (2.4x against the
+                                    # never dip at all.  256 ms therefore clears the
+                                    # worst measured burst by ~1.95x (3.2x against the
                                     # true, unquantised 80 ms) and fires on none of
                                     # them (blend floor 0.90-1.00 across all four, from
                                     # the ordinary EMA - the fast-close stays out).
