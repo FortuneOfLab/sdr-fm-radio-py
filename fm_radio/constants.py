@@ -89,6 +89,25 @@ PILOT_BANDPASS_ORDER = 9            # Pilot bandpass filter order (standard)
 PILOT_BANDPASS_ORDER_LIGHT = 1      # Pilot bandpass filter order (light)
 PILOT_BANDPASS_LOW = 18000.0        # Pilot bandpass lower edge (Hz)
 PILOT_BANDPASS_HIGH = 20000.0       # Pilot bandpass upper edge (Hz)
+PILOT_NOISE_BAND_ORDER = 9          # Pilot SNR noise-band filter order, BOTH variants.
+                                    # Historically the light variant reused its order-1
+                                    # pilot order here, and the order-1 skirts leaked the
+                                    # 19 kHz pilot itself into the noise reference
+                                    # (measured -9.6/-10.4 dB at 19 kHz, and only
+                                    # -7.9 dB for 23 kHz DSB content in band 2), locking
+                                    # light's pilot SNR at 9.975 dB and its blend at
+                                    # 0.313 on a PURE pilot of any amplitude - light
+                                    # never reached full stereo and its side NR could
+                                    # barely train.  Order 9 (the standard variant's
+                                    # value, unchanged there) puts the pilot at
+                                    # -82/-89.5 dB in the bands, giving light a real
+                                    # noise measurement and SNR-scale parity with the
+                                    # standard chain, so the shared blend/tracker/NR
+                                    # thresholds mean the same thing in both variants.
+                                    # The light PILOT LP stays order 1: it sets the
+                                    # subcarrier phase operating point (offset 0.3 deg
+                                    # was calibrated against it) and does not touch the
+                                    # noise reference.
 PILOT_NOISE_BAND1_LOW = 16000.0     # Pilot SNR noise band 1 lower edge (Hz)
 PILOT_NOISE_BAND1_HIGH = 17500.0    # Pilot SNR noise band 1 upper edge (Hz)
 PILOT_NOISE_BAND2_LOW = 20500.0     # Pilot SNR noise band 2 lower edge (Hz)
@@ -394,6 +413,101 @@ STEREO_BLEND_STABILITY_MIN_FACTOR = 1.00  # Floor of the pilot-"jitter" stabilit
                                     # measures programme dynamics, not reception.  The
                                     # mechanism stays in place (set <1.0 to re-enable).
 STEREO_BLEND_SMOOTHING = 0.08              # EMA smoothing for blend factor (0-1)
+STEREO_BLEND_DROPOUT_POWER_DROP_DB = 15.0  # Pilot-power collapse (dB below its own EMA)
+                                    # that identifies a genuine pilot DROPOUT for the
+                                    # blend fast-close.  A real dropout collapses the
+                                    # measured pilot power by tens of dB within one
+                                    # block; programme spill into the NOISE bands
+                                    # (which dips the per-block SNR for several
+                                    # consecutive blocks on real music) leaves the
+                                    # pilot power stable.  Measured over 20 s of real
+                                    # programme, the drop never exceeds +1.2 dB on
+                                    # either reference capture and at either block
+                                    # size (CATV max +0.19 dB / p99 +0.11, antenna
+                                    # max +1.13 / p99 +0.85), so 15 dB clears the
+                                    # worst real-programme excursion by ~14 dB.
+STEREO_BLEND_DROPOUT_SNR_DEBOUNCE_REF = 16.0  # Reference (16 ms) blocks of CONTINUOUS
+                                    # sub-STEREO_BLEND_PILOT_SNR_DB_LO instantaneous
+                                    # pilot SNR that identifies a SUSTAINED degradation
+                                    # (~256 ms).  Third fast-close trigger, for the case
+                                    # the other two miss: a noise floor that rises while
+                                    # the pilot itself stays intact leaves the pilot
+                                    # power flat (so the collapse test cannot fire) and
+                                    # only crosses the slow SNR EMA after ~0.65 s, which
+                                    # left side/mid ~0.7 for the first ~0.2 s.  Real
+                                    # programme dips the instantaneous SNR below LO too
+                                    # (noise-band spill), but only in bursts: measured
+                                    # over 60 s of each reference capture, the longest
+                                    # CONTINUOUS sub-LO run is 48 ms (CATV) / 80 ms
+                                    # (optical 82.5) at the 16 ms block, and both
+                                    # quantise up to 131 ms (2 blocks) at light's
+                                    # 65.5 ms block; the antenna and optical-80 captures
+                                    # never dip at all.  256 ms therefore clears the
+                                    # worst measured burst by ~1.95x (3.2x against the
+                                    # true, unquantised 80 ms) and fires on none of
+                                    # them (blend floor 0.90-1.00 across all four, from
+                                    # the ordinary EMA - the fast-close stays out).
+                                    # Raised 12 -> 16 on codex round 6: at light's
+                                    # 65.5 ms block the counter steps 4.096 at a time,
+                                    # so 12 fired on the 3rd block against a measured
+                                    # worst of 2 - one block of margin.  16 fires on
+                                    # the 4th and costs 66 ms of closing time.
+                                    # Accumulated in reference-block TIME, so it means
+                                    # the same duration at either block size.
+STEREO_BLEND_DROPOUT_RELEASE_REF = 8.0  # Reference (16 ms) blocks of CONTINUOUS healthy
+                                    # instantaneous SNR before the fast-close latch
+                                    # releases (~130 ms).  The latch and this hold cover
+                                    # ALL THREE triggers - whichever fired sets it, and
+                                    # the hold runs from the last block on which any of
+                                    # them held (only STEREO_BLEND_DROPOUT_SNR_DEBOUNCE_REF
+                                    # belongs to the sustained-degradation trigger alone).
+                                    # Debouncing only the
+                                    # ATTACK let a single good block release the
+                                    # trigger, so an intermittently degraded stream
+                                    # (3 bad blocks, 1 good, at light's real block size)
+                                    # fast-closed and re-opened every cycle: blend
+                                    # swinging 0.01 <-> 0.26 with 37 sign flips in 5 s -
+                                    # audible stereo-width pumping.  The hold makes the
+                                    # mechanism behave like a normal receiver blend:
+                                    # fast to mono, deliberate back to stereo (it costs
+                                    # ~130 ms on a clean recovery).  Deliberately a HOLD
+                                    # at the same LO threshold, not a higher release
+                                    # level: a level hysteresis would strand a
+                                    # legitimately mid-SNR signal (7-16 dB, where the
+                                    # blend is meant to sit partially open) in mono.
+STEREO_BLEND_FAST_CLOSE_SETTLE_REF = 12.0  # Reference (16 ms) blocks after a pilot-chain
+                                    # (re)start before the fast-close may trigger
+                                    # (~190 ms): the resampler's priming blocks read
+                                    # instantaneous SNR ~ 0 even on a strong capture,
+                                    # and tripping there broke bit-identity with main.
+STEREO_BLEND_FAST_CLOSE_FACTOR = 0.5  # Per-16 ms-reference-block blend decay while the
+                                    # three-part dropout detector holds (see
+                                    # _demodulate_stereo): the pilot POWER has
+                                    # collapsed >= STEREO_BLEND_DROPOUT_POWER_DROP_DB
+                                    # below its own EMA, OR the instantaneous AND the
+                                    # EMA pilot SNR are both under
+                                    # STEREO_BLEND_PILOT_SNR_DB_LO (steady pilot-less
+                                    # content), OR the instantaneous SNR has sat below
+                                    # LO continuously for
+                                    # STEREO_BLEND_DROPOUT_SNR_DEBOUNCE_REF reference
+                                    # blocks (noise floor up, pilot intact - the case
+                                    # the first two miss).  An instantaneous-SNR-only
+                                    # trigger, with no debounce, was
+                                    # measured and rejected: programme spill into the
+                                    # NOISE bands dips the per-block SNR under LO for
+                                    # several consecutive blocks on real music, which
+                                    # walked the blend to 0.12 on the CATV reference.
+                                    # Why a fast path at all: the regular smoothed EMA
+                                    # lagged for seconds on the light variant's 65.5 ms
+                                    # blocks (blend 0.716 at 0.26 s of a pilot-less
+                                    # cold start, 2.4-3.6 s to close), leaving audible
+                                    # false side driven by programme leakage.  Halving
+                                    # per reference block closes 1.0 -> <0.05 in
+                                    # ~80 ms; a healthy pilot trips none of the three, so
+                                    # valid streams are untouched.  All blend/SNR EMAs
+                                    # are additionally time-normalised to the 16 ms
+                                    # reference block, so light's real block size
+                                    # gets identical time constants to standard.
 
 # --------------------------------------------------
 # Adaptive HF stereo blend (frequency-axis blend, pilot SNR based)
@@ -437,24 +551,21 @@ SIDE_NR_TONE_PROTECT_MED_BINS = 33  # Median window (bins) for the tonal-protect
 # measured a +6.5 dB side-noise step exactly when reception
 # degrades); an untrained reducer outputs unity until the gate opens.
 #
-# Threshold choice (codex round 4): the LIGHT variant's order-1 pilot
-# filters leak the pilot itself into the noise reference, capping its
-# pilot SNR at 9.975 dB and its blend at 0.313 on a PURE pilot of any
-# amplitude - a pre-existing light characteristic, so the gate must
-# open BELOW that saturation or light would never train.  ON = 0.25
-# clears light's 0.31 ceiling with margin while the untrained
-# initialisation error at forced blend 0.25 measures -17.3 dB
-# (floor -42.3 vs the blend-1 steady -25.0 dB; 3 s synthetic stereo,
-# broadband side noise 0.02) and heals at the 6 dB/s upward leak in
-# ~2.9 s; for light, whose blend STAYS at ~0.31, the floor learned
-# there matches the side it actually processes, so no healing is
-# needed at all.  OFF = 0.15 keeps a hysteresis band wider than the
-# blend EMA's block-to-block jitter (flap-tested) and still closes
-# the gate long before the absorbing-zero regime; with FREEZE mode
-# even a closed gate can no longer absorb the floor, so the
-# thresholds only decide WHERE the model may learn.
-SIDE_NR_ADAPT_BLEND_ON = 0.25   # Blend at/above which NR adaptation (re)opens
-SIDE_NR_ADAPT_BLEND_OFF = 0.15  # Blend at/below which NR adaptation freezes
+# Threshold choice (PR #32: light's pilot SNR is fixed, so the
+# PR #31-era rationale - light's blend saturating at 0.313 and
+# staying there - no longer exists and the original thresholds are
+# restored).  An untrained initialisation at forced blend 0.5
+# measures -9.1 dB vs the blend-1 steady floor (-34.1 vs -25.0 dB;
+# healed by the 6 dB/s upward leak in ~1.5 s); in the blend-step
+# case (0 -> 1) the gate
+# opens at full blend and the floor initialises at parity
+# immediately.  The OFF threshold's 0.15 hysteresis is far wider
+# than the blend EMA's block-to-block jitter (flap-tested across the
+# band).  With FREEZE mode below the gate the absorbing-zero failure
+# is structurally impossible at any threshold; the thresholds only
+# decide where the model may LEARN.
+SIDE_NR_ADAPT_BLEND_ON = 0.5    # Blend at/above which NR adaptation (re)opens
+SIDE_NR_ADAPT_BLEND_OFF = 0.35  # Blend at/below which NR adaptation freezes
 SIDE_NR_LO_HZ = 1500.0          # Lower edge of NR band (preserve low-frequency stereo)
 SIDE_NR_HI_HZ = 15000.0         # Upper edge of NR band
 

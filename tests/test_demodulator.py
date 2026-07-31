@@ -12,7 +12,9 @@ import pytest
 import scipy.signal as sg
 
 import fm_radio.demodulator as dm
-from fm_radio.constants import COMPOSITE_RATE, SDR_BLOCK_SIZE
+from fm_radio.constants import (
+    COMPOSITE_RATE, SDR_BLOCK_SIZE, STEREO_BLEND_DROPOUT_SNR_DEBOUNCE_REF,
+)
 from fm_radio.demodulator import FMDemodulator, FMDemodulatorLight
 
 
@@ -334,10 +336,10 @@ def test_mono_built_demod_learns_clean_nr_floor_on_stereo(cls, rng):
         pos += n_blk
     dm.stereo = True
     # NATURAL blend for both variants (codex round 4): the gate's ON
-    # threshold sits below the light variant's blend saturation
-    # (~0.31), so both variants train through their real product
-    # paths; each is compared against its own-variant control that
-    # experiences the same blend trajectory.
+    # both variants train through their real product paths (light's
+    # old blend saturation is gone since PR #32); each is compared
+    # against its own-variant control that experiences the same blend
+    # trajectory.
     r1 = np.random.default_rng(7)
     for _ in range(6 * fs_c // n_blk):
         left, right = dm.demodulate(stereo_comp(n_blk, pos, r1))
@@ -380,6 +382,12 @@ def test_nr_gate_untrained_weak_pilot_then_recovery(cls, rng):
     n_blk = 3072
 
     def comp(n, p0, r, pilot):
+        # Weak signal is modelled as LOW CNR (broadband composite
+        # noise floods the pilot and noise bands alike), not merely a
+        # missing pilot on a noiseless synthetic: the light variant's
+        # order-1 pilot LP leaks strong DSB content into the pilot
+        # measure, so a noise-free pilot-less composite would read as
+        # HIGH SNR there while a real weak signal never does.
         tt = (np.arange(n) + p0) / fs_c
         lmr = (0.2 * np.sin(2 * np.pi * 800.0 * tt)
                + r.standard_normal(n) * 0.005)
@@ -387,6 +395,8 @@ def test_nr_gate_untrained_weak_pilot_then_recovery(cls, rng):
         out = lpr + lmr * np.cos(2 * np.pi * 38_000.0 * tt)
         if pilot:
             out = out + 0.1 * np.cos(2 * np.pi * 19_000.0 * tt)
+        else:
+            out = out + r.standard_normal(n) * 0.05
         return out
 
     dm = cls(stereo=False)
@@ -409,19 +419,15 @@ def test_nr_gate_untrained_weak_pilot_then_recovery(cls, rng):
     assert emitted > 3 * 48_000                     # timeline advanced
 
     # strong pilot returns: gate opens NATURALLY for both variants
-    # (codex round 4).  The light variant's order-1 pilot filters cap
-    # its pilot SNR at ~9.9 dB / blend ~0.31 even on a pure pilot, so
-    # SIDE_NR_ADAPT_BLEND_ON (0.25) is deliberately below that
-    # saturation - light must train through its real product path,
-    # not a forced blend.
+    # through their real product paths (with the PR #32 measurement
+    # path both variants reach full blend on a healthy pilot).
     r2 = np.random.default_rng(4)
     for _ in range(6 * fs_c // n_blk):
         dm.demodulate(comp(n_blk, pos, r2, pilot=True))
         pos += n_blk
     from fm_radio.constants import SIDE_NR_ADAPT_BLEND_ON
     assert dm.blend_factor > SIDE_NR_ADAPT_BLEND_ON, dm.blend_factor
-    if cls is FMDemodulator:
-        assert dm.blend_factor > 0.5, dm.blend_factor
+    assert dm.blend_factor > 0.5, dm.blend_factor
     assert dm._side_nr_adapt
     assert dm.side_nr.noise_floor is not None
     assert np.median(dm.side_nr.prev_gain) < 0.9    # NR active, not pinned
@@ -573,27 +579,616 @@ def test_nr_gate_blend_ramp_has_no_gain_step():
     assert d._side_nr_adapt                          # ended reopened
 
 
-def test_light_pilot_snr_saturation_documented():
-    """The light variant's order-1 pilot filters leak the pilot into
-    the noise reference: pilot SNR saturates at ~9.975 dB and blend
-    at ~0.313 on a PURE pilot of ANY amplitude.  The gate's ON
-    threshold (0.25) must sit below that saturation, or light would
-    never train its NR (codex P1-1 round 4)."""
-    from fm_radio.constants import SIDE_NR_ADAPT_BLEND_ON
+PILOTLESS_CASES = {
+    "mono_1k": lambda n, p, fs: 0.4 * np.sin(
+        2 * np.pi * 1000.0 * ((np.arange(n) + p) / fs)),
+    "mono_10k": lambda n, p, fs: 0.4 * np.sin(
+        2 * np.pi * 10_000.0 * ((np.arange(n) + p) / fs)),
+    "mono_14k": lambda n, p, fs: 0.4 * np.sin(
+        2 * np.pi * 14_000.0 * ((np.arange(n) + p) / fs)),
+    "mono_broadband": lambda n, p, fs: (
+        0.2 * np.sin(2 * np.pi * 400.0 * ((np.arange(n) + p) / fs))
+        + 0.1 * np.sin(2 * np.pi * 3_000.0 * ((np.arange(n) + p) / fs))
+        + 0.05 * np.sin(2 * np.pi * 11_000.0 * ((np.arange(n) + p) / fs))),
+    "dsb_only": lambda n, p, fs: (
+        0.4 * np.sin(2 * np.pi * 800.0 * ((np.arange(n) + p) / fs))
+        * np.cos(2 * np.pi * 38_000.0 * ((np.arange(n) + p) / fs))),
+    "silence": lambda n, p, fs: np.zeros(n),
+}
+
+
+@pytest.mark.parametrize("cls", [FMDemodulator, FMDemodulatorLight])
+@pytest.mark.parametrize("case", sorted(PILOTLESS_CASES))
+def test_pilotless_high_cnr_never_reads_as_stereo(cls, case):
+    """Codex P1 on PR #32: pilot-less HIGH-CNR content must stay mono.
+
+    The light variant's order-1 phase LP leaks programme into the
+    pilot measure; with the order-9 noise bands the denominator is
+    tiny on clean composites, so pilot-less mono/DSB content read as
+    74-91 dB SNR / blend 1.0 and the tracker false-acquired (-26 deg
+    on plain mono, +16 deg on orphan DSB).  With the dedicated
+    order-9 measurement residual plus the tracker's pilot-valid
+    gate: SNR below the blend LO threshold, blend closed, NR gate
+    closed, no acquisition, no streak progress, output essentially
+    mono.  This is a DIFFERENT contract from the low-CNR test (which
+    floods all bands with noise); both are needed.
+    """
+    from fm_radio.constants import STEREO_BLEND_PILOT_SNR_DB_LO
     fs_c = 192_000
     n_blk = 3072
-    for amp in (0.01, 1.0):
-        d = FMDemodulatorLight(stereo=True)
+    d = cls(stereo=True)
+    d.subcarrier_phase_offset_rad = np.deg2rad(0.3)
+    outs = []
+    pos = 0
+    for _ in range(5 * fs_c // n_blk):
+        left, right = d.demodulate(PILOTLESS_CASES[case](n_blk, pos, fs_c))
+        pos += n_blk
+        outs.append((left, right))
+    assert d.pilot_snr_ema < STEREO_BLEND_PILOT_SNR_DB_LO, d.pilot_snr_ema
+    assert d.blend_factor < 0.05, d.blend_factor
+    assert not d._side_nr_adapt
+    assert not d._phase_acquired
+    assert d._phase_acq_count == 0                  # streak never advanced
+    assert d.stereo_phase_err_ema == 0.0            # no false lock
+    left = np.concatenate([o[0] for o in outs][-20:])
+    right = np.concatenate([o[1] for o in outs][-20:])
+    side = 0.5 * (left.astype(np.float64) - right.astype(np.float64))
+    mid = 0.5 * (left.astype(np.float64) + right.astype(np.float64))
+    if float(np.sqrt(np.mean(mid ** 2))) > 1e-4:    # silence has no mid
+        ratio = (np.sqrt(np.mean(side ** 2))
+                 / (np.sqrt(np.mean(mid ** 2)) + 1e-12))
+        assert ratio < 0.02, ratio                  # essentially mono
+
+
+@pytest.mark.parametrize("amp", [0.01, 0.1, 1.0])
+def test_pure_pilot_parity_across_amplitudes(amp):
+    """Both variants must read a clean pilot as high SNR at ANY
+    amplitude (the old order-1 noise bands saturated light at
+    9.975 dB regardless of amplitude), with variant parity."""
+    fs_c = 192_000
+    n_blk = 3072
+    snrs = {}
+    for cls in (FMDemodulatorLight, FMDemodulator):
+        d = cls(stereo=True)
+        d.subcarrier_phase_offset_rad = np.deg2rad(0.3)
+        pos = 0
+        for _ in range(6 * fs_c // n_blk):
+            tt = (np.arange(n_blk) + pos) / fs_c
+            d.demodulate(amp * np.cos(2 * np.pi * 19_000.0 * tt))
+            pos += n_blk
+        snrs[cls] = d.pilot_snr_ema
+        assert d.pilot_snr_ema > 60.0, (cls, amp, d.pilot_snr_ema)
+        assert d.blend_factor > 0.99, (cls, amp, d.blend_factor)
+    assert abs(snrs[FMDemodulatorLight] - snrs[FMDemodulator]) < 2.0, snrs
+
+
+def test_light_standard_snr_parity_across_cnr():
+    """With a VALID pilot, light and standard pilot SNR must agree
+    across the blend threshold region (codex measured 0.11-0.43 dB
+    deltas on an independent sweep; 1 dB guards the parity)."""
+    fs_c = 192_000
+    n_blk = 3072
+    for noise in (0.05, 0.12, 0.25):                # spans ~blend LO..HI
+        snrs = {}
+        for cls in (FMDemodulator, FMDemodulatorLight):
+            r = np.random.default_rng(5)
+            d = cls(stereo=True)
+            d.subcarrier_phase_offset_rad = np.deg2rad(0.3)
+            pos = 0
+            for _ in range(5 * fs_c // n_blk):
+                tt = (np.arange(n_blk) + pos) / fs_c
+                compv = (0.2 * np.sin(2 * np.pi * 400.0 * tt)
+                         + 0.1 * np.cos(2 * np.pi * 19_000.0 * tt)
+                         + r.standard_normal(n_blk) * noise)
+                d.demodulate(compv)
+                pos += n_blk
+            snrs[cls] = d.pilot_snr_ema
+        delta = abs(snrs[FMDemodulator] - snrs[FMDemodulatorLight])
+        assert delta < 1.0, (noise, snrs, delta)
+
+
+@pytest.mark.parametrize("cls", [FMDemodulator, FMDemodulatorLight])
+def test_pilot_dropout_and_recovery(cls):
+    """Pilot dropout on strong stereo, then recovery (codex PR #32).
+
+    Dropout: blend closes, the tracker stops updating and leaks (no
+    false re-acquisition from the pilot-less DSB+mono content).
+    Recovery: re-acquires on the SAME branch/polarity (angle back
+    near the pre-dropout value, blend reopens).
+    """
+    fs_c = 192_000
+    n_blk = 3072
+
+    def comp(n, p0, pilot):
+        tt = (np.arange(n) + p0) / fs_c
+        lmr = 0.3 * np.sin(2 * np.pi * 700.0 * tt)
+        out = (0.2 * np.sin(2 * np.pi * 400.0 * tt)
+               + lmr * np.cos(2 * np.pi * 38_000.0 * tt))
+        if pilot:
+            out = out + 0.1 * np.cos(2 * np.pi * 19_000.0 * tt)
+        return out
+
+    d = cls(stereo=True)
+    d.subcarrier_phase_offset_rad = np.deg2rad(0.3)
+    pos = 0
+    for _ in range(4 * fs_c // n_blk):              # acquire
+        d.demodulate(comp(n_blk, pos, True))
+        pos += n_blk
+    assert d._phase_acquired
+    assert d.blend_factor > 0.9
+    angle_before = np.rad2deg(d.stereo_phase_err_ema)
+
+    for _ in range(4 * fs_c // n_blk):              # dropout
+        d.demodulate(comp(n_blk, pos, False))
+        pos += n_blk
+    assert d.blend_factor < 0.05, d.blend_factor
+    # leaked toward 0 (or already there); never a new false lock away
+    assert abs(np.rad2deg(d.stereo_phase_err_ema)) <= abs(angle_before) + 1.0
+
+    for _ in range(4 * fs_c // n_blk):              # recovery
+        d.demodulate(comp(n_blk, pos, True))
+        pos += n_blk
+    assert d.blend_factor > 0.9
+    assert d._phase_acquired
+    angle_after = np.rad2deg(d.stereo_phase_err_ema)
+    assert abs(angle_after - angle_before) < 10.0, (angle_before, angle_after)
+
+
+def test_light_real_block_pilotless_transients():
+    """Codex P1 on PR #32 round 3: transients at the REAL light block.
+
+    The light variant's production block is 16384 IQ samples at
+    250 kHz (~65.5 ms of composite) - ~4x the 16 ms reference the
+    per-block EMAs were tuned against.  Before the time-normalised
+    EMAs + fast-close, a pilot-less cold start held blend 0.716 at
+    0.26 s (side/mid 0.877) and took 2.36 s to close; a dropout
+    after full stereo took 3.60 s.  After the fix (both measured at
+    the real block size): the cold start rides the time-normalised
+    EMA through the ~190 ms settle window, is crushed by the
+    steady-pilot-less trigger, and closes at 0.197 s; the dropout
+    fires the pilot-power-collapse trigger and closes at 0.197 s
+    (the first 65.5 ms block still carries pilot-era composite
+    through the pipeline latency).
+    """
+    from fm_radio.quality_selftest import _synthesize_iq_tone
+    fs_iq = 250_000
+    blk = 16384                                     # real light block
+
+    # --- pilot-less cold start: left-only content (mono present) ---
+    iq = _synthesize_iq_tone(
+        2.0, fs_iq, 1000.0, 1.0, 0.0, 0.0, 75_000.0,  # pilot_amp = 0
+    ).astype(np.complex64)
+    d = FMDemodulatorLight(stereo=True)
+    d.subcarrier_phase_offset_rad = np.deg2rad(0.3)
+    t_now = 0.0
+    t_closed = None
+    for i in range(0, iq.size, blk):
+        ch = iq[i:i + blk]
+        if ch.size < 8:
+            break
+        left, right = d.demodulate(d.process_iq_samples(ch))
+        t_now += ch.size / fs_iq
+        side = 0.5 * (left.astype(np.float64) - right.astype(np.float64))
+        mid = 0.5 * (left.astype(np.float64) + right.astype(np.float64))
+        if mid.size and float(np.sqrt(np.mean(mid ** 2))) > 1e-4:
+            ratio = (np.sqrt(np.mean(side ** 2))
+                     / (np.sqrt(np.mean(mid ** 2)) + 1e-12))
+            # During the ~190 ms settle window the blend rides the
+            # time-normalised EMA down (the fast-close would be
+            # unreliable there), so the first blocks pass genuine
+            # side at a declining blend; after 0.3 s it must be gone.
+            limit = 1.0 if t_now < 0.30 else 0.02
+            assert ratio < limit, (t_now, ratio)
+        if t_closed is None and d.blend_factor < 0.05:
+            t_closed = t_now
+    assert t_closed is not None and t_closed < 0.30, t_closed
+
+    # --- dropout after full stereo (mono + side content) ---
+    iq_st = _synthesize_iq_tone(
+        3.0, fs_iq, 700.0, 1.0, 0.0, 0.1, 75_000.0,
+    ).astype(np.complex64)
+    iq_dr = _synthesize_iq_tone(
+        3.0, fs_iq, 700.0, 1.0, 0.0, 0.0, 75_000.0,
+    ).astype(np.complex64)
+    d = FMDemodulatorLight(stereo=True)
+    d.subcarrier_phase_offset_rad = np.deg2rad(0.3)
+    for i in range(0, iq_st.size, blk):
+        ch = iq_st[i:i + blk]
+        if ch.size < 8:
+            break
+        d.demodulate(d.process_iq_samples(ch))
+    assert d.blend_factor > 0.9
+    t_now = 0.0
+    t_closed = None
+    for i in range(0, iq_dr.size, blk):
+        ch = iq_dr[i:i + blk]
+        if ch.size < 8:
+            break
+        left, right = d.demodulate(d.process_iq_samples(ch))
+        t_now += ch.size / fs_iq
+        if t_closed is None and d.blend_factor < 0.05:
+            t_closed = t_now
+        if t_now > 0.4:
+            side = 0.5 * (left.astype(np.float64) - right.astype(np.float64))
+            mid = 0.5 * (left.astype(np.float64) + right.astype(np.float64))
+            ratio = (np.sqrt(np.mean(side ** 2))
+                     / (np.sqrt(np.mean(mid ** 2)) + 1e-12))
+            assert ratio < 0.05, (t_now, ratio)     # settled to mono
+    # was 3.60 s before the fix; one 65.5 ms block of pipeline
+    # latency still carries pilot-era composite, then fast-close
+    assert t_closed is not None and t_closed < 0.35, t_closed
+
+    # --- recovery on the SAME instance: the open side is time-
+    # normalised too (codex P3 on PR #32 round 4).  The close side is
+    # the fast path; re-opening runs through the ordinary blend EMA,
+    # so it is the direct check that alpha_eff - not just the
+    # fast-close - carries the 16 ms time constants onto 65.5 ms
+    # blocks.  Measured here: blend > 0.5 at 0.262 s (0.197 s before
+    # round 6 added the fast-close release hold), > 0.9 at 0.524 s,
+    # and monotonic from the first rising block.
+    t_now = 0.0
+    t_half = None
+    t_full = None
+    trace = []
+    for i in range(0, iq_st.size, blk):
+        ch = iq_st[i:i + blk]
+        if ch.size < 8:
+            break
+        d.demodulate(d.process_iq_samples(ch))
+        t_now += ch.size / fs_iq
+        trace.append(d.blend_factor)
+        if t_half is None and d.blend_factor > 0.5:
+            t_half = t_now
+        if t_full is None and d.blend_factor > 0.9:
+            t_full = t_now
+    assert t_half is not None and t_half < 0.30, t_half
+    assert t_full is not None and t_full < 0.60, t_full
+    # No fast-close/EMA chatter on the way up.  The check starts at
+    # the FIRST RISING block rather than a fixed index (codex P3 on
+    # PR #32 round 5): the leading blocks still carry pilot-less
+    # composite through the pipeline latency, but pinning that to an
+    # index would both track the latency and hide a fast-close dip in
+    # the block right after the first rise.
+    steps = np.diff(np.asarray(trace, dtype=np.float64))
+    assert (steps > 0).any(), trace[:8]
+    rise = int(np.argmax(steps > 0))
+    assert steps[rise:].min() >= -1e-9, (rise, float(steps[rise:].min()),
+                                         trace[:8])
+
+
+def test_light_real_block_noise_step_closes_blend():
+    """Codex P2 on PR #32 round 5: noise rises, pilot stays intact.
+
+    The pilot-power-collapse trigger cannot fire (the pilot is
+    unchanged) and the EMA trigger waits for the slow SNR EMA to
+    cross LO: measured 0.524 s to reach blend < 0.5 and 0.655 s to
+    close, with side/mid ~0.67-0.75 - noise, not programme - through
+    the first 0.2 s.  The sustained-sub-LO debounce bounds it.
+    """
+    fs_c = int(COMPOSITE_RATE)
+    n_blk = 12_583                                  # light's real block
+    dt = n_blk / fs_c
+    rng = np.random.default_rng(7)
+    d = FMDemodulatorLight(stereo=True)
+    pos = 0
+
+    def feed(noise_amp):
+        nonlocal pos
+        tt = (np.arange(n_blk) + pos) / fs_c
+        pos += n_blk
+        x = (0.20 * np.sin(2 * np.pi * 400.0 * tt)
+             + 0.10 * np.cos(2 * np.pi * 19_000.0 * tt)     # pilot: constant
+             + 0.10 * np.sin(2 * np.pi * 700.0 * tt)
+             * np.cos(2 * np.pi * 38_000.0 * tt)
+             + noise_amp * rng.standard_normal(n_blk))
+        return d.demodulate(x)
+
+    for _ in range(round(3.0 / dt)):                # clean acquisition
+        feed(0.001)
+    assert d.blend_factor > 0.9, d.blend_factor
+
+    t_now = 0.0
+    t_half = None
+    t_closed = None
+    for _ in range(20):
+        left, right = feed(0.35)                    # noise floor steps up
+        t_now += dt
+        if t_half is None and d.blend_factor < 0.5:
+            t_half = t_now
+        if t_closed is None and d.blend_factor < 0.05:
+            t_closed = t_now
+        if t_now > 0.4:
+            side = 0.5 * (left.astype(np.float64) - right.astype(np.float64))
+            mid = 0.5 * (left.astype(np.float64) + right.astype(np.float64))
+            ratio = (np.sqrt(np.mean(side ** 2))
+                     / (np.sqrt(np.mean(mid ** 2)) + 1e-12))
+            assert ratio < 0.05, (t_now, ratio)
+    # Floors carry one light block (65.5 ms) of headroom over the
+    # measured 0.262 / 0.328 s; they were 0.30 / 0.35 while the
+    # debounce was 12 reference blocks (codex round 6 raised it to 16
+    # for false-positive margin, which costs one block of closing).
+    assert t_half is not None and t_half < 0.35, t_half      # was 0.524 s
+    assert t_closed is not None and t_closed < 0.40, t_closed  # was 0.655 s
+
+
+def test_dropout_debounce_and_latch_contract():
+    """Codex P2/P3 on PR #32 round 6: attack debounce + release hold.
+
+    The sustained-degradation trigger counts CONTINUOUS sub-LO time,
+    so an intermittent dip must not reach it, and once any trigger has
+    fired the latch must hold until the SNR has been healthy for a
+    while - releasing on a single good block made the blend pump
+    (measured 0.01 <-> 0.26 with 37 sign flips in 5 s).
+    """
+    fs_c = int(COMPOSITE_RATE)
+    n_ref_blk = int(round(0.016 * COMPOSITE_RATE))          # 16 ms
+
+    def composite(n, p0, pilot_amp, noise_amp, rng):
+        tt = (np.arange(n) + p0) / fs_c
+        out = (0.20 * np.sin(2 * np.pi * 400.0 * tt)
+               + pilot_amp * np.cos(2 * np.pi * 19_000.0 * tt)
+               + 0.10 * np.sin(2 * np.pi * 700.0 * tt)
+               * np.cos(2 * np.pi * 38_000.0 * tt))
+        if noise_amp:
+            out = out + noise_amp * rng.standard_normal(n)
+        return out
+
+    # --- the counters zero on every reset path ---
+    rng = np.random.default_rng(3)
+    d = FMDemodulatorLight(stereo=True)
+    for k in range(60):                                     # drive it degraded
+        d.demodulate(composite(n_ref_blk, k * n_ref_blk, 0.10, 0.35, rng))
+    assert d._snr_sub_lo_ref > 0.0
+    assert d._dropout_latched
+    d.reset()
+    assert d._snr_sub_lo_ref == 0.0
+    assert d._snr_ok_ref == 0.0
+    assert not d._dropout_latched
+
+    d = FMDemodulatorLight(stereo=True)
+    for k in range(60):
+        d.demodulate(composite(n_ref_blk, k * n_ref_blk, 0.10, 0.35, rng))
+    assert d._dropout_latched
+    d.stereo = False                                        # mono stretch
+    d.demodulate(composite(n_ref_blk, 0, 0.10, 0.0, rng))
+    d.stereo = True                                         # re-entry resets
+    d.demodulate(composite(n_ref_blk, 0, 0.10, 0.0, rng))
+    assert d._snr_sub_lo_ref == 0.0
+    assert not d._dropout_latched
+
+    # --- an INTERMITTENT dip never reaches the attack debounce ---
+    rng = np.random.default_rng(4)
+    d = FMDemodulatorLight(stereo=True)
+    peak = 0.0
+    for k in range(120):
+        noise = 0.35 if (k % 3) < 2 else 0.0                # 2 bad, 1 good
+        d.demodulate(composite(n_ref_blk, k * n_ref_blk, 0.10, noise, rng))
+        peak = max(peak, d._snr_sub_lo_ref)
+    assert peak < STEREO_BLEND_DROPOUT_SNR_DEBOUNCE_REF, peak
+
+    # --- trigger (c) attack and the latch release, on REAL TIME, at
+    # either block size (codex P3 on PR #32 round 7).  The measurement
+    # starts from a CLEAN acquisition so the SNR EMA is high and
+    # trigger (b) cannot fire - driving a cold instance with noise
+    # instead fires (b) right after the settle guard and never
+    # exercises (c) at all.  The degradation must also be clearly
+    # sub-LO rather than marginal: at a noise level that leaves the
+    # SNR straddling LO, the 16 ms chain's noisier per-block estimate
+    # keeps breaking the CONTINUOUS run (measured: it fired at
+    # 0.416 s against light's 0.262 s), which says more about
+    # estimator variance than about the debounce.
+    fired = {}
+    released = {}
+    for cls, blk in ((FMDemodulator, n_ref_blk), (FMDemodulatorLight, 12_583)):
+        rng = np.random.default_rng(5)
+        d = cls(stereo=True)
+        pos = 0
+        dt = blk / fs_c
+        for _ in range(int(round(3.0 / dt))):            # clean acquisition
+            d.demodulate(composite(blk, pos, 0.10, 0.0, rng))
+            pos += blk
+        assert d.blend_factor > 0.9, (cls.__name__, d.blend_factor)
+        t_now = 0.0
+        for _ in range(int(round(1.5 / dt))):            # sustained noise
+            d.demodulate(composite(blk, pos, 0.10, 0.5, rng))
+            pos += blk
+            t_now += dt
+            if cls not in fired and d._dropout_latched:
+                fired[cls] = (t_now, d._snr_sub_lo_ref)
+        assert cls in fired, cls.__name__
+        t_now = 0.0
+        for _ in range(int(round(1.5 / dt))):            # clean again
+            d.demodulate(composite(blk, pos, 0.10, 0.0, rng))
+            pos += blk
+            t_now += dt
+            if cls not in released and not d._dropout_latched:
+                released[cls] = t_now
+        assert cls in released, cls.__name__
+        t_fire, sub_lo = fired[cls]
+        # it was (c) that fired: the attack debounce was actually met
+        assert sub_lo >= STEREO_BLEND_DROPOUT_SNR_DEBOUNCE_REF, (
+            cls.__name__, sub_lo)
+        assert 0.20 < t_fire < 0.40, (cls.__name__, t_fire)
+        assert 0.05 < released[cls] < 0.25, (cls.__name__, released[cls])
+    # the whole point of the reference-block accounting: the 65.5 ms
+    # chain must not take ~4x longer than the 16 ms one.  Measured
+    # 0.256 / 0.262 s to fire and 0.128 / 0.131 s to release, so the
+    # bound is one light block.
+    assert abs(fired[FMDemodulator][0]
+               - fired[FMDemodulatorLight][0]) < 0.07, fired
+    assert abs(released[FMDemodulator]
+               - released[FMDemodulatorLight]) < 0.07, released
+
+    # --- the release timer starts at the LAST trigger, not before the
+    # latch (codex P2 on PR #32 round 7).  A pilot POWER collapse can
+    # fire while the SNR RATIO is still above LO - an overall level
+    # drop scales pilot and noise together - and the healthy time
+    # banked before that used to release the latch on the very next
+    # block, skipping the hold entirely.
+    rng = np.random.default_rng(9)
+    d = FMDemodulatorLight(stereo=True)
+    blk = 12_583
+    pos = 0
+    for _ in range(46):
+        d.demodulate(composite(blk, pos, 0.10, 0.0, rng))
+        pos += blk
+    assert d._snr_ok_ref > STEREO_BLEND_DROPOUT_SNR_DEBOUNCE_REF   # banked
+    d.demodulate(0.1 * composite(blk, pos, 0.10, 0.0, rng))        # -20 dB
+    pos += blk
+    assert d._dropout_latched                                      # (a) fired
+    assert d._snr_ok_ref == 0.0                                    # timer reset
+    blend_at_latch = d.blend_factor
+    d.demodulate(composite(blk, pos, 0.10, 0.0, rng))              # healthy
+    pos += blk
+    assert d._dropout_latched, 'released without serving the hold'
+    assert d.blend_factor < blend_at_latch                         # still closing
+
+    # --- once latched, an intermittent recovery must not pump ---
+    rng = np.random.default_rng(6)
+    d = FMDemodulatorLight(stereo=True)
+    blk = 12_583
+    for k in range(46):                                     # clean acquisition
+        d.demodulate(composite(blk, k * blk, 0.10, 0.001, rng))
+    assert d.blend_factor > 0.9
+    trace = []
+    fired_at = None
+    for k in range(60):
+        # 4 bad, 1 good: four 65.5 ms blocks reach the 16-reference
+        # block attack debounce, and the single good block (4.096) is
+        # short of the 8-reference block release hold, so the latch
+        # must survive every cycle.  Without the hold this pattern
+        # pumped the blend on every good block.
+        noise = 0.001 if (k % 5) == 4 else 0.35
+        d.demodulate(composite(blk, (46 + k) * blk, 0.10, noise, rng))
+        trace.append(d.blend_factor)
+        if fired_at is None and d._dropout_latched:
+            fired_at = len(trace) - 1
+    assert fired_at is not None
+    assert d._dropout_latched                               # held through
+    steps = np.diff(np.asarray(trace[fired_at:], dtype=np.float64))
+    assert steps.max() <= 1e-9, (float(steps.max()), trace[fired_at:fired_at + 12])
+
+
+def test_pending_iq_duration_is_consumed_once():
+    """Codex P2 on PR #32 round 4: the IQ time step is per-block.
+
+    _pending_block_iq_s is the duration of the IQ block that
+    process_iq_samples just converted, and it is the EMA time base
+    for exactly ONE demodulate() call.  It used to persist, so once a
+    light instance had seen its 65.5 ms production block, any later
+    composite-direct call inherited that stale duration and ran the
+    EMAs, the settle guard and the fast-close 4.096x too fast.
+    """
+    fs_iq = 250_000
+    blk = 16384
+    n_comp = int(round(0.016 * COMPOSITE_RATE))     # 3072 = one 16 ms block
+    tt = np.arange(n_comp) / float(COMPOSITE_RATE)
+    comp16 = (0.2 * np.sin(2 * np.pi * 400.0 * tt)
+              + 0.1 * np.cos(2 * np.pi * 19_000.0 * tt))
+
+    from fm_radio.quality_selftest import _synthesize_iq_tone
+    iq = _synthesize_iq_tone(
+        0.5, fs_iq, 700.0, 1.0, 0.0, 0.1, 75_000.0,
+    ).astype(np.complex64)[:blk]
+
+    # --- production 1:1 path keeps the IQ-derived step ---
+    d = FMDemodulatorLight(stereo=True)
+    d.demodulate(d.process_iq_samples(iq))
+    assert d._pilot_settled_ref == pytest.approx(4.096)   # 65.536 / 16 ms
+    assert d._pending_block_iq_s is None                  # consumed
+
+    # --- a composite-direct call after it must NOT reuse 65.536 ms ---
+    before = d._pilot_settled_ref
+    d.demodulate(comp16)
+    assert d._pilot_settled_ref - before == pytest.approx(1.0)
+
+    # --- standard's production block is exactly the 16 ms reference ---
+    ds = FMDemodulator(stereo=True)
+    iq_std = _synthesize_iq_tone(
+        0.5, 1_024_000, 700.0, 1.0, 0.0, 0.1, 75_000.0,
+    ).astype(np.complex64)[:int(SDR_BLOCK_SIZE)]
+    ds.demodulate(ds.process_iq_samples(iq_std))
+    assert ds._pilot_settled_ref == pytest.approx(1.0)
+
+    # --- a mono block consumes the pending duration as well ---
+    d = FMDemodulatorLight(stereo=False)
+    d.demodulate(d.process_iq_samples(iq))                # mono path
+    assert d._pending_block_iq_s is None
+    d.stereo = True
+    d.demodulate(comp16)
+    # the mono -> stereo re-entry zeroes the settle counter first, so
+    # the whole counter is this one composite block's own duration
+    assert d._pilot_settled_ref == pytest.approx(1.0)
+
+    # --- a FAILED preprocessing must not publish a duration at all
+    # (codex P2 on PR #32 round 5): the pending token is set only
+    # after the composite exists, so a block that never reaches
+    # demodulate() leaves nothing for a later composite-direct call
+    # to consume.  Both chains raise DemodulationError on an empty
+    # input block.
+    from fm_radio.exceptions import DemodulationError
+    for cls in (FMDemodulator, FMDemodulatorLight):
+        dx = cls(stereo=True)
+        with pytest.raises(DemodulationError):
+            dx.process_iq_samples(np.empty(0, dtype=np.complex64))
+        assert dx._pending_block_iq_s is None, cls.__name__
+        dx.demodulate(comp16)
+        assert dx._pilot_settled_ref == pytest.approx(1.0), cls.__name__
+
+    # --- an exception in the demodulation must not strand it ---
+    d = FMDemodulatorLight(stereo=True)
+    d.process_iq_samples(iq)
+    assert d._pending_block_iq_s == pytest.approx(blk / fs_iq)
+
+    def _boom(_composite):
+        raise RuntimeError('boom')
+
+    d._demodulate_stereo = _boom
+    with pytest.raises(RuntimeError):
+        d.demodulate(comp16)
+    assert d._pending_block_iq_s is None
+
+    # --- reset() restores the initial state ---
+    d = FMDemodulatorLight(stereo=True)
+    d.demodulate(d.process_iq_samples(iq))
+    d.process_iq_samples(iq)                              # leave one pending
+    assert d._pending_block_iq_s is not None
+    assert d._pilot_settled_ref > 0.0
+    assert d._pilot_pow_ema is not None
+    d.reset()
+    assert d._pending_block_iq_s is None
+    assert d._pilot_settled_ref == 0.0
+    assert d._pilot_pow_ema is None
+
+
+def test_light_pilot_snr_matches_standard_on_pure_pilot():
+    """Light's pilot SNR must track signal quality like standard's.
+
+    Historically light reused its order-1 pilot order for the NOISE
+    bandpasses, whose skirts leaked the pilot itself into the noise
+    reference (-9.6/-10.4 dB at 19 kHz): pilot SNR saturated at
+    9.975 dB and blend at 0.313 on a PURE pilot of ANY amplitude, so
+    light never reached full stereo.  With order-9 noise bands
+    (PILOT_NOISE_BAND_ORDER) a clean pilot must read high-SNR and
+    open the blend fully, at parity with the standard variant
+    (measured 84.18 vs 84.17 dB).
+    """
+    fs_c = 192_000
+    n_blk = 3072
+    snrs = {}
+    for cls in (FMDemodulatorLight, FMDemodulator):
+        d = cls(stereo=True)
         d.subcarrier_phase_offset_rad = np.deg2rad(0.3)
         pos = 0
         for _ in range(8 * fs_c // n_blk):
             tt = (np.arange(n_blk) + pos) / fs_c
-            d.demodulate(amp * np.cos(2 * np.pi * 19_000.0 * tt))
+            d.demodulate(0.1 * np.cos(2 * np.pi * 19_000.0 * tt))
             pos += n_blk
-        assert 9.0 < d.pilot_snr_ema < 11.0, (amp, d.pilot_snr_ema)
-        assert 0.28 < d.blend_factor < 0.35, (amp, d.blend_factor)
-        assert d.blend_factor > SIDE_NR_ADAPT_BLEND_ON
-        assert d._side_nr_adapt                     # gate reachable
+        snrs[cls] = d.pilot_snr_ema
+        assert d.pilot_snr_ema > 60.0, (cls, d.pilot_snr_ema)
+        assert d.blend_factor > 0.99, (cls, d.blend_factor)
+        assert d._side_nr_adapt
+    assert abs(snrs[FMDemodulatorLight] - snrs[FMDemodulator]) < 2.0, snrs
 
 
 def test_nr_gate_hysteresis_and_reset(rng):

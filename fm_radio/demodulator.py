@@ -74,6 +74,7 @@ from fm_radio.constants import (
     STEREO_PHASE_SIDE_OVER_NOISE_DB, STEREO_PHASE_NOISE_CONF_RAMP_DB,
     STEREO_PHASE_LEAK_DEG_PER_SEC,
     STEREO_IQ_PHASE_CORRECTION_ENABLE,
+    PILOT_NOISE_BAND_ORDER,
     PILOT_NOISE_BAND1_LOW, PILOT_NOISE_BAND1_HIGH,
     PILOT_NOISE_BAND2_LOW, PILOT_NOISE_BAND2_HIGH,
     STEREO_FIR_NTAPS, STEREO_FIR_TRANSITION_HZ,
@@ -88,7 +89,11 @@ from fm_radio.constants import (
     STEREO_BLEND_PILOT_JITTER_EMA_ALPHA,
     STEREO_BLEND_PILOT_JITTER_REF_DB,
     STEREO_BLEND_STABILITY_MIN_FACTOR,
-    STEREO_BLEND_SMOOTHING,
+    STEREO_BLEND_SMOOTHING, STEREO_BLEND_FAST_CLOSE_FACTOR,
+    STEREO_BLEND_FAST_CLOSE_SETTLE_REF,
+    STEREO_BLEND_DROPOUT_POWER_DROP_DB,
+    STEREO_BLEND_DROPOUT_SNR_DEBOUNCE_REF,
+    STEREO_BLEND_DROPOUT_RELEASE_REF,
     STEREO_HF_BLEND_PILOT_SNR_DB_HI, STEREO_HF_BLEND_PILOT_SNR_DB_LO,
     PILOT_NOTCH_FREQ, PILOT_NOTCH_Q,
     SIDE_NR_ENABLE, SIDE_NR_FRAME, SIDE_NR_HOP,
@@ -181,12 +186,45 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         self._pilot_lp_zi: np.ndarray = np.zeros(
             (self.pilot_lp_sos.shape[0], 2), dtype=np.complex128,
         )
+        # --- Pilot MEASUREMENT lowpass (SNR numerator) ---
+        # The SNR numerator must come from an order-matched residual:
+        # with the noise DENOMINATOR at PILOT_NOISE_BAND_ORDER, the
+        # light variant's order-1 PHASE residual leaks programme
+        # content into the numerator, and a pilot-less high-CNR
+        # composite read as 74-91 dB SNR / blend 1.0 while the phase
+        # tracker false-acquired (codex P1 on PR #32).  The
+        # measurement path shares the phase-continuous heterodyne and
+        # filters it at PILOT_NOISE_BAND_ORDER; when the variant's
+        # phase LP already has that order (standard), the phase
+        # residual is reused directly - bit-identical, no extra
+        # filter.  The phase LP keeps the per-variant order because
+        # it sets the subcarrier phase operating point
+        # (STEREO_SUBCARRIER_PHASE_OFFSET_DEG_LIGHT was calibrated
+        # against the order-1 response).
+        self._pilot_meas_separate: bool = (
+            int(pilot_order) != int(PILOT_NOISE_BAND_ORDER)
+        )
+        self._pilot_meas_lp_sos: np.ndarray = (
+            signal.butter(
+                PILOT_NOISE_BAND_ORDER,
+                pilot_lp_cutoff / (self.composite_rate / 2.0),
+                btype="low", output="sos",
+            ) if self._pilot_meas_separate else self.pilot_lp_sos
+        )
+        self._pilot_meas_lp_zi: np.ndarray = np.zeros(
+            (self._pilot_meas_lp_sos.shape[0], 2), dtype=np.complex128,
+        )
+        # Noise bands use their own order for BOTH variants (see
+        # PILOT_NOISE_BAND_ORDER): the light variant's order-1 skirts
+        # leaked the pilot itself into the noise reference and locked
+        # its SNR at ~10 dB; the pilot LP above keeps the per-variant
+        # order because it sets the subcarrier phase operating point.
         self.bp_pilot_noise_1 = BandpassFilter(
-            order=pilot_order, lowcut=PILOT_NOISE_BAND1_LOW,
+            order=PILOT_NOISE_BAND_ORDER, lowcut=PILOT_NOISE_BAND1_LOW,
             highcut=PILOT_NOISE_BAND1_HIGH, sample_rate=self.composite_rate,
         )
         self.bp_pilot_noise_2 = BandpassFilter(
-            order=pilot_order, lowcut=PILOT_NOISE_BAND2_LOW,
+            order=PILOT_NOISE_BAND_ORDER, lowcut=PILOT_NOISE_BAND2_LOW,
             highcut=PILOT_NOISE_BAND2_HIGH, sample_rate=self.composite_rate,
         )
         # --- De-emphasis ---
@@ -226,6 +264,41 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         # Mode-transition tracking: entering stereo after mono must
         # re-acquire the stereo-only state (see _reset_stereo_side_state).
         self._prev_demod_was_mono: bool = False
+        # PENDING duration (seconds) of the IQ block that
+        # process_iq_samples just turned into a composite block; the
+        # EMA time base (see n_ref in _demodulate_stereo).  Valid for
+        # exactly ONE demodulate() call - the streaming contract is
+        # one process_iq_samples() per demodulate() - and cleared
+        # there, so a later composite-direct call (tests, offline
+        # tools) falls back to its own composite duration instead of
+        # inheriting a stale IQ block's.  None until the first IQ
+        # block and for composite-direct callers.
+        self._pending_block_iq_s: float | None = None
+        # Reference-block time since the pilot chain last (re)started
+        # (construction, reset, stereo re-entry); the fast-close is
+        # suppressed until the chain has settled - the resampler's
+        # priming blocks measure instantaneous SNR ~ 0 even on a
+        # strong capture (CATV block 2 read 0 dB while the EMA held
+        # 25 dB) and tripping there broke bit-identity with main.
+        self._pilot_settled_ref: float = 0.0
+        # Pilot POWER EMA (linear) for the dropout detector: a real
+        # dropout collapses the measured pilot power by tens of dB
+        # within one block, while programme spill into the NOISE
+        # bands (which drives instantaneous SNR dips of several
+        # consecutive blocks on real music - CATV measured blend
+        # walked to 0.12 with an SNR-threshold trigger) leaves the
+        # pilot power itself stable.
+        self._pilot_pow_ema: float | None = None
+        # Continuous reference-block time whose INSTANTANEOUS pilot
+        # SNR sat below the blend LO threshold: the attack debounce of
+        # the sustained-degradation trigger (c) ALONE.
+        self._snr_sub_lo_ref: float = 0.0
+        # Continuous reference-block time at or above LO, and the
+        # fast-close latch it releases.  These two are shared by ALL
+        # THREE triggers: whichever fires sets the latch, and the hold
+        # runs from the last block on which any of them held.
+        self._snr_ok_ref: float = 0.0
+        self._dropout_latched: bool = False
 
         # --- Adaptive stereo blend ---
         # blend_factor: 1.0 = full stereo, 0.0 = full mono
@@ -345,16 +418,32 @@ class BaseFMDemodulator(FMDemodulatorInterface):
     def demodulate(self, composite: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Generate stereo or mono audio signals from the composite signal.
 
+        Streaming contract: ONE process_iq_samples() call feeds ONE
+        demodulate() call.  The IQ block's duration
+        (_pending_block_iq_s) is the EMA time base for that one block
+        and is consumed here - in a finally, so an exception in the
+        demodulation cannot leave a stale duration behind, and in both
+        the stereo and the mono path, so a mono stretch cannot hand an
+        old IQ duration to a later stereo block.  Callers that feed
+        composite blocks directly (tests, offline tools) therefore
+        always fall back to the composite's own duration, even after
+        an earlier IQ-fed block.  Queueing several
+        process_iq_samples() calls before demodulating is NOT
+        supported: each one overwrites the pending duration.
+
         Args:
             composite (ndarray): Composite signal.
 
         Returns:
             tuple: (left_channel, right_channel)
         """
-        if self.stereo:
-            return self._demodulate_stereo(composite)
-        else:
-            return self._demodulate_mono(composite)
+        try:
+            if self.stereo:
+                return self._demodulate_stereo(composite)
+            else:
+                return self._demodulate_mono(composite)
+        finally:
+            self._pending_block_iq_s = None
 
     def _remove_dc(self, iq_samples: np.ndarray) -> np.ndarray:
         """Remove the front-end DC offset with a narrow LTI blocker.
@@ -412,7 +501,10 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         two lines and the lowpass keeps one).
 
         Returns:
-            Tuple of (pilot_phase, pilot_residual).
+            Tuple of (pilot_phase, measurement_residual) - the second
+            element is the ORDER-9 measurement residual used for the
+            pilot SNR numerator (equal to the phase residual on the
+            standard variant, a dedicated filter on light).
         """
         n = np.arange(composite.size, dtype=np.float64)
         w0 = 2.0 * np.pi * self.pilot_residual_center_hz / self.composite_rate
@@ -422,6 +514,17 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         residual_in, self._pilot_lp_zi = signal.sosfilt(
             self.pilot_lp_sos, mixed, zi=self._pilot_lp_zi,
         )
+        # Measurement residual for the SNR numerator (see ctor): the
+        # standard variant reuses the phase residual (same order,
+        # bit-identical); the light variant runs the dedicated
+        # order-9 filter so programme leakage through its order-1
+        # phase LP cannot masquerade as pilot power.
+        if self._pilot_meas_separate:
+            meas_in, self._pilot_meas_lp_zi = signal.sosfilt(
+                self._pilot_meas_lp_sos, mixed, zi=self._pilot_meas_lp_zi,
+            )
+        else:
+            meas_in = residual_in
         residual_phase = self.pilot_pll.process(
             residual_in.astype(np.complex64, copy=False)
         ).astype(np.float64, copy=False)
@@ -437,7 +540,7 @@ class BaseFMDemodulator(FMDemodulatorInterface):
                     np.concatenate(([self._pilot_phase_last], pilot_phase))
                 )[1:]
             self._pilot_phase_last = float(pilot_phase[-1])
-        return pilot_phase, residual_in
+        return pilot_phase, meas_in
 
     def _apply_mono_delay(self, mono: np.ndarray) -> np.ndarray:
         """Delay mono path to compensate LR path group delay."""
@@ -480,8 +583,14 @@ class BaseFMDemodulator(FMDemodulatorInterface):
             filt.reset()
         self.pilot_pll.reset()
         self._pilot_lp_zi = np.zeros_like(self._pilot_lp_zi)
+        self._pilot_meas_lp_zi = np.zeros_like(self._pilot_meas_lp_zi)
         self._pilot_mix_phase = 0.0
         self._pilot_phase_last = None
+        self._pilot_settled_ref = 0.0
+        self._pilot_pow_ema = None
+        self._snr_sub_lo_ref = 0.0
+        self._snr_ok_ref = 0.0
+        self._dropout_latched = False
         self.pilot_snr_ema = None
         self.pilot_jitter_ema = 0.0
         self.blend_factor = 0.0
@@ -532,12 +641,53 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         noise_power_2 = float(np.mean(pilot_noise_2 ** 2))
         noise_power = 0.5 * (noise_power_1 + noise_power_2)
         snr_db = 10.0 * np.log10((pilot_power + 1e-12) / (noise_power + 1e-12))
+        # Time-normalised EMA coefficients (codex P1 on PR #32 round
+        # 3): the per-block alphas below were tuned against the
+        # standard chain's 16 ms composite blocks, but the light
+        # variant's REAL block is 16384 IQ samples at 250 kHz
+        # (~65.5 ms of composite), so per-block EMAs responded ~4x
+        # slower there - a pilot dropout left audible false side for
+        # seconds.  Scaling each alpha by the block's duration in
+        # 16 ms reference units keeps every time constant identical
+        # across variants and block sizes.  The time step comes from
+        # the IQ side (_pending_block_iq_s): the standard chain's
+        # 16384-sample IQ block is EXACTLY 16 ms, so its exponent is
+        # exactly 1.0 on every call - including resampler priming,
+        # where the emitted composite size varies and a
+        # composite-derived step would deviate and break bit-identity
+        # with main.  The pending duration covers exactly this one
+        # block (demodulate() clears it); composite-direct callers
+        # have none and fall back to composite.size / composite_rate.
+        if self._pending_block_iq_s is not None:
+            n_ref = self._pending_block_iq_s / 0.016
+        else:
+            n_ref = composite.size / (0.016 * self.composite_rate)
+        self._pilot_settled_ref += n_ref
+
+        def _alpha_eff(alpha: float) -> float:
+            # Identity shortcut: 1 - (1 - a)**1.0 is NOT bit-equal to
+            # a in floats (1 - (1 - 0.08) = 0.08000000000000007), and
+            # that last-bit difference walked the standard chain's
+            # EMA trajectories away from main.
+            if n_ref == 1.0:
+                return alpha
+            return 1.0 - (1.0 - alpha) ** n_ref
+
+        if self._pilot_pow_ema is None:
+            self._pilot_pow_ema = pilot_power
+        pow_drop_db = 10.0 * np.log10(
+            (self._pilot_pow_ema + 1e-30) / (pilot_power + 1e-30)
+        )
+        pow_alpha = _alpha_eff(STEREO_BLEND_PILOT_SNR_EMA_ALPHA)
+        self._pilot_pow_ema = (
+            pow_alpha * pilot_power + (1.0 - pow_alpha) * self._pilot_pow_ema
+        )
         if self.pilot_snr_ema is None:
             self.pilot_snr_ema = snr_db
-        snr_alpha = STEREO_BLEND_PILOT_SNR_EMA_ALPHA
+        snr_alpha = _alpha_eff(STEREO_BLEND_PILOT_SNR_EMA_ALPHA)
         self.pilot_snr_ema = snr_alpha * snr_db + (1.0 - snr_alpha) * self.pilot_snr_ema
         snr_jitter = abs(snr_db - self.pilot_snr_ema)
-        jitter_alpha = STEREO_BLEND_PILOT_JITTER_EMA_ALPHA
+        jitter_alpha = _alpha_eff(STEREO_BLEND_PILOT_JITTER_EMA_ALPHA)
         self.pilot_jitter_ema = (
             jitter_alpha * snr_jitter + (1.0 - jitter_alpha) * self.pilot_jitter_ema
         )
@@ -559,9 +709,113 @@ class BaseFMDemodulator(FMDemodulatorInterface):
             + (1.0 - stability_min_factor) * stability
         )
         target = snr_score * stability_factor
-        # EMA smoothing to avoid abrupt transitions
-        alpha = STEREO_BLEND_SMOOTHING
-        self.blend_factor = alpha * target + (1.0 - alpha) * self.blend_factor
+        # Continuous sub-LO time, in reference blocks (codex P2 on
+        # PR #32 round 5).  The other two triggers both miss a
+        # degradation that leaves the PILOT intact and only raises the
+        # noise floor: the power test reads the pilot, which is
+        # unchanged, and the EMA test waits for the slow SNR EMA to
+        # cross LO - measured 0.655 s to close with side/mid ~0.7
+        # through the first 0.2 s.  Real programme dips the
+        # instantaneous SNR below LO as well (noise-band spill), so
+        # the distinction is duration, not depth: see the debounce
+        # constant for the measured burst lengths.
+        if snr_db < STEREO_BLEND_PILOT_SNR_DB_LO:
+            self._snr_sub_lo_ref += n_ref
+            self._snr_ok_ref = 0.0
+        else:
+            self._snr_sub_lo_ref = 0.0
+            self._snr_ok_ref += n_ref
+        fast_close_now = (
+            pow_drop_db >= STEREO_BLEND_DROPOUT_POWER_DROP_DB
+            or (snr_db < STEREO_BLEND_PILOT_SNR_DB_LO
+                and snr_for_blend < STEREO_BLEND_PILOT_SNR_DB_LO)
+            or self._snr_sub_lo_ref >= STEREO_BLEND_DROPOUT_SNR_DEBOUNCE_REF
+        )
+        # ATTACK / RELEASE latch (codex P2 on PR #32 round 6).  Every
+        # trigger above released the instant its condition cleared, so
+        # an intermittently degraded stream (measured: 3 bad blocks,
+        # 1 good, at the light variant's real block size) fast-closed
+        # and re-opened every cycle - blend swinging 0.01 <-> 0.26
+        # with 37 sign flips in 5 s, audible stereo-width pumping that
+        # the clean-recovery test cannot see.  Note the pumping came
+        # from the EMA trigger, not only the debounced one: debouncing
+        # a single trigger's attack is not enough, the fast-close as a
+        # WHOLE needs the hysteresis.  Holding it until the
+        # instantaneous SNR has been healthy for
+        # STEREO_BLEND_DROPOUT_RELEASE_REF reference blocks gives the
+        # usual receiver behaviour: fast to mono, deliberate back to
+        # stereo.  The release is a HOLD at the same LO threshold
+        # rather than a higher level on purpose - a level hysteresis
+        # would strand a legitimately mid-SNR signal (7-16 dB, where
+        # the blend is meant to sit partially open) in mono.  The
+        # latch is only ARMED once the chain has settled, so the
+        # resampler's priming blocks (instantaneous SNR ~ 0 even on a
+        # strong capture) cannot leave it set when the guard opens.
+        # The release timer is zeroed on EVERY block a trigger holds,
+        # not just on the latching edge (codex P2 on PR #32 round 7):
+        # _snr_ok_ref counts healthy instantaneous SNR, and trigger
+        # (a) - a pilot POWER collapse - can fire while the SNR RATIO
+        # is still above LO (an overall level drop scales pilot and
+        # noise together).  Without this, the healthy time accumulated
+        # BEFORE the latch stayed on the clock and the very next block
+        # released it, skipping the hold entirely (measured: latch set
+        # with blend 0.0585, released one block later at 0.3309).
+        # Zeroing while the trigger holds also makes the hold mean
+        # what it says: time since the LAST trigger ended.
+        settled = (self._pilot_settled_ref
+                   >= STEREO_BLEND_FAST_CLOSE_SETTLE_REF)
+        if settled and fast_close_now:
+            self._dropout_latched = True
+            self._snr_ok_ref = 0.0
+        elif (self._dropout_latched
+                and self._snr_ok_ref >= STEREO_BLEND_DROPOUT_RELEASE_REF):
+            self._dropout_latched = False
+        if settled and self._dropout_latched:
+            # FAST-CLOSE (codex P1 on PR #32 round 3): the pilot is
+            # invalid RIGHT NOW, so the synchronous demod is being
+            # driven by programme leakage and the smoothed blend must
+            # not keep the side open while the EMAs catch up -
+            # measured on the light variant's real block size: a
+            # dropout took 3.6 s to close, a pilot-less cold start
+            # 2.4 s.  Halving per 16 ms reference block closes
+            # 1.0 -> <0.05 within ~80 ms.  Trigger design: a plain
+            # instantaneous-SNR threshold is trigger-happy on real
+            # programme (music spill into the NOISE bands dips the
+            # per-block SNR below LO for several consecutive blocks -
+            # CATV measured blend walked to 0.12), so the detector
+            # fires on (a) the measured pilot POWER collapsing
+            # >= STEREO_BLEND_DROPOUT_POWER_DROP_DB below its own EMA
+            # (a real dropout collapses it within one block; spill
+            # sits in the denominator and leaves it stable), or
+            # (b) BOTH the instantaneous and EMA SNR below LO
+            # (steady pilot-less content, e.g. a dead-channel
+            # tune-in), or (c) the instantaneous SNR sitting below LO
+            # CONTINUOUSLY for STEREO_BLEND_DROPOUT_SNR_DEBOUNCE_REF
+            # reference blocks (_snr_sub_lo_ref), which catches the
+            # degradation the other two miss: a noise floor that rises
+            # while the pilot itself stays intact leaves (a)'s pilot
+            # power flat and only crosses (b)'s slow EMA after
+            # ~0.65 s.  Real programme dips below LO too, and deeply,
+            # so (c) discriminates on DURATION, not depth.  The settle
+            # guard suppresses all three during the resampler's
+            # priming blocks (instantaneous readings unreliable;
+            # tripping there broke bit-identity with main), and the
+            # latch above holds whichever fired until the SNR has been
+            # healthy again for a while.  A fail-closed cold start
+            # (blend init 0) was
+            # considered and rejected: it would add a fade-in to
+            # every VALID tune-in; a pilot-less tune-in rides the
+            # (time-normalised) EMA for ~190 ms and is then crushed
+            # by trigger (b) within ~0.1 s.
+            self.blend_factor = self.blend_factor * (
+                STEREO_BLEND_FAST_CLOSE_FACTOR ** n_ref
+            )
+        else:
+            # EMA smoothing to avoid abrupt transitions
+            alpha = _alpha_eff(STEREO_BLEND_SMOOTHING)
+            self.blend_factor = (
+                alpha * target + (1.0 - alpha) * self.blend_factor
+            )
         if self.force_blend_factor is not None:
             self.blend_factor = float(np.clip(self.force_blend_factor, 0.0, 1.0))
 
@@ -631,8 +885,34 @@ class BaseFMDemodulator(FMDemodulatorInterface):
             self.stereo_phase_side_over_noise_db = float(
                 10.0 * np.log10((denom + 1e-30) / (noise_power + 1e-30))
             )
+            # Pilot-valid gate (codex P1 on PR #32): the conditions
+            # below measure the SIDE signal, not pilot presence - and
+            # with the order-9 noise bands the noise reference is tiny
+            # on clean composites, so a pilot-less high-CNR input
+            # (strong mono transmission, pilot dropout, orphan DSB)
+            # could false-acquire from programme leakage through the
+            # light variant's order-1 phase LP (measured -26 deg on
+            # plain mono, +16 deg on orphan DSB).  Require the
+            # measured pilot SNR to clear the blend LO threshold on
+            # BOTH the instantaneous and the EMA reading: the EMA
+            # alone lags a pilot DROPOUT by ~0.4 s, and during that
+            # window the light variant's order-1 phase residual locks
+            # onto leaked DSB content and walked the tracker -23 deg
+            # (the instantaneous reading collapses within one block).
+            # Below the gate the existing uninformative semantics
+            # apply (no acquisition, streak reset, confidence decay,
+            # leak home).  This gate governs the TRACKER only; closing
+            # the blend is the separate fast-close detector's job
+            # (which additionally waits out the settle guard and then
+            # takes finite time to close), so the blend can still be
+            # open while this gate reads False.
+            pilot_valid = (
+                snr_db >= STEREO_BLEND_PILOT_SNR_DB_LO
+                and snr_for_blend >= STEREO_BLEND_PILOT_SNR_DB_LO
+            )
             informative = (
-                denom > 1e-18
+                pilot_valid
+                and denom > 1e-18
                 and mono_pow > 1e-18
                 and denom >= side_gate
                 and denom > noise_ref
@@ -1020,6 +1300,12 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         self.pilot_pll.reset()
         self._prev_demod_was_mono = False
         self._side_nr_adapt = True
+        self._pending_block_iq_s = None
+        self._pilot_settled_ref = 0.0
+        self._pilot_pow_ema = None
+        self._snr_sub_lo_ref = 0.0
+        self._snr_ok_ref = 0.0
+        self._dropout_latched = False
         self._dc_zi = np.zeros_like(self._dc_zi)
         self.blend_factor = 1.0
         self.pilot_snr_ema = None
@@ -1052,6 +1338,7 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         ):
             filt.reset()
         self._pilot_lp_zi = np.zeros_like(self._pilot_lp_zi)
+        self._pilot_meas_lp_zi = np.zeros_like(self._pilot_meas_lp_zi)
         self._audio_resampler_l.reset()
         self._audio_resampler_r.reset()
         self.side_nr.reset()
@@ -1173,7 +1460,17 @@ class FMDemodulator(BaseFMDemodulator):
                 ).astype(np.float32, copy=False)
                 self._disc_last = iq_filtered[-1:].copy()
             composite = self._iq_resampler.process(main_output)
-            return composite.astype(np.float32, copy=False)
+            output = composite.astype(np.float32, copy=False)
+            # Publish the pending EMA time base only once the block has
+            # actually produced its output (codex P2 on PR #32 rounds
+            # 5-6): anywhere earlier, a failure between the assignment
+            # and the return - preprocessing, or the output conversion
+            # itself - would leave a duration behind for a block that
+            # never reaches demodulate(), and the next
+            # composite-direct call would consume it.  A call that
+            # raises must publish nothing.
+            self._pending_block_iq_s = iq_samples.size / self.iq_sample_rate
+            return output
         except (ValueError, TypeError) as e:
             self.logger.error(f"Error processing IQ samples: {e}", exc_info=True)
             raise DemodulationError(f"Error processing IQ samples: {e}") from e
@@ -1268,7 +1565,12 @@ class FMDemodulatorLight(BaseFMDemodulator):
             composite = (
                 self._iq_resampler.process(fm_demod) * LIGHT_COMPOSITE_SCALE
             )
-            return np.asarray(composite, dtype=np.float32, copy=False)
+            output = np.asarray(composite, dtype=np.float32, copy=False)
+            # Publish the pending EMA time base only after the output
+            # exists - see the standard chain for why (codex P2 on
+            # PR #32 rounds 5-6).
+            self._pending_block_iq_s = iq_samples.size / self.iq_sample_rate
+            return output
         except (ValueError, TypeError) as e:
             self.logger.error(f"Error processing IQ samples (Light): {e}", exc_info=True)
             raise DemodulationError(f"Error processing IQ samples (Light): {e}") from e

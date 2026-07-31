@@ -180,7 +180,7 @@ discriminator は全帯域で平坦・純遅延。合成 IQ でステレオセ�
 `process_iq_samples()` は標準モードと同じ arctan discriminator
 （`angle(x[n]·conj(x[n-1]))`）で FM 復調し、`StatefulResampler` 96:125 で
 250 kHz→192 kHz に変換、`LIGHT_COMPOSITE_SCALE=0.35` を乗じます。以降の
-ステレオ復調は標準モードと共通（mono/side FIR バンクも同一タップ数を共有。パイロット複素 LPF のみ order-1）。旧実装の
+ステレオ復調は標準モードと共通（mono/side FIR バンクも同一タップ数を共有。パイロット複素 LPF のみ order-1、SNR ノイズ帯 BPF は標準と同じ order-9 — 旧 order-1 流用はパイロット漏れで SNR を ~10 dB に飽和させ、軽量モードが full stereo に到達できなかった）。旧実装の
 `angle→unwrap→diff` は unwrap 位相が搬送波オフセット下で無限成長し、
 float32 量子化により長時間セッションで劣化するため置換されました
 （伝達特性は同一）。
@@ -493,7 +493,8 @@ IQ (250 kHz)
 |------|-----|------|
 | `IQ_LOWPASS_ORDER` / `IQ_LOWPASS_CUTOFF` | 5 / 200 kHz | IQ ローパス |
 | `MONO_LOWPASS_CUTOFF` | 15 kHz | モノ / L−R ベース LPF カットオフ |
-| `PILOT_BANDPASS_ORDER` | 9 | パイロット複素 LPF 次数（軽量は 1） |
+| `PILOT_BANDPASS_ORDER` | 9 | パイロット複素 LPF 次数（軽量は 1 — サブキャリア位相動作点の校正対象） |
+| `PILOT_NOISE_BAND_ORDER` | 9 | パイロット SNR ノイズ帯 BPF 次数（**両変種共通**。旧実装で軽量が order-1 を流用した際、スカートがパイロット自身をノイズ参照へ漏らし SNR が 9.975 dB / blend 0.313 に飽和していた） |
 | `STEREO_FIR_NTAPS` / `_TRANSITION_HZ` | 321 / 3.5 kHz | mono/side 線形位相 FIR バンク（タップ数は composite レート比例、全フィルタ共有） |
 | `AUDIO_FINAL_LP_NTAPS` / `_CUTOFF_HZ` / `_STOP_HZ` | 183 / 15 k / 16.5 k | 最終音声帯域制限（L/R 共通 FIR、raw composite 復調の遷移帯写像を抑制） |
 | `DEEMPHASIS_TAU` | 50e-6 | ディエンファシス時定数 |
@@ -512,6 +513,43 @@ IQ (250 kHz)
 | `STEREO_SUBCARRIER_PHASE_OFFSET_DEG_PLL` | 331.1 | 同（PLL 選択時） |
 | `STEREO_SUBCARRIER_PHASE_OFFSET_DEG_LIGHT` | 0.3 | 同（軽量モード） |
 | `STEREO_MONO_DELAY_SAMPLES` | 0 | モノ遅延補償（FIR バンクの群遅延一致により不要） |
+| `STEREO_BLEND_FAST_CLOSE_FACTOR` | 0.5 | ドロップアウト検出時の blend 減衰（16 ms 基準ブロックあたり） |
+| `STEREO_BLEND_FAST_CLOSE_SETTLE_REF` | 12.0 | fast-close を許可するまでの整定時間（基準ブロック数 ≈ 190 ms） |
+| `STEREO_BLEND_DROPOUT_SNR_DEBOUNCE_REF` | 16.0 | 瞬時 SNR が LO 未満のまま継続したら持続的劣化と判定する時間（基準ブロック数 ≈ 256 ms。実プログラムの連続 LO 割れは最長 131 ms＝軽量ブロック量子化後） |
+| `STEREO_BLEND_DROPOUT_RELEASE_REF` | 8.0 | fast-close ラッチを解除するのに要する健全 SNR の連続時間（基準ブロック数 ≈ 130 ms） |
+| `STEREO_BLEND_DROPOUT_POWER_DROP_DB` | 15.0 | パイロット電力が自 EMA から崩落したと判定する量（`pow_drop_db = 10log10(EMA / 現在値)`。実プログラムでの最大電力降下は +1.13 dB） |
+
+**ブレンド EMA の時間正規化とドロップアウト fast-close**: blend / パイロット
+SNR 系の EMA 係数はすべて 16 ms 基準ブロックに正規化されます
+（`alpha_eff = 1 − (1 − alpha)^(block / 16 ms)`）。時間刻みは IQ ブロック長
+（`iq_samples.size / iq_sample_rate`）から取り、`process_iq_samples()` 1 回に対する
+`demodulate()` 1 回だけが消費します（composite 直接呼び出しは composite 長へ
+フォールバック）。これにより、実運用ブロックが 16384 サンプル @ 250 kHz
+（≈65.5 ms）の軽量モードでも、標準モード（16384 @ 1.024 MHz = 厳密に 16 ms）と
+同一の時定数になります。加えて、パイロット劣化時は 3 系統の検出器
+——(a) パイロット電力が自 EMA 比 `STEREO_BLEND_DROPOUT_POWER_DROP_DB` 以上の崩落、
+(b) 瞬時と EMA の両パイロット SNR が `STEREO_BLEND_PILOT_SNR_DB_LO` 未満、
+(c) 瞬時 SNR が LO 未満のまま `STEREO_BLEND_DROPOUT_SNR_DEBOUNCE_REF` 基準ブロック
+継続——のいずれかが成立し、かつ整定ガードを越えている間、blend を基準ブロック
+あたり `STEREO_BLEND_FAST_CLOSE_FACTOR` 倍で閉じます。発火した fast-close は
+**ラッチ**され、瞬時 SNR が `STEREO_BLEND_DROPOUT_RELEASE_REF` 基準ブロック連続で
+健全になるまで解除されません（アタック速・リリース遅の受信機的挙動）。解除条件を
+1 ブロックの回復にしていた時点では、断続的劣化（劣化 3 ブロック + 正常 1 ブロック）で
+blend が 0.01↔0.26 を 5 秒間に 37 回往復し、可聴なステレオ幅ポンピングになりました。
+解除側は LO より高い復帰レベルではなく**同一 LO のホールド**にしています——
+レベルヒステリシスにすると中 SNR（7–16 dB、blend が部分的に開くべき領域）の信号が
+モノに固定されてしまうためです。(c) は「パイロットは
+健在のまま雑音床だけが上がる」劣化のための経路で、(a) は電力が変わらないため
+発火せず、(b) は遅い SNR EMA が LO を割るまで約 0.65 s かかります。デバウンス
+なしの瞬時 SNR 単独トリガは実音楽のノイズ帯スピルで誤作動するため不採用
+（実測: 4 つの参照録音 60 s ずつでの最長連続 LO 割れは 16 ms ブロックで 48 ms
+(CATV) / 80 ms (光 82.5)、軽量の 65.5 ms ブロックでは量子化されて 131 ms。
+デバウンス 256 ms はこれを ~1.95 倍で上回り、どの録音でも発火しない）。
+実測: 軽量モードの実運用ブロックで、パイロットレス同調・ドロップアウトとも
+0.197 s で閉鎖、雑音床ステップは blend&lt;0.5 が 0.262 s / blend&lt;0.05 が 0.328 s
+（対策前は 0.524 / 0.655 s）、復帰は blend&gt;0.5 が 0.262 s / blend&gt;0.9 が 0.524 s
+（&gt;0.5 はリリースホールド分 1 ブロック遅い）。標準モードの通常ブロックは指数が厳密に 1.0 と
+なる恒等ショートカットにより、従来と bit 同一です。
 
 ### 6.5 Side NR 設定
 
