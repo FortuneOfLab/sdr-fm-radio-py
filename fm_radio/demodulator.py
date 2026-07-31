@@ -290,11 +290,13 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         # pilot power itself stable.
         self._pilot_pow_ema: float | None = None
         # Continuous reference-block time whose INSTANTANEOUS pilot
-        # SNR sat below / at-or-above the blend LO threshold: the
-        # attack debounce and the release hold of the
-        # sustained-degradation fast-close trigger, plus the latch
-        # they drive.
+        # SNR sat below the blend LO threshold: the attack debounce of
+        # the sustained-degradation trigger (c) ALONE.
         self._snr_sub_lo_ref: float = 0.0
+        # Continuous reference-block time at or above LO, and the
+        # fast-close latch it releases.  These two are shared by ALL
+        # THREE triggers: whichever fires sets the latch, and the hold
+        # runs from the last block on which any of them held.
         self._snr_ok_ref: float = 0.0
         self._dropout_latched: bool = False
 

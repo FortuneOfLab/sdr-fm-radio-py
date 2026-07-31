@@ -455,8 +455,13 @@ STEREO_BLEND_DROPOUT_SNR_DEBOUNCE_REF = 16.0  # Reference (16 ms) blocks of CONT
                                     # Accumulated in reference-block TIME, so it means
                                     # the same duration at either block size.
 STEREO_BLEND_DROPOUT_RELEASE_REF = 8.0  # Reference (16 ms) blocks of CONTINUOUS healthy
-                                    # instantaneous SNR before the sustained-degradation
-                                    # latch releases (~130 ms).  Debouncing only the
+                                    # instantaneous SNR before the fast-close latch
+                                    # releases (~130 ms).  The latch and this hold cover
+                                    # ALL THREE triggers - whichever fired sets it, and
+                                    # the hold runs from the last block on which any of
+                                    # them held (only STEREO_BLEND_DROPOUT_SNR_DEBOUNCE_REF
+                                    # belongs to the sustained-degradation trigger alone).
+                                    # Debouncing only the
                                     # ATTACK let a single good block release the
                                     # trigger, so an intermittently degraded stream
                                     # (3 bad blocks, 1 good, at light's real block size)

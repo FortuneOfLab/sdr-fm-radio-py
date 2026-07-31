@@ -823,8 +823,9 @@ def test_light_real_block_pilotless_transients():
     # the fast path; re-opening runs through the ordinary blend EMA,
     # so it is the direct check that alpha_eff - not just the
     # fast-close - carries the 16 ms time constants onto 65.5 ms
-    # blocks.  Measured here: blend > 0.5 at 0.197 s, > 0.9 at
-    # 0.524 s, and monotonic from the first rising block.
+    # blocks.  Measured here: blend > 0.5 at 0.262 s (0.197 s before
+    # round 6 added the fast-close release hold), > 0.9 at 0.524 s,
+    # and monotonic from the first rising block.
     t_now = 0.0
     t_half = None
     t_full = None
