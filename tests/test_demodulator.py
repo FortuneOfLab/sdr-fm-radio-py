@@ -14,6 +14,7 @@ import scipy.signal as sg
 import fm_radio.demodulator as dm
 from fm_radio.constants import (
     COMPOSITE_RATE, SDR_BLOCK_SIZE, STEREO_BLEND_DROPOUT_SNR_DEBOUNCE_REF,
+    STEREO_BLEND_SMOOTHING, STEREO_BLEND_SMOOTHING_OPEN,
 )
 from fm_radio.demodulator import FMDemodulator, FMDemodulatorLight
 
@@ -823,9 +824,13 @@ def test_light_real_block_pilotless_transients():
     # the fast path; re-opening runs through the ordinary blend EMA,
     # so it is the direct check that alpha_eff - not just the
     # fast-close - carries the 16 ms time constants onto 65.5 ms
-    # blocks.  Measured here: blend > 0.5 at 0.262 s (0.197 s before
-    # round 6 added the fast-close release hold), > 0.9 at 0.524 s,
-    # and monotonic from the first rising block.
+    # blocks.  Measured here: blend > 0.5 at 0.393 s, > 0.9 at
+    # 0.983 s, and monotonic from the first rising block.  Both are
+    # deliberately slower than they used to be (0.262 / 0.524 s):
+    # STEREO_BLEND_SMOOTHING_OPEN halves the OPENING rate to stop the
+    # image pumping on intermittently degraded reception.  The
+    # CLOSING side is untouched - the dropout above still closes at
+    # 0.197 s - so the slower opening costs protection nothing.
     t_now = 0.0
     t_half = None
     t_full = None
@@ -841,8 +846,10 @@ def test_light_real_block_pilotless_transients():
             t_half = t_now
         if t_full is None and d.blend_factor > 0.9:
             t_full = t_now
-    assert t_half is not None and t_half < 0.30, t_half
-    assert t_full is not None and t_full < 0.60, t_full
+    # one light block (65.5 ms) of headroom over the measured
+    # 0.393 / 0.983 s
+    assert t_half is not None and t_half < 0.47, t_half
+    assert t_full is not None and t_full < 1.06, t_full
     # No fast-close/EMA chatter on the way up.  The check starts at
     # the FIRST RISING block rather than a fixed index (codex P3 on
     # PR #32 round 5): the leading blocks still carry pilot-less
@@ -909,6 +916,58 @@ def test_light_real_block_noise_step_closes_blend():
     # for false-positive margin, which costs one block of closing).
     assert t_half is not None and t_half < 0.35, t_half      # was 0.524 s
     assert t_closed is not None and t_closed < 0.40, t_closed  # was 0.655 s
+
+
+def test_blend_opens_slower_than_it_closes():
+    """The blend EMA is asymmetric: slow to widen, prompt to narrow.
+
+    A symmetric EMA pumped the stereo image on intermittently
+    degraded reception - every good block pulled the blend back up
+    before the next bad one pushed it down (measured +-0.14 per block
+    on a 3-bad/1-good pattern at the light variant's real block
+    size).  Slowing only the OPENING direction bounds that without
+    touching the protective response: the fast-close path is
+    independent of both constants, and the gradual closing rate is
+    unchanged.
+    """
+    assert STEREO_BLEND_SMOOTHING_OPEN < STEREO_BLEND_SMOOTHING
+
+    fs_c = int(COMPOSITE_RATE)
+    n_blk = 12_583
+    dt = n_blk / fs_c
+    rng = np.random.default_rng(7)
+    d = FMDemodulatorLight(stereo=True)
+    pos = 0
+
+    def feed(noise_amp):
+        nonlocal pos
+        tt = (np.arange(n_blk) + pos) / fs_c
+        pos += n_blk
+        x = (0.20 * np.sin(2 * np.pi * 400.0 * tt)
+             + 0.10 * np.cos(2 * np.pi * 19_000.0 * tt)
+             + 0.10 * np.sin(2 * np.pi * 700.0 * tt)
+             * np.cos(2 * np.pi * 38_000.0 * tt)
+             + noise_amp * rng.standard_normal(n_blk))
+        d.demodulate(x)
+
+    for _ in range(round(3.0 / dt)):
+        feed(0.001)
+    assert d.blend_factor > 0.9
+
+    trace = []
+    for k in range(round(8.0 / dt)):
+        feed((0.35, 0.35, 0.35, 0.001)[k % 4])      # 3 bad, 1 good
+        trace.append(d.blend_factor)
+    settled = np.asarray(trace[round(3.0 / dt):], dtype=np.float64)
+    steps = np.diff(settled)
+    # measured 0.079 with the asymmetric rate, 0.140 symmetric
+    assert np.abs(steps).max() < 0.10, float(np.abs(steps).max())
+    # NOT asserted here: that the upward steps are the smaller ones.
+    # A step is alpha * (target - blend), and on this pattern the
+    # upward gap is the larger one (a good block's target jumps back
+    # to ~1.0), so the per-block step measures the gap as much as the
+    # rate.  The rate asymmetry itself is fixed by the constants
+    # above and by the transient test's recovery timings.
 
 
 def test_dropout_debounce_and_latch_contract():
