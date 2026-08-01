@@ -430,7 +430,15 @@ STEREO_BLEND_SMOOTHING_OPEN = 0.04  # EMA rate while the blend OPENS.  Deliberat
                                     # again on every legitimate recovery (blend > 0.9
                                     # went 0.52 s -> 0.98 s at half the rate) and lets
                                     # more false side through a pilot-less tune-in's
-                                    # settle window (side/mid peak 0.54 -> 0.65).
+                                    # settle window (side/mid peak 0.54 -> 0.65).  That
+                                    # last one is worth being precise about: during the
+                                    # fast-close settle guard the blend comes down on
+                                    # the ORDINARY closing EMA, so a pilot-less tune-in
+                                    # is not structurally independent of these constants
+                                    # - it is unchanged here only because the CLOSING
+                                    # rate is left at its old value.  What IS independent
+                                    # of both is a real dropout, which the latched
+                                    # fast-close handles on its own path.
 STEREO_BLEND_DROPOUT_POWER_DROP_DB = 15.0  # Pilot-power collapse (dB below its own EMA)
                                     # that identifies a genuine pilot DROPOUT for the
                                     # blend fast-close.  A real dropout collapses the
