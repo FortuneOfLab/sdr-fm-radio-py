@@ -513,11 +513,25 @@ IQ (250 kHz)
 | `STEREO_SUBCARRIER_PHASE_OFFSET_DEG_PLL` | 331.1 | 同（PLL 選択時） |
 | `STEREO_SUBCARRIER_PHASE_OFFSET_DEG_LIGHT` | 0.3 | 同（軽量モード） |
 | `STEREO_MONO_DELAY_SAMPLES` | 0 | モノ遅延補償（FIR バンクの群遅延一致により不要） |
+| `STEREO_BLEND_SMOOTHING` / `_OPEN` | 0.08 / 0.04 | blend EMA の速度（閉じる方向 / 開く方向、16 ms 基準ブロックあたり）。開く方を意図的に遅くしている |
 | `STEREO_BLEND_FAST_CLOSE_FACTOR` | 0.5 | ドロップアウト検出時の blend 減衰（16 ms 基準ブロックあたり） |
 | `STEREO_BLEND_FAST_CLOSE_SETTLE_REF` | 12.0 | fast-close を許可するまでの整定時間（基準ブロック数 ≈ 190 ms） |
 | `STEREO_BLEND_DROPOUT_SNR_DEBOUNCE_REF` | 16.0 | 瞬時 SNR が LO 未満のまま継続したら持続的劣化と判定する時間（基準ブロック数 ≈ 256 ms。実プログラムの連続 LO 割れは最長 131 ms＝軽量ブロック量子化後） |
 | `STEREO_BLEND_DROPOUT_RELEASE_REF` | 8.0 | fast-close ラッチを解除するのに要する健全 SNR の連続時間（基準ブロック数 ≈ 130 ms） |
 | `STEREO_BLEND_DROPOUT_POWER_DROP_DB` | 15.0 | パイロット電力が自 EMA から崩落したと判定する量（`pow_drop_db = 10log10(EMA / 現在値)`。実プログラムでの最大電力降下は +1.13 dB） |
+
+**blend EMA の非対称性**: 通常の blend EMA は方向で速度が異なります
+（閉じる `STEREO_BLEND_SMOOTHING`=0.08 / 開く `STEREO_BLEND_SMOOTHING_OPEN`=0.04）。
+ステレオ幅が**広がる**方向は聴感上目立つため意図的に遅くしています。対称だった時点では、
+断続的に劣化する受信（劣化ブロックと正常ブロックが交互）で毎ブロック image が上下し
+（実測 ±0.14）、可聴なポンピングになっていました。両方向を遅くしても解決しますが、
+正常な復帰にも同じだけコストがかかり（blend>0.9 が 0.52→0.98 s）、さらにパイロットレス
+同調の整定窓を通る偽 side が増えます（side/mid ピーク 0.54→0.65）。開く方向だけを
+遅くすれば、保護応答は即応のまま（ドロップアウト閉鎖 0.197 s は不変）、断続劣化では
+image がモノ側へ落ち着きます。なお**真のドロップアウトの閉鎖は後述の fast-close の
+担当**で、この 2 定数の影響を受けません。一方**パイロットレス同調の整定窓**は
+通常の closing EMA で降りるため 2 定数から構造的に独立ではなく、閉じる側の速度を
+据え置いたことで挙動が保たれています。
 
 **ブレンド EMA の時間正規化とドロップアウト fast-close**: blend / パイロット
 SNR 系の EMA 係数はすべて 16 ms 基準ブロックに正規化されます

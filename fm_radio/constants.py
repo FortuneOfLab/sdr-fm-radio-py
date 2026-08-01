@@ -412,7 +412,33 @@ STEREO_BLEND_STABILITY_MIN_FACTOR = 1.00  # Floor of the pilot-"jitter" stabilit
                                     # station's 15 kHz and 23 kHz band edges - the term
                                     # measures programme dynamics, not reception.  The
                                     # mechanism stays in place (set <1.0 to re-enable).
-STEREO_BLEND_SMOOTHING = 0.08              # EMA smoothing for blend factor (0-1)
+STEREO_BLEND_SMOOTHING = 0.08       # EMA rate for the blend factor while it CLOSES
+                                    # (per 16 ms reference block; time-normalised to the
+                                    # actual block, see _demodulate_stereo).  This is the
+                                    # GRADUAL closing path only - a real dropout is
+                                    # handled by the latched fast-close and is unaffected
+                                    # by this constant.
+STEREO_BLEND_SMOOTHING_OPEN = 0.04  # EMA rate while the blend OPENS.  Deliberately
+                                    # slower than the closing rate: widening the stereo
+                                    # image is the direction a listener notices, and with
+                                    # a symmetric EMA an intermittently degraded stream
+                                    # pumped the image - each good block pulled the blend
+                                    # back up before the next bad one pushed it down
+                                    # (measured +-0.14 per block on a 3-bad/1-good
+                                    # pattern at light's real block size).  Slowing BOTH
+                                    # directions also fixes that, but costs the same
+                                    # again on every legitimate recovery (blend > 0.9
+                                    # went 0.52 s -> 0.98 s at half the rate) and lets
+                                    # more false side through a pilot-less tune-in's
+                                    # settle window (side/mid peak 0.54 -> 0.65).  That
+                                    # last one is worth being precise about: during the
+                                    # fast-close settle guard the blend comes down on
+                                    # the ORDINARY closing EMA, so a pilot-less tune-in
+                                    # is not structurally independent of these constants
+                                    # - it is unchanged here only because the CLOSING
+                                    # rate is left at its old value.  What IS independent
+                                    # of both is a real dropout, which the latched
+                                    # fast-close handles on its own path.
 STEREO_BLEND_DROPOUT_POWER_DROP_DB = 15.0  # Pilot-power collapse (dB below its own EMA)
                                     # that identifies a genuine pilot DROPOUT for the
                                     # blend fast-close.  A real dropout collapses the

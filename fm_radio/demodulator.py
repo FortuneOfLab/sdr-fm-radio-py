@@ -89,7 +89,8 @@ from fm_radio.constants import (
     STEREO_BLEND_PILOT_JITTER_EMA_ALPHA,
     STEREO_BLEND_PILOT_JITTER_REF_DB,
     STEREO_BLEND_STABILITY_MIN_FACTOR,
-    STEREO_BLEND_SMOOTHING, STEREO_BLEND_FAST_CLOSE_FACTOR,
+    STEREO_BLEND_SMOOTHING, STEREO_BLEND_SMOOTHING_OPEN,
+    STEREO_BLEND_FAST_CLOSE_FACTOR,
     STEREO_BLEND_FAST_CLOSE_SETTLE_REF,
     STEREO_BLEND_DROPOUT_POWER_DROP_DB,
     STEREO_BLEND_DROPOUT_SNR_DEBOUNCE_REF,
@@ -811,8 +812,26 @@ class BaseFMDemodulator(FMDemodulatorInterface):
                 STEREO_BLEND_FAST_CLOSE_FACTOR ** n_ref
             )
         else:
-            # EMA smoothing to avoid abrupt transitions
-            alpha = _alpha_eff(STEREO_BLEND_SMOOTHING)
+            # EMA smoothing to avoid abrupt transitions, ASYMMETRIC:
+            # widening the stereo image is the direction a listener
+            # notices, so it is deliberately the slow one.  With a
+            # symmetric EMA an intermittently degraded stream pumped
+            # the image - every good block pulled the blend back up
+            # before the next bad one pushed it down (measured +-0.14
+            # per block).  Slowing BOTH directions fixes that but
+            # costs the same again on every legitimate recovery
+            # (blend > 0.9 went 0.52 s -> 0.98 s at half the rate);
+            # slowing only the opening direction keeps the protective
+            # response prompt and makes the intermittent case ratchet
+            # DOWN to mono instead of oscillating.  The closing
+            # direction here is the GRADUAL one - a real dropout is
+            # the latched fast-close's job, and that path is
+            # unaffected by either constant.
+            opening = target > self.blend_factor
+            alpha = _alpha_eff(
+                STEREO_BLEND_SMOOTHING_OPEN if opening
+                else STEREO_BLEND_SMOOTHING
+            )
             self.blend_factor = (
                 alpha * target + (1.0 - alpha) * self.blend_factor
             )
