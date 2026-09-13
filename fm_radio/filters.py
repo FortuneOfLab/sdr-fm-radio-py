@@ -323,15 +323,23 @@ class StatefulResampler:
         self.down: int = int(down)
         self.window: object = window
         # Emission boundaries are rounded down to a multiple of this.
-        # Downstream stages that decimate the output block-wise with a
-        # stateless polyphase filter (composite -> audio uses
-        # resample_poly(1, 4) per block) silently require every block
-        # they receive to be a multiple of their decimation factor, or
-        # their per-block output grids stop tiling the global grid and
-        # each block boundary picks up a fractional-sample phase jump.
+        # This is an emission/batching policy, not a requirement of a
+        # downstream StatefulResampler. Construction rejects alignment
+        # that could truncate a pending output's FIR support; process()
+        # separately detects missing output indices if state is modified.
         self.emit_align: int = max(1, int(emit_align))
         # Half-length of the internal polyphase FIR (scipy default)
         self._half_len: int = 10 * max(self.up, self.down)
+        # Rounding emission down holds up to emit_align-1 extra outputs,
+        # or (emit_align-1)*down/up input samples. The current history has
+        # half_len - half_len/up inputs of slack beyond the FIR support.
+        # Use the worst grid phase (r=0) and integer arithmetic: matching
+        # output counts alone cannot detect a truncated leading FIR wing.
+        if (self.emit_align - 1) * self.down > self._half_len * (self.up - 1):
+            raise ValueError(
+                f"emit_align={self.emit_align} exceeds retained FIR history "
+                f"support for {self.up}/{self.down}"
+            )
         self._overlap: int = self._half_len * 2
         # Polyphase grid period: ext must start at a multiple of this
         # for local output indices to map exactly onto the global
@@ -358,20 +366,26 @@ class StatefulResampler:
         r = (self._in_total - self._overlap) % self._grid
         tail_len = self._overlap + r
         ext_start = self._in_total - tail_len
+        # Local output j corresponds to global output j + off. Check
+        # before consuming this block: clamping a negative local start
+        # to zero would silently skip samples no longer in the history.
+        off = (ext_start * self.up) // self.down
+        if off > self._out_emitted:
+            raise ValueError(
+                "Resampler history no longer covers pending output; "
+                "reduce emit_align and reset the stream"
+            )
         ext = np.concatenate([self._prev_tail[self._hist_len - tail_len:], x])
         y = self._resample(ext)
         self._in_total += x.size
 
-        # Local output j of ``y`` corresponds to global output j + off
-        # (exact: ext_start is a multiple of the grid period).
-        off = (ext_start * self.up) // self.down
         # Only emit outputs whose FIR support is fully inside received
         # input: global outputs strictly below
         # (in_total - half_len) * up / down, rounded down to the
         # emission alignment.
         out_max_global = ((self._in_total - self._half_len) * self.up) // self.down
         out_max_global = (out_max_global // self.emit_align) * self.emit_align
-        a = max(self._out_emitted - off, 0)
+        a = self._out_emitted - off
         b = min(max(out_max_global - off, a), y.size)
         seg = y[a:b]
         self._out_emitted += seg.size
@@ -438,7 +452,7 @@ class SideNoiseReducer:
         self.window: np.ndarray = signal.windows.hann(
             self.frame, sym=False,
         ).astype(np.float32)
-        self.cola_norm: float = self._compute_cola_norm()
+        self.cola_norm: np.ndarray = self._compute_cola_norm()
         freqs = np.fft.rfftfreq(self.frame, d=1.0 / self.sample_rate)
         self.band_mask: np.ndarray = (
             (freqs >= float(lo_hz)) & (freqs <= float(hi_hz))
@@ -503,16 +517,14 @@ class SideNoiseReducer:
         self.prev_gain: np.ndarray | None = None
         self.prev_gamma: np.ndarray | None = None
 
-    def _compute_cola_norm(self) -> float:
-        n, h = self.frame, self.hop
-        t = max(4 * n, 8 * h)
-        s = np.zeros(t, dtype=np.float64)
-        k = 0
-        w_sq = (self.window.astype(np.float64)) ** 2
-        while k * h + n <= t:
-            s[k * h:k * h + n] += w_sq
-            k += 1
-        return float(s[t // 2])
+    def _compute_cola_norm(self) -> np.ndarray:
+        # Analysis AND synthesis use Hann, so the denominator is the
+        # overlapping sum of window SQUARES, for each position in a hop.
+        # Only at hop=frame/2 (50% overlap) does it vary from 0.5 to 1.0,
+        # so a scalar would amplitude-modulate even bypassed side audio.
+        # At the default 75% overlap the denominator is already constant.
+        w_sq = self.window.astype(np.float64) ** 2
+        return w_sq.reshape(-1, self.hop).sum(axis=0).astype(np.float32)
 
     @property
     def latency_samples(self) -> int:
@@ -561,6 +573,8 @@ class SideNoiseReducer:
         step exactly when reception degrades.  Untrained freeze
         frames (floor is None) fall back to unity since there is no
         model to apply.
+        Completely zero frames freeze both floor and fast power/DD state,
+        independent of adapt; OLA and emission still advance normally.
         """
         x = np.asarray(x, dtype=np.float32)
         if x.size == 0:
@@ -587,8 +601,14 @@ class SideNoiseReducer:
 
             windowed = frame * self.window
             # May THIS frame train the learned floor?
-            model_update = adapt and not frame_tainted
-            if bypass or (self.noise_floor is None and not model_update):
+            # A genuinely silent stereo frame may arrive with a healthy
+            # blend (or during startup).  It contains no noise evidence.
+            silent = not bool(np.any(windowed))
+            model_update = adapt and not frame_tainted and not silent
+            if bypass or silent or (self.noise_floor is None and not model_update):
+                # Silence freezes the fast power/DD state as well as the
+                # floor. Otherwise decayed power_smooth would poison the
+                # floor on the first non-silent frame. OLA still advances.
                 # Exact unity OLA: irfft(rfft(w)) * window == w * window,
                 # so the FFT round-trip is skipped entirely.  Taken by
                 # the mono path (side ~ 0: nothing to suppress, gain
@@ -633,6 +653,7 @@ class SideNoiseReducer:
             # fully adaptive-origin AND adaptation is enabled: a
             # blend-attenuated or silent side would drag the minimum
             # down (zero is absorbing).
+            reseed = np.zeros(power.shape, dtype=bool)
             if model_update:
                 tracker_in = self.power_smooth
                 if self.tone_protect_db > 0.0:
@@ -645,9 +666,14 @@ class SideNoiseReducer:
                 if self.noise_floor is None:
                     self.noise_floor = tracker_in.copy()
                 else:
-                    self.noise_floor = np.minimum(
-                        self.noise_floor * self.noise_decay,
-                        tracker_in,
+                    # Zero is absorbing under multiplicative leakage.
+                    # Reseed bins that have no usable estimate (including
+                    # zeros produced by the local-median tone clamp).
+                    # Use the same numerical floor as noise_est below.
+                    reseed = self.noise_floor <= 1e-18
+                    self.noise_floor = np.where(
+                        reseed, tracker_in,
+                        np.minimum(self.noise_floor * self.noise_decay, tracker_in),
                     )
             noise_est = self.noise_bias * self.noise_floor + 1e-18
 
@@ -663,6 +689,9 @@ class SideNoiseReducer:
                     self.dd_alpha * (self.prev_gain ** 2) * self.prev_gamma
                     + (1.0 - self.dd_alpha) * posterior
                 )
+                # The old posterior used an effectively zero noise
+                # denominator and cannot seed the new estimate's DD state.
+                xi = np.where(reseed, posterior, xi)
             # The epsilon keeps the division defined for beta=0 (which is
             # reachable via --side-nr-beta 0): xi=0, beta=0 would
             # otherwise produce 0/0 = NaN and propagate silence-killing

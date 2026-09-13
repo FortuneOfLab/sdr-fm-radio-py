@@ -62,12 +62,12 @@ from fm_radio.demodulator import FMDemodulator
 
 
 def _dsp_subcarrier_offset_deg(use_pll: bool) -> float:
-    """DSP-intrinsic (untrimmed) subcarrier offset for the main-demod variant.
+    """Broadcast convention + DSP correction, without capture residual trim.
 
-    Synthetic IQ never passes through the tuner, so the hardware phase
-    trim baked into the constructed demodulator's default must be
-    replaced by the variant's own DSP value (the PLL chain has a
-    different 19k/38k phase characteristic than the discriminator).
+    Synthetic IQ omits the empirical residual trim from the reference
+    captures, but retains the broadcast's +90 degree phase convention.
+    The PLL chain has a different 19k/38k phase characteristic than the
+    discriminator, so its DSP correction is variant-specific.
     """
     if use_pll:
         return STEREO_SUBCARRIER_PHASE_OFFSET_DEG_PLL
@@ -251,7 +251,11 @@ def _build_mpx(
     dsb_phase_rad = np.deg2rad(
         dsb_phase_deg + dsb_phase_drift_deg_per_s * t
     )
-    dsb = lmr * np.cos(2.0 * np.pi * 38_000.0 * scale * t + dsb_phase_rad)
+    # ITU-R BS.450-4 2.2.2.5: the subcarrier crosses zero with a
+    # positive slope at EACH pilot zero.  With a cosine pilot this is
+    # -sin(2*theta), not cos(2*theta).  dsb_phase_deg is an impairment
+    # relative to that convention, not a replacement for it.
+    dsb = -lmr * np.sin(2.0 * np.pi * 38_000.0 * scale * t + dsb_phase_rad)
     mpx = lpr + dsb + pilot
     return mpx.astype(np.float32)
 
@@ -313,7 +317,8 @@ def _synthesize_iq_tone(
     scale = 1.0 + clock_ppm * 1e-6
     pilot = pilot_amp * np.cos(2.0 * np.pi * 19_000.0 * scale * t)
     dsb_phase_rad = np.deg2rad(dsb_phase_deg + dsb_phase_drift_deg_per_s * t)
-    dsb = lmr * np.cos(2.0 * np.pi * 38_000.0 * scale * t + dsb_phase_rad)
+    # Same BS.450 pilot/subcarrier convention as _build_mpx.
+    dsb = -lmr * np.sin(2.0 * np.pi * 38_000.0 * scale * t + dsb_phase_rad)
     mpx = lpr + dsb + pilot
     inst = 2.0 * np.pi * freq_dev_hz * mpx / fs_iq
     # Trapezoidal phase integration: sum((x[i]+x[i-1])/2).
@@ -1161,7 +1166,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--subcarrier-phase-offset-deg", type=float, default=float("nan"),
-        help="Subcarrier phase offset override in degrees",
+        help="Absolute cosine-mixer phase offset in degrees (includes the +90 deg broadcast convention)",
     )
     p.add_argument(
         "--demod-diag", action="store_true",
@@ -1173,7 +1178,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--dsb-phase-deg", type=float, default=0.0,
-        help="Phase offset (degrees) for synthetic 38kHz DSB (L-R) generation",
+        help="Synthetic 38kHz DSB phase error in degrees relative to the BS.450 convention",
     )
     p.add_argument(
         "--dsb-drift-deg-s", type=float, default=0.0,

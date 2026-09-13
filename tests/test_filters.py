@@ -197,11 +197,9 @@ def test_stateful_resampler_matches_oneshot_exactly(rng):
 def test_stateful_resampler_emit_align_keeps_blocks_decimatable(rng):
     """With emit_align=N every emitted block size is a multiple of N.
 
-    The composite->audio stage decimates each block with a stateless
-    resample_poly(1, 4); non-multiple-of-4 composite blocks would shift
-    its per-block output grid and add a fractional-sample phase jump at
-    every boundary (measured as a THD+N regression from -25.6 to
-    -19.1 dB before this alignment existed).
+    Four-sample emission is the receiver's existing batching contract.
+    The current composite->audio StatefulResampler maintains its own
+    grid and does not require alignment to its decimation denominator.
     """
     up, down = 3, 16
     r = StatefulResampler(up, down, window=("kaiser", 10.0), emit_align=4)

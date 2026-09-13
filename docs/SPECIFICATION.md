@@ -198,8 +198,12 @@ float32 量子化により長時間セッションで劣化するため置換さ
 3. パイロット SNR 推定（残差電力 `2·mean(|z|²)` と 2 本のノイズ帯の比）
    と適応ブレンド係数の更新
 4. サブキャリア生成 `cos/sin(2θ + φ_offset)`（φ_offset は復調方式ごとの
-   DSP 固有値 discriminator 1.0°/PLL 331.1°/Light 0.3° に、実機では
-   前段トリム `HARDWARE_SUBCARRIER_PHASE_TRIM_DEG`(+84°)を加算。
+   放送規格の +90° と DSP 補正 +1.0°/−28.9°/+0.3° の和
+   （discriminator 91.0°/PLL 61.1°/Light 90.3°）に、実機では
+   実録音の残差トリム `HARDWARE_SUBCARRIER_PHASE_TRIM_DEG`(−6°)を加算。
+   cosine パイロットに対する副搬送波は −sin(2θ)（ITU-R BS.450-4
+   §2.2.2.5）。旧 +84° はこの規格由来の +90° を含んでいたため、
+   チューナ固有特性とは見なさない。通常受信の総位相は従来と同じ。
    これにより位相トラッカーの実機需要が ±90° 境界から 0° 付近へ移り、
    セッション間の取得枝（L/R 極性）が安定する）
 5. L−R 帯の同期復調（DSB-SC、ゲイン 2.0）と 3 バンド LPF（I/Q 並列）。
@@ -238,7 +242,19 @@ float32 量子化により長時間セッションで劣化するため置換さ
 7. 3 バンド整形 + ブレンド + HF ブレンドの上限ゲイン（既定は中立 1.0）
 8. ステレオマトリクス `L=Mono+Side, R=Mono−Side`
 9. パイロットノッチ ×2（19 kHz、Q=30）
-10. composite→audio リサンプル（`StatefulResampler` 1:4、L/R 独立）
+10. composite→audio リサンプル（`StatefulResampler`、L/R 独立）。
+    出力/入力レートの有理数比を使用し、既定の 192k→48k は 1:4、
+    192k→44.1k は 147:640。ブロックをまたいで同じ出力グリッドを保持。
+    IQ→composite と composite→audio の両方で、既約比の分子・分母を
+    各 1000 以下に制限し、超過するレートはフィルタ生成前に `ValueError`。
+    音程やサンプルクロックがずれる近似丸めは行わない
+    （例: 44,056 Hz、22,050 Hz、11,025 Hz は変換比の上限により非対応）。
+    44.1 kHz は単段変換のため、現在の保留履歴方式ではこの段だけで
+    6400/192000 = 約33.3 msの遅延（48 kHzの約0.21 msに対し約33.1 ms増）。
+    レビュー環境の参考測定では、音声変換1本が約0.9→6.1 ms/ブロック、
+    全体RTFが0.545→0.786（約44%増）。標準モードの16 msブロック、
+    `emit_align=4` 同士の比較であり、CPU・実行環境に依存する。
+    今回は単段構成を維持し、1/4→147/160 の段階化は今後の最適化候補とする。
 11. 最終音声帯域制限 — L/R に**同一タップ**の線形位相 FIR
     （48 kHz で 183 taps、通過域 15 kHz / 阻止域 16.5 kHz、遅延 1.9 ms。
     手順 5 の遷移帯写像成分を抑制。同一フィルタのため
@@ -305,17 +321,31 @@ EMA で有界、上方リークで 1 秒以内に回復）。
   厳密に一括処理の prefix と一致）
 - FIR サポートが受信済み入力で完結した出力のみ放出（末尾の未確定出力を
   持ち越し）。定数レイテンシは half-filter 長。
-- `emit_align` で放出境界を下流間引き係数の倍数に丸める
+- `emit_align` は放出境界を丸めるための設定。IQ段では従来の放出単位
+  4に固定し、音声レートの分母と切り離す。下流は自身の出力グリッドを保持
+- 保留出力のFIRサポートを保持履歴が覆えるよう、生成時に
+  `(emit_align−1)×down ≤ half_len×(up−1)` を検証し、違反は `ValueError`。
+  サンプル数が一致しても値が劣化する設定（例: 1/4・emit_align=4）も拒否
+- 生成後の状態変更等で保留出力のインデックスが保持範囲より前になった
+  場合は、`process()` が入力を消費する前に `ValueError`。
+  この実行時ガードは個数の欠落を検出するもので、FIRサポートの保証とは区別する。
+  設定を変更する際はリサンプラを再生成し、生成時の検証を通す
 
 #### SideNoiseReducer
 
 Mid/Side の side チャネルに対する STFT スペクトル雑音抑制:
 - STFT: frame 1024 / hop 256（75% オーバーラップ、Hann 解析+合成窓、
-  レイテンシ ~16 ms）
+  レイテンシ ~16 ms）。窓二乗和を hop 内の各位置で正規化し、
+  hop 512（50% オーバーラップ）でも定常部を振幅変調なく再構成
 - ノイズ床: 平滑パワーの最小統計 + バイアス補正。トラッカー入力は周波数
   方向の局所中央値 +8 dB でクランプ(トーン保護 — 定常トーンが自ビンの
   床に吸収されて `alpha_floor` まで削られるのを防止。広帯域ノイズの推定
   挙動は不変)
+- 完全なゼロフレームではノイズ床・平滑パワー・DD履歴を凍結し、
+  時間方向のOLA処理だけを進める。無音で減衰した平滑パワーが復帰時に
+  ノイズ床を引き下げることも防ぐ。推定値が
+  数値床（1e-18）以下のビンは次の有効な学習時に再初期化し、その
+  ビンの古い DD 履歴も引き継がない。通常の上方リークは維持
 - Ephraim-Malah Decision-Directed（α_dd=0.98）による a priori SNR 推定
   → Wiener ゲイン（下限 `alpha_floor`、既定 0.30 = -10 dB）
 - 周波数方向 3-bin ゲイン平滑（musical noise 抑制）
@@ -508,10 +538,11 @@ IQ (250 kHz)
 | `STEREO_HF_BLEND_PILOT_SNR_DB_LO` / `_HI` | 15.0 / 35.0 | HF ブレンド上限の SNR ランプ |
 | `LR_HIGH_MAX_GAIN` / `LR_SUPER_HIGH_MAX_GAIN` | 1.00 / 1.00 | HF 減衰上限（既定は中立） |
 | `STEREO_PHASE_ANISO_GATE` | 0.2 | 位相トラッカー更新に要する共分散異方性（音楽 p5=0.55 / ノイズ p99=0.05 の間） |
-| `STEREO_SUBCARRIER_PHASE_OFFSET_DEG` | 1.0 | サブキャリア位相オフセット（discriminator、DSP固有値。FIR バンク + 前置 BPF 撤去で旧 316° の大半が不要となりほぼ 0 に） |
-| `HARDWARE_SUBCARRIER_PHASE_TRIM_DEG` | 84.0 | 実機前段（チューナ IF）の位相トリム。全変種の DSP 値に加算（合成経路は非適用）。実測: アンテナ2局+光伝送の全実録音が同一の ~±85-90° 需要を示し、マルチパスではなく前段特性と同定 |
-| `STEREO_SUBCARRIER_PHASE_OFFSET_DEG_PLL` | 331.1 | 同（PLL 選択時） |
-| `STEREO_SUBCARRIER_PHASE_OFFSET_DEG_LIGHT` | 0.3 | 同（軽量モード） |
+| `STEREO_PILOT_TO_SUBCARRIER_PHASE_DEG` | 90.0 | cosine パイロットに対する放送規格の位相関係。実機・合成の両方に適用 |
+| `STEREO_SUBCARRIER_PHASE_OFFSET_DEG` | 91.0 | 規格 +90° と discriminator の DSP 補正 +1° の和 |
+| `HARDWARE_SUBCARRIER_PHASE_TRIM_DEG` | −6.0 | 参考実録音の残差トリム。合成経路には非適用。普遍的なチューナ特性とは断定しない |
+| `STEREO_SUBCARRIER_PHASE_OFFSET_DEG_PLL` | 61.1 | 規格 +90° と PLL の DSP 補正 −28.9° の和 |
+| `STEREO_SUBCARRIER_PHASE_OFFSET_DEG_LIGHT` | 90.3 | 規格 +90° と軽量モードの DSP 補正 +0.3° の和 |
 | `STEREO_MONO_DELAY_SAMPLES` | 0 | モノ遅延補償（FIR バンクの群遅延一致により不要） |
 | `STEREO_BLEND_SMOOTHING` / `_OPEN` | 0.08 / 0.04 | blend EMA の速度（閉じる方向 / 開く方向、16 ms 基準ブロックあたり）。開く方を意図的に遅くしている |
 | `STEREO_BLEND_FAST_CLOSE_FACTOR` | 0.5 | ドロップアウト検出時の blend 減衰（16 ms 基準ブロックあたり） |

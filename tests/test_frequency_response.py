@@ -6,6 +6,11 @@ passband, de-emphasis rolloff, 15 kHz lowpass, a deep 19 kHz pilot
 notch, and the side-NR stationary-tone attenuation vs bypass.
 
 Marked slow (each probe tone runs a full demod pass).
+
+The hand-written cos/cos composites below use a non-BS.450 local phase
+convention and _run_composite_direct's zero-degree mixer override. Do not
+copy those fixtures with the production phase defaults. The shared
+quality_selftest transmitters and test_dsp_regressions use BS.450.
 """
 
 from __future__ import annotations

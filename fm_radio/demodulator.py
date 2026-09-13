@@ -106,6 +106,24 @@ from fm_radio.constants import (
 )
 
 
+def _bounded_resample_ratio(source_rate: float, target_rate: float) -> Fraction:
+    """Exact rate conversion with bounded polyphase filter cost.
+
+    Reject costly ratios rather than silently approximating the requested
+    audio pitch or IQ clock. Check before allocating any filters.
+    """
+    for rate in (source_rate, target_rate):
+        if not np.isfinite(rate) or rate <= 0:
+            raise ValueError("Sample rates must be finite and positive")
+    ratio = Fraction(str(target_rate)) / Fraction(str(source_rate))
+    if max(ratio.numerator, ratio.denominator) > 1000:
+        raise ValueError(
+            f"Unsupported resampling ratio {ratio} ({source_rate} -> {target_rate} Hz): "
+            "numerator and denominator must each be <= 1000"
+        )
+    return ratio
+
+
 class BaseFMDemodulator(FMDemodulatorInterface):
     """Base class for FM demodulators.
 
@@ -131,6 +149,8 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         self.composite_rate = composite_rate
         self.final_audio_rate = final_audio_rate
         self.stereo = stereo
+        iq_ratio = _bounded_resample_ratio(iq_sample_rate, composite_rate)
+        audio_ratio = _bounded_resample_ratio(composite_rate, final_audio_rate)
 
         # --- Pilot PLL (shared by both standard and light) ---
         self.pilot_pll = PLL(Kp=PILOT_PLL_KP, Ki=PILOT_PLL_KI, return_phase=True)
@@ -315,10 +335,9 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         self._phase_conf: float = 0.0
         self.stereo_phase_side_over_noise_db: float = 0.0
         self.pilot_residual_center_hz: float = float(STEREO_PILOT_RESIDUAL_CENTER_HZ)
-        # The per-variant offset constants are DSP-intrinsic (tuned on
-        # synthetic IQ, which never passes through the tuner).  Real
-        # hardware adds the front-end's 19k/38k phase characteristic on
-        # top, so the hardware trim is applied here for every variant.
+        # Per-variant offsets include the broadcast's +90 degree phase
+        # convention plus the DSP correction.  The capture-calibrated
+        # residual trim is separate; it is not the broadcast convention.
         # Synthetic paths in quality_selftest override
         # subcarrier_phase_offset_rad directly with the DSP value.
         self.subcarrier_phase_offset_rad: float = np.deg2rad(
@@ -360,20 +379,17 @@ class BaseFMDemodulator(FMDemodulatorInterface):
 
         # --- Resample ratios ---
         # IQ sample rate -> composite rate
-        ratio = Fraction(
-            int(self.composite_rate), int(self.iq_sample_rate),
-        ).limit_denominator()
-        self.up = ratio.numerator
-        self.down = ratio.denominator
+        self.up = iq_ratio.numerator
+        self.down = iq_ratio.denominator
         # Composite rate -> final audio rate
-        self._resample_up = 1
-        self._resample_down = max(1, int(self.composite_rate / self.final_audio_rate))
+        self._resample_up = audio_ratio.numerator
+        self._resample_down = audio_ratio.denominator
         # Composite -> audio decimators with carried state.  The
         # previous per-block stateless resample_poly zero-padded both
         # edges of every 16 ms block (last member of the block-transient
         # bug family fixed in PR #4 / PR #9).  StatefulResampler's
-        # alignment precondition (block sizes multiple of down) is
-        # guaranteed by the IQ resampler's emit_align=_resample_down.
+        # counters preserve the output grid for arbitrary block sizes,
+        # including non-integer conversions such as 192k -> 44.1k.
         # The left instance also serves the mono path so mono<->stereo
         # switches stay continuous on the primary channel.
         self._audio_resampler_l = StatefulResampler(
@@ -1437,10 +1453,11 @@ class FMDemodulator(BaseFMDemodulator):
         self._iq_resampler = StatefulResampler(
             self.up, self.down,
             window=("kaiser", STANDARD_RESAMPLE_KAISER_BETA),
-            # Keep every emitted composite block a multiple of the
-            # composite->audio decimation factor so the downstream
-            # per-block resample_poly stays on a consistent output grid.
-            emit_align=self._resample_down,
+            # Preserve the existing four-sample composite emission
+            # contract independently of the audio ratio. Downstream
+            # resamplers track their own grid; using an audio denominator
+            # such as 640 here can hold data beyond this stage's history.
+            emit_align=4,
         )
 
     def process_iq_samples(self, iq_samples: np.ndarray) -> np.ndarray:
@@ -1523,9 +1540,7 @@ class FMDemodulatorLight(BaseFMDemodulator):
             stereo=stereo,
             pilot_order=PILOT_BANDPASS_ORDER_LIGHT,
             logger_name='fm_receiver.FMDemodulatorLight',
-            # The light demodulator's old pilot bandpass (order 1) had a
-            # different static phase than the standard order-9 one, so its
-            # tuned operating point maps to a different offset here.
+            # Broadcast convention plus the light chain's DSP correction.
             subcarrier_phase_offset_deg=STEREO_SUBCARRIER_PHASE_OFFSET_DEG_LIGHT,
         )
 
@@ -1538,7 +1553,8 @@ class FMDemodulatorLight(BaseFMDemodulator):
         # --- Light-only: discriminator state (previous IQ sample) ---
         self._disc_last: np.ndarray | None = None
         self._iq_resampler = StatefulResampler(
-            self.up, self.down, emit_align=self._resample_down,
+            # Same fixed composite emission contract as standard mode.
+            self.up, self.down, emit_align=4,
         )
 
     def process_iq_samples(self, iq_samples: np.ndarray) -> np.ndarray:

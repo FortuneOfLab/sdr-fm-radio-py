@@ -113,61 +113,23 @@ PILOT_NOISE_BAND1_HIGH = 17500.0    # Pilot SNR noise band 1 upper edge (Hz)
 PILOT_NOISE_BAND2_LOW = 20500.0     # Pilot SNR noise band 2 lower edge (Hz)
 PILOT_NOISE_BAND2_HIGH = 22000.0    # Pilot SNR noise band 2 upper edge (Hz)
 STEREO_PILOT_RESIDUAL_CENTER_HZ = 19000.0  # Center frequency used by residual pilot tracking
-STEREO_SUBCARRIER_PHASE_OFFSET_DEG = 1.0  # Fixed phase offset for 38k subcarrier generation
-                                    # (standard demodulator).  History of the value:
-                                    #   300.0  original tuning (PLL demod + real order-9
-                                    #          pilot bandpass + FFT Hilbert; the bandpass
-                                    #          hid -15 deg at the subcarrier)
-                                    #   285.0  analytic heterodyne pilot path (0 deg
-                                    #          static phase; 300 - 15)
-                                    #   316.0  discriminator main demod: the PLL's
-                                    #          closed loop had a -30.7 deg phase
-                                    #          inconsistency between 19 kHz and 38 kHz
-                                    #          which the discriminator does not
-                                    #          (285 + 30.7 = 315.7)
-                                    #   1.0    linear-phase FIR bank + raw-composite
-                                    #          demod: the old value was almost entirely
-                                    #          compensating the removed 23-53k Butterworth
-                                    #          bandpass's group delay at 38 kHz.  With the
-                                    #          matched FIR bank the chain is intrinsically
-                                    #          phase-true; the synthetic sweep (hifi TX,
-                                    #          noiseless, corrector off, 0.1 deg steps)
-                                    #          peaks at 1.0 deg with 47.6 dB separation
-                                    #          at 1 kHz, flat within 0.1 dB of 0 deg.
-HARDWARE_SUBCARRIER_PHASE_TRIM_DEG = 84.0  # Front-end (tuner) phase trim added to every
-                                    # variant's DSP-intrinsic subcarrier offset for real
-                                    # hardware.  Discovery: ALL real captures - antenna
-                                    # 91.6 (-83 deg), antenna 80.0 (-80), and an optical-
-                                    # fibre feed 80.0 with no multipath (+92 = axis -88) -
-                                    # showed the same ~+-85-90 deg corrector demand that
-                                    # synthetic IQ (no tuner) does not, identifying it as
-                                    # the R820T IF filter's 19k/38k phase characteristic,
-                                    # not multipath.  Sitting at the +-90 deg boundary
-                                    # also made the acquisition branch flip between
-                                    # sessions (the optical capture decoded L/R-swapped
-                                    # vs the antenna ones).  With the FIR bank's DSP
-                                    # offset of 1.0 deg the total applied is 1+84 =
-                                    # 85 deg; re-validated on the FIR chain: the
-                                    # tracker settles at med -1.1 (antenna 91.6),
-                                    # -3.0 (CATV 83.7) and -3.6 deg (optical 82.5),
-                                    # on the same branch as every historical antenna
-                                    # session.  The trim itself is a front-end
-                                    # property and is NOT retuned with DSP changes.
-STEREO_SUBCARRIER_PHASE_OFFSET_DEG_PLL = 331.1  # Operating point when the legacy PLL main
-                                    # demod is selected (MAIN_DEMOD_USE_PLL = True): the
-                                    # PLL chain carries its own 19k/38k phase
-                                    # inconsistency, so its optimum stays far from the
-                                    # discriminator's.  Re-swept for the FIR bank
-                                    # (was 285.0 with the IIR bank + 23-53k bandpass);
-                                    # the PLL chain itself caps separation at ~26 dB.
-                                    # FMDemodulator picks the matching offset
-                                    # automatically based on MAIN_DEMOD_USE_PLL.
-STEREO_SUBCARRIER_PHASE_OFFSET_DEG_LIGHT = 0.3  # Light demodulator operating point,
-                                    # re-swept for the FIR bank (was 297.4 with the
-                                    # order-1 IIR bank): like the standard variant it
-                                    # lands near 0 deg once the bandpass group delay is
-                                    # out of the chain; the light pilot path (order-1
-                                    # lowpass) caps separation at ~24 dB.
+# ITU-R BS.450-4, section 2.2.2.5: with pilot = cos(theta), the
+# positive-L-minus-R subcarrier is -sin(2*theta) = cos(2*theta + 90 deg).
+# This +90 deg is a broadcast convention, independent of the tuner.
+STEREO_PILOT_TO_SUBCARRIER_PHASE_DEG = 90.0
+# Absolute cosine-mixer offsets: convention + synthetic DSP correction.
+# Corrections measured on the discriminator / legacy PLL / light chains
+# are +1.0 / -28.9 / +0.3 deg respectively.
+STEREO_SUBCARRIER_PHASE_OFFSET_DEG = STEREO_PILOT_TO_SUBCARRIER_PHASE_DEG + 1.0
+STEREO_SUBCARRIER_PHASE_OFFSET_DEG_PLL = STEREO_PILOT_TO_SUBCARRIER_PHASE_DEG - 28.9
+STEREO_SUBCARRIER_PHASE_OFFSET_DEG_LIGHT = STEREO_PILOT_TO_SUBCARRIER_PHASE_DEG + 0.3
+# Residual empirical trim for the reference captures, NOT a measured
+# universal tuner characteristic.  The former +84 deg included the
+# missing +90 deg convention: its residual is 84 - 90 = -6 deg.
+# Keep the existing live operating points (85 / 55.1 / 84.3 deg modulo
+# 360) until a reference transmitter supports re-calibration. Synthetic
+# runners omit only this residual; they retain the +90 deg convention.
+HARDWARE_SUBCARRIER_PHASE_TRIM_DEG = -6.0
 STEREO_MONO_DELAY_SAMPLES = 0       # Mono-path delay compensation; 0 because the FIR bank's shared tap count matches mono/side group delays by construction
 STEREO_LR_SIDE_RATIO_CAP_ENABLE = False     # Enable limiting of |L-R|/|L+R| ratio for stability
 STEREO_LR_SIDE_RATIO_CAP_TARGET = 0.35     # Target upper bound of |L-R|/|L+R| before limiting

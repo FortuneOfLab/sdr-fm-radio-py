@@ -3,6 +3,11 @@
 Covers block-continuity of the IQ lowpass (PR #4), the analytic
 heterodyne pilot path (PR #6), the discriminator main demod (PR #7),
 mode-coupled subcarrier offsets, and state reset on re-tune.
+
+Legacy hand-written cos(19k)/cos(38k) fixtures are deliberately NOT
+BS.450 waveforms: their local 0 / 0.3 / 1 degree receiver overrides
+belong to those fixtures only. Do not combine them with the production
+phase defaults. Standard-convention coverage is in test_dsp_regressions.
 """
 
 from __future__ import annotations
@@ -761,7 +766,7 @@ def test_light_real_block_pilotless_transients():
         2.0, fs_iq, 1000.0, 1.0, 0.0, 0.0, 75_000.0,  # pilot_amp = 0
     ).astype(np.complex64)
     d = FMDemodulatorLight(stereo=True)
-    d.subcarrier_phase_offset_rad = np.deg2rad(0.3)
+    d.subcarrier_phase_offset_rad = np.deg2rad(dm.STEREO_SUBCARRIER_PHASE_OFFSET_DEG_LIGHT)
     t_now = 0.0
     t_closed = None
     for i in range(0, iq.size, blk):
@@ -793,7 +798,7 @@ def test_light_real_block_pilotless_transients():
         3.0, fs_iq, 700.0, 1.0, 0.0, 0.0, 75_000.0,
     ).astype(np.complex64)
     d = FMDemodulatorLight(stereo=True)
-    d.subcarrier_phase_offset_rad = np.deg2rad(0.3)
+    d.subcarrier_phase_offset_rad = np.deg2rad(dm.STEREO_SUBCARRIER_PHASE_OFFSET_DEG_LIGHT)
     for i in range(0, iq_st.size, blk):
         ch = iq_st[i:i + blk]
         if ch.size < 8:

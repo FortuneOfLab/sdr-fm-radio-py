@@ -36,7 +36,7 @@ flowchart TD
     %% --- Pilot path (analytic, no Hilbert) ---
     PILOT_HET --> PILOT_LP["Pilot Complex LPF\nButterworth N=9, SOS + carried state\nfc = 1 kHz (half old BPF width)"]
     PILOT_LP --> PHASE_EST["Pilot Phase\n(residual PLL + mix phase)\nθ, and residual for SNR"]
-    PHASE_EST --> SC_GEN["Subcarrier Generation\nI = cos(2θ + φ_offset)\nQ = sin(2θ + φ_offset)\nφ_offset = 1.0° (disc) / 331.1° (PLL)"]
+    PHASE_EST --> SC_GEN["Subcarrier Generation\nI = cos(2θ + φ_offset)\nQ = sin(2θ + φ_offset)\nBroadcast +90° + DSP correction\n91.0° (disc) / 61.1° (PLL)\nCapture residual trim: -6°"]
 
     %% --- Pilot SNR ---
     PILOT_LP --> SNR_CALC["Pilot SNR\n2·mean(|residual|²) vs noise bands"]
