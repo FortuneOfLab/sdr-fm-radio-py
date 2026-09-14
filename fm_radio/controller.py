@@ -44,6 +44,7 @@ from fm_radio.exceptions import SDRDeviceError, AudioOutputError
 from fm_radio.stations import (
     Station, load_stations, favorites, search, in_area, nearest,
 )
+from fm_radio.telemetry import StatusSnapshot, TelemetryPublisher, peak_dbfs
 from fm_radio.constants import (
     SDR_SAMPLE_RATE, SDR_SAMPLE_RATE_LIGHT, SDR_CENTER_FREQ_DEFAULT,
     AUDIO_OUTPUT_RATE, AUDIO_FRAMES_PER_BUFFER,
@@ -82,6 +83,26 @@ class _BlockProfiler:
         # Cumulative
         self._tot_blocks = 0
         self._tot_slow_blocks = 0
+
+    @property
+    def window_avg_ms(self) -> float:
+        """Mean block time since the last summary, in milliseconds."""
+        return self._win_sum_dt * 1000.0 / max(self._win_blocks, 1)
+
+    @property
+    def window_max_ms(self) -> float:
+        """Longest block since the last summary, in milliseconds."""
+        return self._win_max_dt * 1000.0
+
+    @property
+    def slow_blocks(self) -> int:
+        """Blocks over the slow-block threshold since the receiver started."""
+        return self._tot_slow_blocks
+
+    @property
+    def uptime_sec(self) -> float:
+        """Seconds since the processing thread started."""
+        return time.perf_counter() - self._t0_session
 
     def record(
         self, dt_sec: float, q_depth: int,
@@ -194,6 +215,14 @@ class FMReceiverController:
             )
             # Auto gain controller (replaces hardware AGC)
             self.auto_gain: AutoGainController = AutoGainController(self.sdr_receiver)
+            # Latest-value slot the processing thread publishes state to;
+            # see fm_radio.telemetry for why it is rate-limited rather than
+            # written every block.
+            self.telemetry: TelemetryPublisher = TelemetryPublisher()
+            # Naming the tuned station means scanning the catalogue, which
+            # only has a different answer when the frequency changes.  The
+            # cache is written and read on the processing thread only.
+            self._station_name_cache: tuple[float, str] = (float("nan"), "")
             # Start command line interface
             self.cmd_interface: CommandLineInterface = CommandLineInterface(self)
             self.threads: list[threading.Thread] = []
@@ -239,6 +268,17 @@ class FMReceiverController:
         """Return the catalogue entry the tuner is currently sitting on."""
         return nearest(self.catalogue, self.get_frequency())
 
+    def get_status(self) -> StatusSnapshot | None:
+        """Return the most recent receiver state, or None if none yet.
+
+        The snapshot is produced by the processing thread at roughly 20 Hz
+        and is a plain immutable value: reading it neither blocks that thread
+        nor reaches into any of its objects.  None means no IQ block has been
+        processed yet — the SDR is still starting, or the receiver was only
+        just constructed.
+        """
+        return self.telemetry.latest
+
     def tune(self, freq_hz: float) -> None:
         """Tune to a new frequency.
 
@@ -251,6 +291,9 @@ class FMReceiverController:
         self.sdr_receiver.set_center_frequency(freq_hz)
         self._flush_data_queue()
         self.fm_demodulator.reset()
+        # The published state describes the old station; drop it rather than
+        # let a display show stale pilot and blend values against the new one.
+        self.telemetry.reset()
         self.auto_gain.reset_counters()
         if self.audio_output.recording:
             self.audio_output.stop_recording()
@@ -348,6 +391,74 @@ class FMReceiverController:
     # ------------------------------------------------------------------
     # Internal methods
     # ------------------------------------------------------------------
+
+    def _station_name_for(self, freq_hz: float) -> str:
+        """Name the station at *freq_hz*, reusing the last lookup.
+
+        nearest() walks the whole catalogue - ~270 us over 983 transmitters,
+        which is most of what a snapshot would otherwise cost - and the
+        answer only changes when the tuner moves.
+        """
+        cached_freq, cached_name = self._station_name_cache
+        if freq_hz == cached_freq:
+            return cached_name
+        station = nearest(self.catalogue, freq_hz)
+        name = station.name if station else ""
+        self._station_name_cache = (freq_hz, name)
+        return name
+
+    def _build_snapshot(self, iq_samples: np.ndarray, left: np.ndarray,
+                        right: np.ndarray, profiler: "_BlockProfiler",
+                        block_dt_sec: float, q_depth: int,
+                        now: float) -> StatusSnapshot:
+        """Capture the receiver's state for whatever is watching it.
+
+        Called from the processing thread, only on a block where the
+        publisher is due.  The three measurements taken here — IQ peak and
+        the two audio levels — are the only work this adds to the realtime
+        path; everything else is reading a value the receiver already keeps.
+        """
+        demod = self.fm_demodulator
+        audio = self.audio_output
+        sdr = self.sdr_receiver
+        freq_hz = float(sdr.get_center_frequency())
+        station_name = self._station_name_for(freq_hz)
+
+        iq_peak = float(np.max(np.abs(iq_samples))) if iq_samples.size else 0.0
+
+        return StatusSnapshot(
+            freq_hz=freq_hz,
+            station=station_name,
+            gain_db=float(sdr.get_gain()),
+            auto_gain=self.auto_gain.enabled,
+            iq_peak=iq_peak,
+
+            stereo=bool(getattr(demod, "stereo", False)),
+            blend_factor=float(getattr(demod, "blend_factor", 0.0)),
+            pilot_snr_db=getattr(demod, "pilot_snr_ema", None),
+            pilot_jitter_db=float(getattr(demod, "pilot_jitter_ema", 0.0)),
+            side_nr_enabled=bool(getattr(demod, "side_nr_enabled", False)),
+
+            level_left_dbfs=peak_dbfs(left),
+            level_right_dbfs=peak_dbfs(right),
+
+            block_ms=block_dt_sec * 1000.0,
+            block_ms_avg=profiler.window_avg_ms,
+            block_ms_max=profiler.window_max_ms,
+            block_budget_ms=_BLOCK_BUDGET_SEC * 1000.0,
+            sdr_queue=q_depth,
+            sdr_queue_max=sdr.data_queue.maxsize,
+            slow_blocks=profiler.slow_blocks,
+            iq_drops=sdr.dropped_blocks,
+            audio_drops=audio.dropped_blocks,
+            audio_underruns=audio.underruns,
+
+            recording_audio=audio.recording,
+            recording_iq=sdr.iq_recording,
+
+            uptime_sec=profiler.uptime_sec,
+            timestamp=now,
+        )
 
     def _flush_data_queue(self) -> None:
         """Clear any unprocessed samples from the SDR data queue."""
@@ -451,8 +562,9 @@ class FMReceiverController:
                     continue
                 finally:
                     t_end = time.perf_counter()
+                    block_dt = t_end - t_block_start
                     profiler.record(
-                        t_end - t_block_start,
+                        block_dt,
                         q_depth_after_get,
                         stage_times=(
                             t_agc - t_block_start,
@@ -462,6 +574,20 @@ class FMReceiverController:
                             t_rec - t_enq,
                         ),
                     )
+                    # Publishing is rate-limited, so a block that is not due
+                    # pays one comparison here and nothing else.
+                    if self.telemetry.due(t_end):
+                        try:
+                            self.telemetry.publish(self._build_snapshot(
+                                iq_samples, left, right, profiler,
+                                block_dt, q_depth_after_get, t_end,
+                            ))
+                        except Exception as e:
+                            # Telemetry is for looking at, never a reason to
+                            # interrupt the audio it is describing.
+                            self.logger.warning(
+                                "Telemetry snapshot failed: %s", e,
+                                exc_info=True)
         except Exception as e:
             self.logger.critical(f"Fatal error in processing thread: {e}", exc_info=True)
         finally:

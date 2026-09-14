@@ -228,6 +228,16 @@ class SDRReceiver(SDRReceiverInterface):
             # Drop this buffer if conversion fails to avoid crashing the SDR ctypes callback.
             self.logger.error(f"Error in SDR callback: {e}", exc_info=True)
 
+    @property
+    def dropped_blocks(self) -> int:
+        """IQ blocks the SDR callback discarded because the queue was full."""
+        return self._dropped_count
+
+    @property
+    def iq_record_drops(self) -> int:
+        """IQ blocks dropped by the recording queue in this session."""
+        return self._iq_record_drop_count
+
     def start_iq_recording(self, filename: str) -> None:
         """Start recording raw IQ samples to a 2-channel WAV file (async).
 
