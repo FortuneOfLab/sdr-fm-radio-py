@@ -182,10 +182,14 @@ class AudioOutput(AudioOutputInterface):
                     filled += need
 
             if filled < requested_samples:
+                # Padding with silence at all is an underrun: a partly filled
+                # callback is an audible gap just the same, and counting only
+                # the completely empty ones hides the onset of the problem.
                 out[filled:requested_samples] = 0.0
-                if filled == 0:
-                    self._underrun_count += 1
-                    self.logger.debug("Audio buffer underrun")
+                self._underrun_count += 1
+                self.logger.debug(
+                    "Audio buffer underrun (%d of %d frames)",
+                    requested_samples - filled, requested_samples)
 
             return (out.tobytes(), pyaudio.paContinue)
         except Exception as e:
@@ -212,7 +216,11 @@ class AudioOutput(AudioOutputInterface):
 
     @property
     def underruns(self) -> int:
-        """Times the output callback found nothing to play."""
+        """Callbacks that had to pad the output with silence.
+
+        Counts a partly filled callback as well as a completely empty one:
+        both are a gap in the audio.
+        """
         return self._underrun_count
 
     @property

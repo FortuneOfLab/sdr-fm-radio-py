@@ -138,21 +138,180 @@ def test_tuning_drops_the_previous_snapshot(receiver):
     assert receiver.get_status() is None
 
 
+def count_enqueued(receiver, monkeypatch) -> list:
+    """Record every block handed to the audio output.
+
+    An empty SDR queue only says the loop drained it; what matters is that
+    audio kept reaching the output while telemetry was misbehaving.
+    """
+    enqueued = []
+    original = receiver.audio_output.enqueue_audio
+
+    def counted(left, right):
+        enqueued.append(float(left.size))
+        return original(left, right)
+
+    monkeypatch.setattr(receiver.audio_output, "enqueue_audio", counted)
+    return enqueued
+
+
 def test_a_failing_snapshot_does_not_stop_the_audio(receiver, monkeypatch):
     """Telemetry is for looking at, never a reason to interrupt the audio."""
-    calls = []
+    attempts = []
 
     def explode(*args, **kwargs):
-        calls.append(1)
+        attempts.append(1)
         raise RuntimeError("snapshot boom")
 
+    enqueued = count_enqueued(receiver, monkeypatch)
     monkeypatch.setattr(receiver, "_build_snapshot", explode)
     run_blocks(receiver, 10)
 
-    assert calls, "the snapshot was never attempted"
+    assert attempts, "the snapshot was never attempted"
     assert receiver.get_status() is None
-    # The loop kept going: every block was taken off the queue.
-    assert receiver.sdr_receiver.data_queue.empty()
+    assert len(enqueued) == 10, "audio stopped reaching the output"
+
+
+def test_a_persistent_failure_is_not_retried_every_block(receiver, monkeypatch):
+    """Without deferral one broken snapshot became a failure per block."""
+    attempts = []
+
+    def explode(*args, **kwargs):
+        attempts.append(1)
+        raise RuntimeError("snapshot boom")
+
+    receiver.telemetry.interval_sec = 3600.0
+    monkeypatch.setattr(receiver, "_build_snapshot", explode)
+    run_blocks(receiver, 10)
+
+    assert len(attempts) == 1, f"{len(attempts)} attempts over 10 blocks"
+
+
+def test_a_persistent_failure_warns_once_not_once_per_block(receiver,
+                                                            monkeypatch):
+    warnings = []
+    monkeypatch.setattr(receiver.logger, "warning",
+                        lambda *a, **k: warnings.append(a))
+    monkeypatch.setattr(receiver, "_build_snapshot",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            RuntimeError("snapshot boom")))
+    receiver.telemetry.interval_sec = 0.0       # retry on every block
+    run_blocks(receiver, 10)
+
+    assert receiver._telemetry_failures == 10   # every block did try
+    assert len(warnings) == 1, f"{len(warnings)} warnings for one fault"
+
+
+def test_publishing_recovers_once_the_failure_clears(receiver, monkeypatch):
+    """The deadline is armed, not the publisher switched off."""
+    failing = {"yes": True}
+    original = receiver._build_snapshot
+
+    def sometimes(*args, **kwargs):
+        if failing["yes"]:
+            raise RuntimeError("snapshot boom")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(receiver, "_build_snapshot", sometimes)
+    receiver.telemetry.interval_sec = 0.0
+    run_blocks(receiver, 4)
+    assert receiver.get_status() is None
+
+    failing["yes"] = False
+    run_blocks(receiver, 4)
+    assert receiver.get_status() is not None
+
+
+def test_a_failed_block_does_not_publish_the_previous_block_audio(
+        receiver, monkeypatch):
+    """The failed block would otherwise carry the last block's levels."""
+    calls = {"n": 0}
+    demodulate = receiver.fm_demodulator.demodulate
+
+    def fail_second(composite):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("demod boom")
+        return demodulate(composite)
+
+    monkeypatch.setattr(receiver.fm_demodulator, "demodulate", fail_second)
+    receiver.telemetry.interval_sec = 0.0
+    run_blocks(receiver, 2)
+
+    assert calls["n"] == 2, "the second block was never demodulated"
+    assert receiver.telemetry.published_count == 1
+
+
+def test_a_failing_first_block_publishes_nothing(receiver, monkeypatch):
+    """There is no previous audio at all; this used to raise NameError."""
+    warnings = []
+    monkeypatch.setattr(receiver.logger, "warning",
+                        lambda *a, **k: warnings.append(a))
+    monkeypatch.setattr(receiver.fm_demodulator, "demodulate",
+                        lambda composite: (_ for _ in ()).throw(
+                            RuntimeError("demod boom")))
+    receiver.telemetry.interval_sec = 0.0
+    run_blocks(receiver, 2)
+
+    assert receiver.telemetry.published_count == 0
+    assert receiver.get_status() is None
+    assert not warnings, f"unexpected warnings: {warnings}"
+
+
+def test_a_block_that_is_not_due_builds_nothing(receiver, monkeypatch):
+    """Deterministic stand-in for a timing assertion on the same property."""
+    builds = []
+    original = receiver._build_snapshot
+
+    def counted(*args, **kwargs):
+        builds.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(receiver, "_build_snapshot", counted)
+    receiver.telemetry.interval_sec = 3600.0
+    run_blocks(receiver, 30)
+
+    assert len(builds) == 1, f"{len(builds)} snapshots built for 30 blocks"
+
+
+def test_a_retune_while_a_block_is_in_flight_hides_its_snapshot(receiver):
+    """The ordering is forced with events rather than left to chance.
+
+    The existing retune test stops the loop first, so it cannot see this:
+    a snapshot built for the old station and stored after the tuner moved
+    used to come back as the current state of the new frequency.
+    """
+    built = threading.Event()
+    retuned = threading.Event()
+    original = receiver._build_snapshot
+
+    def stalled(*args, **kwargs):
+        snapshot = original(*args, **kwargs)
+        built.set()
+        retuned.wait(5)                     # the tuner moves meanwhile
+        return snapshot
+
+    receiver.tune(80.0e6)
+    receiver._build_snapshot = stalled
+    receiver.sdr_receiver.data_queue.put(iq_block(receiver))
+    receiver.quit_event.clear()
+    thread = threading.Thread(target=receiver.processing_thread, daemon=True)
+    thread.start()
+    try:
+        assert built.wait(10), "the snapshot was never built"
+        receiver.tune(81.3e6)
+        retuned.set()
+        deadline = time.monotonic() + 5
+        while (receiver.telemetry.published_count == 0
+               and time.monotonic() < deadline):
+            time.sleep(0.005)
+    finally:
+        receiver.quit_event.set()
+        thread.join(timeout=5)
+
+    assert receiver.telemetry.published_count == 1, "nothing was published"
+    assert receiver.get_status() is None, "the old station's snapshot came back"
+    assert receiver.get_frequency() == pytest.approx(81.3e6)
 
 
 def test_the_snapshot_is_a_plain_value(receiver):

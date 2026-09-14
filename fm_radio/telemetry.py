@@ -31,9 +31,20 @@ depths, block timing.  Until now the only way to see any of it was to turn
 logging on and read the log afterwards.
 
 :class:`StatusSnapshot` is an immutable picture of that state and
-:class:`TelemetryPublisher` is the one-writer, many-reader slot it is handed
-through.  The contract is deliberately one-way: readers never reach into the
-receiver, and the receiver never waits on a reader.
+:class:`TelemetryPublisher` is the slot it is handed through.  The contract
+is deliberately one-way: readers never reach into the receiver, and the
+receiver never waits on a reader.
+
+Snapshots carry the *generation* of the receiver state they describe.
+Tuning bumps that generation, and a snapshot from an older one is never
+handed out — without it, a snapshot built just before a retune and stored
+just after it would resurface as the current state of a station the receiver
+has already left.
+
+The clock.  ``due()``, ``publish()`` and ``defer()`` all work in
+``time.perf_counter()`` seconds, and the caller is expected to pass
+monotonically non-decreasing readings from that same clock: the deadline is
+arithmetic on the values it is given, not a reading of its own.
 
 Cost.  Publishing is rate-limited (:data:`DEFAULT_PUBLISH_INTERVAL_SEC`,
 20 Hz) because nothing watching this can use more.  Measured on the light
@@ -51,6 +62,7 @@ from __future__ import annotations
 
 import math
 import time
+import threading
 from dataclasses import dataclass, fields
 from typing import Any
 
@@ -139,8 +151,14 @@ class StatusSnapshot:
 
     @property
     def stereo_locked(self) -> bool:
-        """True when the blend is open far enough to call the output stereo."""
-        return self.blend_factor > 0.5
+        """True when stereo is running and the blend is open far enough.
+
+        ``blend_factor`` alone is not enough: it starts at 1.0 and the mono
+        path never moves it, so a mono demodulator would report a locked
+        stereo signal it is not producing.  It also keeps its last value
+        after a switch from stereo to mono.
+        """
+        return self.stereo and self.blend_factor > 0.5
 
     def as_dict(self) -> dict[str, Any]:
         """Return the snapshot as plain values, for logging or serialising."""
@@ -150,10 +168,16 @@ class StatusSnapshot:
 class TelemetryPublisher:
     """A latest-value slot between the processing thread and its readers.
 
-    One writer and any number of readers.  Publishing rebinds a single
-    attribute to an immutable object, which is atomic under the GIL, so there
-    is no lock on either side: a reader gets some complete snapshot, never a
-    torn one, and a writer is never delayed by a reader that stopped reading.
+    The processing thread is the only writer of snapshots; readers only read.
+    Publishing rebinds one attribute to an already-built immutable object, so
+    a reader sees either the previous entry or the new one, never a
+    half-assembled one, and the writer is never delayed by a reader.
+
+    That property is about the single rebind, not about a sequence of
+    operations: :meth:`invalidate` is called from whichever thread retunes
+    the receiver, so publishing and invalidating do race.  The generation tag
+    is what makes that race harmless — a publish that lands after an
+    invalidate stores an older generation and is simply never handed out.
 
     Snapshots are dropped rather than queued.  What a display wants is the
     current state, and a backlog of stale ones would only grow when the
@@ -162,35 +186,80 @@ class TelemetryPublisher:
 
     def __init__(self, interval_sec: float = DEFAULT_PUBLISH_INTERVAL_SEC) -> None:
         self.interval_sec: float = max(0.0, float(interval_sec))
-        self._latest: StatusSnapshot | None = None
+        # (generation, snapshot); rebound as one object, never mutated.
+        self._latest: tuple[int, StatusSnapshot] | None = None
+        self._generation: int = 0
+        # Only serialises invalidate() against itself - two threads retuning
+        # at once.  The processing thread only ever reads the generation.
+        self._generation_lock = threading.Lock()
         self._next_due: float = 0.0
         self._published: int = 0
+
+    @property
+    def generation(self) -> int:
+        """The generation a snapshot built now would belong to.
+
+        The processing thread reads this when it takes an IQ block off the
+        queue and passes it back to :meth:`publish`, so that a retune part
+        way through a block invalidates what that block produced.
+        """
+        return self._generation
+
+    def invalidate(self) -> None:
+        """Declare everything published so far to describe a previous state.
+
+        Called when the receiver starts doing something else — retuning is
+        the case that matters — from whatever thread made that happen.
+        """
+        with self._generation_lock:
+            self._generation += 1
+        # Publish promptly for the new generation rather than waiting out an
+        # interval armed by the old one.  Racing with publish() here costs at
+        # most one snapshot either way.
+        self._next_due = 0.0
 
     def due(self, now: float | None = None) -> bool:
         """True if a snapshot should be published at *now*.
 
         Called once per block on the realtime path, so it is deliberately one
-        comparison against a precomputed deadline.
+        comparison against a precomputed deadline.  *now* must come from
+        ``time.perf_counter()``.
         """
         return (now if now is not None else time.perf_counter()) >= self._next_due
 
-    def publish(self, snapshot: StatusSnapshot) -> None:
-        """Store *snapshot* as the current state and arm the next interval."""
-        self._latest = snapshot
+    def publish(self, snapshot: StatusSnapshot, generation: int) -> None:
+        """Store *snapshot* as the state of *generation* and arm the interval.
+
+        *generation* is the value :attr:`generation` had when the work behind
+        the snapshot began — not when it finished.
+        """
+        self._latest = (generation, snapshot)
         self._published += 1
         self._next_due = snapshot.timestamp + self.interval_sec
 
+    def defer(self, now: float) -> None:
+        """Arm the next interval without publishing anything.
+
+        For a snapshot that could not be built: without this the deadline
+        stays in the past and every subsequent block retries, turning one
+        broken snapshot into a failure per block.
+        """
+        self._next_due = now + self.interval_sec
+
     @property
     def latest(self) -> StatusSnapshot | None:
-        """The most recent snapshot, or None before the first block."""
-        return self._latest
+        """The current snapshot, or None if there is not one.
+
+        None means no block has been processed yet, or everything published
+        so far belongs to a generation the receiver has moved on from.
+        """
+        entry = self._latest
+        if entry is None:
+            return None
+        generation, snapshot = entry
+        return snapshot if generation == self._generation else None
 
     @property
     def published_count(self) -> int:
-        """How many snapshots have been published, for tests and diagnostics."""
+        """Snapshots published, stale ones included, for tests and diagnostics."""
         return self._published
-
-    def reset(self) -> None:
-        """Forget the current snapshot and publish again on the next block."""
-        self._latest = None
-        self._next_due = 0.0

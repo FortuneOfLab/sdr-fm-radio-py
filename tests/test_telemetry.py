@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import math
+import threading
 import time
 
 import numpy as np
@@ -95,6 +95,12 @@ def test_stereo_locked_follows_the_blend(blend, expected):
     assert make_snapshot(blend_factor=blend).stereo_locked is expected
 
 
+@pytest.mark.parametrize("blend", [1.0, 0.6, 0.0])
+def test_a_mono_snapshot_is_never_stereo_locked(blend):
+    """blend_factor starts at 1.0 and the mono path never moves it."""
+    assert make_snapshot(stereo=False, blend_factor=blend).stereo_locked is False
+
+
 def test_as_dict_round_trips_every_field():
     snapshot = make_snapshot()
     assert StatusSnapshot(**snapshot.as_dict()) == snapshot
@@ -120,7 +126,7 @@ def test_the_first_block_is_always_due():
 def test_publishing_makes_the_snapshot_readable():
     publisher = TelemetryPublisher()
     snapshot = make_snapshot()
-    publisher.publish(snapshot)
+    publisher.publish(snapshot, publisher.generation)
     assert publisher.latest is snapshot
     assert publisher.published_count == 1
 
@@ -130,15 +136,15 @@ def test_a_later_snapshot_replaces_the_earlier_one():
     publisher = TelemetryPublisher()
     first = make_snapshot(timestamp=100.0, freq_hz=80.0e6)
     second = make_snapshot(timestamp=200.0, freq_hz=81.3e6)
-    publisher.publish(first)
-    publisher.publish(second)
+    publisher.publish(first, publisher.generation)
+    publisher.publish(second, publisher.generation)
     assert publisher.latest is second
     assert publisher.published_count == 2
 
 
 def test_publishing_arms_the_next_interval():
     publisher = TelemetryPublisher(interval_sec=0.05)
-    publisher.publish(make_snapshot(timestamp=10.0))
+    publisher.publish(make_snapshot(timestamp=10.0), publisher.generation)
     assert not publisher.due(10.0)
     assert not publisher.due(10.049)
     assert publisher.due(10.05)
@@ -147,7 +153,7 @@ def test_publishing_arms_the_next_interval():
 
 def test_a_zero_interval_publishes_every_block():
     publisher = TelemetryPublisher(interval_sec=0.0)
-    publisher.publish(make_snapshot(timestamp=10.0))
+    publisher.publish(make_snapshot(timestamp=10.0), publisher.generation)
     assert publisher.due(10.0)
 
 
@@ -155,13 +161,57 @@ def test_a_negative_interval_is_clamped():
     assert TelemetryPublisher(interval_sec=-1.0).interval_sec == 0.0
 
 
-def test_reset_forgets_the_snapshot_and_publishes_again():
+def test_invalidating_hides_the_snapshot_and_publishes_again():
     publisher = TelemetryPublisher(interval_sec=10.0)
-    publisher.publish(make_snapshot(timestamp=10.0))
+    publisher.publish(make_snapshot(timestamp=10.0), publisher.generation)
     assert not publisher.due(10.1)
-    publisher.reset()
+    publisher.invalidate()
     assert publisher.latest is None
     assert publisher.due(10.1)
+
+
+# ----------------------------------------------------------------------
+# Generations
+# ----------------------------------------------------------------------
+
+def test_a_snapshot_from_a_previous_generation_is_not_handed_out():
+    """The race the generation exists for: build, retune, then publish.
+
+    A snapshot built before a retune and stored after it would otherwise
+    resurface as the current state of a station the receiver has left.
+    """
+    publisher = TelemetryPublisher(interval_sec=0.0)
+    in_flight = publisher.generation            # what the block belongs to
+    publisher.invalidate()                      # the tuner moves
+    publisher.publish(make_snapshot(), in_flight)
+
+    assert publisher.latest is None
+    assert publisher.published_count == 1       # it was published, not hidden
+
+
+def test_a_snapshot_from_the_current_generation_is_handed_out():
+    publisher = TelemetryPublisher(interval_sec=0.0)
+    publisher.invalidate()
+    snapshot = make_snapshot()
+    publisher.publish(snapshot, publisher.generation)
+    assert publisher.latest is snapshot
+
+
+def test_invalidating_bumps_the_generation():
+    publisher = TelemetryPublisher()
+    first = publisher.generation
+    publisher.invalidate()
+    assert publisher.generation != first
+
+
+def test_deferring_arms_the_interval_without_publishing():
+    """A snapshot that could not be built must still cost its interval."""
+    publisher = TelemetryPublisher(interval_sec=0.05)
+    publisher.defer(10.0)
+    assert publisher.latest is None
+    assert publisher.published_count == 0
+    assert not publisher.due(10.049)
+    assert publisher.due(10.05)
 
 
 def test_the_default_interval_is_no_faster_than_a_display_needs():
@@ -170,21 +220,96 @@ def test_the_default_interval_is_no_faster_than_a_display_needs():
     assert DEFAULT_PUBLISH_INTERVAL_SEC == pytest.approx(0.05)
 
 
-def test_readers_never_see_a_half_built_snapshot():
-    """The slot holds an immutable object, so a reader gets all of it or none.
+def test_each_published_snapshot_is_internally_consistent():
+    """Single-threaded: what is read back belongs to one block, not several.
 
-    Reading while a writer publishes repeatedly must never produce a
-    snapshot whose fields come from different blocks.
+    This says nothing about concurrency — the reader runs after the writer
+    has finished.  See the test below for a reader on its own thread.
     """
     publisher = TelemetryPublisher(interval_sec=0.0)
     for block in range(500):
         publisher.publish(make_snapshot(timestamp=float(block),
                                         freq_hz=80.0e6 + block,
-                                        station=f"station-{block}"))
+                                        station=f"station-{block}"),
+                          publisher.generation)
         current = publisher.latest
         assert current is not None
         assert current.station == f"station-{int(current.freq_hz - 80.0e6)}"
         assert current.timestamp == current.freq_hz - 80.0e6
+
+
+def test_a_concurrent_reader_only_ever_sees_whole_snapshots():
+    """A reader thread running against a writer never sees a mixed snapshot.
+
+    This exercises the slot under concurrency; it does not prove anything
+    about the interpreter.  Passing means no inconsistent snapshot was
+    observed in this run, which is why the reader's observation count is
+    asserted: a reader that never ran would otherwise pass trivially.
+    """
+    publisher = TelemetryPublisher(interval_sec=0.0)
+    publisher.publish(make_snapshot(timestamp=0.0, freq_hz=80.0e6,
+                                    station="station-0"), publisher.generation)
+
+    start = threading.Barrier(2)
+    stop = threading.Event()
+    observations = []
+    inconsistent = []
+
+    def reader():
+        start.wait(5)
+        while not stop.is_set():
+            current = publisher.latest
+            if current is None:
+                continue
+            observations.append(1)
+            block = int(current.freq_hz - 80.0e6)
+            if (current.station != f"station-{block}"
+                    or current.timestamp != float(block)):
+                inconsistent.append(current)
+
+    thread = threading.Thread(target=reader, daemon=True)
+    thread.start()
+    start.wait(5)
+    for block in range(1, 20000):
+        publisher.publish(make_snapshot(timestamp=float(block),
+                                        freq_hz=80.0e6 + block,
+                                        station=f"station-{block}"),
+                          publisher.generation)
+    stop.set()
+    thread.join(timeout=5)
+
+    assert not thread.is_alive()
+    assert len(observations) > 100, f"the reader only read {len(observations)} times"
+    assert not inconsistent, f"{len(inconsistent)} mixed snapshots"
+
+
+def test_a_concurrent_invalidate_hides_an_in_flight_snapshot():
+    """Retuning while a snapshot is in flight must not publish it as current.
+
+    The ordering is forced with events rather than left to chance: the
+    snapshot is built, the tuner moves, and only then is it published.
+    """
+    publisher = TelemetryPublisher(interval_sec=0.0)
+    built = threading.Event()
+    invalidated = threading.Event()
+
+    def writer():
+        generation = publisher.generation       # the block starts here
+        snapshot = make_snapshot(station="old station")
+        built.set()
+        invalidated.wait(5)                     # the tuner moves meanwhile
+        publisher.publish(snapshot, generation)
+
+    thread = threading.Thread(target=writer, daemon=True)
+    thread.start()
+    assert built.wait(5)
+    publisher.invalidate()
+    invalidated.set()
+    thread.join(timeout=5)
+
+    assert not thread.is_alive()
+    assert publisher.published_count == 1
+    assert publisher.latest is None
 
 
 def test_the_snapshot_holds_no_reference_into_the_receiver():
@@ -195,39 +320,21 @@ def test_the_snapshot_holds_no_reference_into_the_receiver():
 
 # ----------------------------------------------------------------------
 # Cost on the realtime path
+#
+# Timing assertions live in tests/test_telemetry_benchmark.py, which is
+# marked slow and excluded from the default run: a threshold on wall-clock
+# time fails on a CI runner that was descheduled, whatever the code does.
+# What is checked here is the property that makes the cost low - that a
+# block which is not due does no work at all - which is deterministic.
 # ----------------------------------------------------------------------
 
-def test_a_block_that_is_not_due_costs_almost_nothing():
-    """Most blocks only ask whether they should publish."""
+def test_a_block_that_is_not_due_touches_nothing_but_the_deadline():
     publisher = TelemetryPublisher(interval_sec=3600.0)
-    publisher.publish(make_snapshot(timestamp=time.perf_counter()))
+    publisher.publish(make_snapshot(timestamp=10.0), publisher.generation)
 
-    now = time.perf_counter()
-    iterations = 20000
-    start = time.perf_counter()
-    for _ in range(iterations):
-        publisher.due(now)
-    per_call_us = (time.perf_counter() - start) / iterations * 1e6
+    before = publisher.latest
+    for block in range(1000):
+        assert not publisher.due(10.0 + block * 0.016)
 
-    # The block budget is 16 ms; this has to be lost in the noise of it.
-    assert per_call_us < 20.0, f"{per_call_us:.1f} us per block"
-
-
-def test_taking_the_measurements_fits_well_inside_the_block_budget():
-    """The IQ peak and the two audio levels are the only added work."""
-    iq = (np.random.randn(16384) + 1j * np.random.randn(16384)).astype(np.complex64)
-    left = np.random.randn(1536).astype(np.float32)
-    right = np.random.randn(1536).astype(np.float32)
-
-    def measure():
-        return (float(np.max(np.abs(iq))), peak_dbfs(left), peak_dbfs(right))
-
-    measure()
-    iterations = 200
-    start = time.perf_counter()
-    for _ in range(iterations):
-        measure()
-    per_snapshot_ms = (time.perf_counter() - start) / iterations * 1e3
-
-    # A 16 ms budget, and this runs on at most one block in three.
-    assert per_snapshot_ms < 1.6, f"{per_snapshot_ms:.3f} ms per snapshot"
+    assert publisher.latest is before
+    assert publisher.published_count == 1

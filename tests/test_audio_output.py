@@ -10,6 +10,7 @@ unexpected write errors.
 from __future__ import annotations
 
 import os
+import queue
 import struct
 import threading
 import time
@@ -165,3 +166,65 @@ def test_worker_survives_unexpected_write_error(audio_output, tmp_path):
     assert ao._record_worker.is_alive()
     assert n_calls[0] == 4  # the failing call did not kill the loop
     ao.stop_recording()
+
+
+# ----------------------------------------------------------------------
+# Output-side health counters
+# ----------------------------------------------------------------------
+
+def drain_into_buffer(audio_output, frames: int) -> None:
+    """Hand the output *frames* frames and let its queue settle."""
+    block = np.zeros(frames, dtype=np.float32)
+    audio_output.enqueue_audio(block, block)
+    deadline = time.monotonic() + 2.0
+    while (audio_output.audio_buffer_queue.qsize()
+           and time.monotonic() < deadline):
+        time.sleep(0.005)
+
+
+def test_a_full_callback_is_not_an_underrun(audio_output):
+    drain_into_buffer(audio_output, 384)
+    out, _ = audio_output.callback(None, 384, {}, 0)
+
+    assert np.frombuffer(out, dtype=np.float32).size == 384 * 2
+    assert audio_output.underruns == 0
+
+
+def test_a_partly_filled_callback_counts_as_an_underrun(audio_output):
+    """Half a buffer of silence is an audible gap just like a whole one."""
+    drain_into_buffer(audio_output, 192)
+    out, _ = audio_output.callback(None, 384, {}, 0)
+
+    samples = np.frombuffer(out, dtype=np.float32)
+    assert samples.size == 384 * 2
+    assert np.all(samples[192 * 2:] == 0.0), "the tail should be silence"
+    assert audio_output.underruns == 1
+
+
+def test_an_empty_callback_counts_as_an_underrun(audio_output):
+    out, _ = audio_output.callback(None, 384, {}, 0)
+
+    samples = np.frombuffer(out, dtype=np.float32)
+    assert samples.size == 384 * 2
+    assert np.all(samples == 0.0)
+    assert audio_output.underruns == 1
+
+
+def test_underruns_accumulate(audio_output):
+    audio_output.callback(None, 384, {}, 0)
+    drain_into_buffer(audio_output, 192)
+    audio_output.callback(None, 384, {}, 0)
+    assert audio_output.underruns == 2
+
+
+def test_a_dropped_block_is_counted(audio_output, monkeypatch):
+    """The output queue being full was only ever a debug log."""
+    def full(*args, **kwargs):
+        raise queue.Full
+
+    monkeypatch.setattr(audio_output.audio_buffer_queue, "put", full)
+    block = np.zeros(192, dtype=np.float32)
+    audio_output.enqueue_audio(block, block)
+    audio_output.enqueue_audio(block, block)
+
+    assert audio_output.dropped_blocks == 2
