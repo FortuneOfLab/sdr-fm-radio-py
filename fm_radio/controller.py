@@ -433,11 +433,14 @@ class FMReceiverController:
             auto_gain=self.auto_gain.enabled,
             iq_peak=iq_peak,
 
-            stereo=bool(getattr(demod, "stereo", False)),
-            blend_factor=float(getattr(demod, "blend_factor", 0.0)),
-            pilot_snr_db=getattr(demod, "pilot_snr_ema", None),
-            pilot_jitter_db=float(getattr(demod, "pilot_jitter_ema", 0.0)),
-            side_nr_enabled=bool(getattr(demod, "side_nr_enabled", False)),
+            # Read directly rather than through getattr defaults: both
+            # demodulators define these, and a default would turn a renamed
+            # attribute into a snapshot that quietly reports zero.
+            stereo=bool(demod.stereo),
+            blend_factor=float(demod.blend_factor),
+            pilot_snr_db=demod.pilot_snr_ema,
+            pilot_jitter_db=float(demod.pilot_jitter_ema),
+            side_nr_enabled=bool(demod.side_nr_enabled),
 
             level_left_dbfs=peak_dbfs(left),
             level_right_dbfs=peak_dbfs(right),

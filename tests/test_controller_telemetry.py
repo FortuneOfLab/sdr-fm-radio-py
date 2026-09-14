@@ -112,14 +112,16 @@ def test_recording_state_is_reported(receiver, tmp_path):
         receiver.stop_recording()
 
 
-def test_publishing_is_rate_limited(receiver):
-    """A block that is not due must not build a snapshot."""
+def test_a_block_that_is_not_due_does_not_publish(receiver):
+    """Rate limiting is asserted against the interval, not against the clock.
+
+    Counting snapshots from a wall-clock expectation would depend on how
+    fast the machine runs the loop, which is exactly the kind of assertion
+    that passes here and flakes on a slower runner.
+    """
+    receiver.telemetry.interval_sec = 3600.0
     run_blocks(receiver, 60)
-    published = receiver.telemetry.published_count
-    assert published >= 1
-    # 60 blocks is under a second of audio at 16 ms each, and the publisher
-    # runs at 20 Hz: far fewer snapshots than blocks.
-    assert published < 30, f"{published} snapshots for 60 blocks"
+    assert receiver.telemetry.published_count == 1
 
 
 def test_every_block_publishes_when_the_interval_is_zero(receiver):
