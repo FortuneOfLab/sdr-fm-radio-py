@@ -18,7 +18,7 @@ This project implements an **FM receiver system** using **Software-Defined Radio
 
 Ensure you have the following installed:
 
-- Python 3.7+
+- Python 3.9+ (3.11+ to use a `stations.toml` of your own)
 - RTL-SDR device and its drivers
 
 ### Install Dependencies
@@ -47,7 +47,9 @@ python fm_receiver.py --light
 
 ### Interactive Commands (while running)
 
-- `list` → Show available FM stations
+- `list` → Show the preset stations (tunable by number)
+- `list all` / `list <area>` → Browse the full nationwide catalogue
+- `search <text>` → Find a station by name, transmitter site or frequency
 - `stereo on` → Enable stereo demodulation
 - `stereo off` / `mono` → Enable mono demodulation
 - `record start` → Start recording (file is auto-named)
@@ -58,9 +60,57 @@ python fm_receiver.py --light
 - `<station_num>` or `<freq_MHz>` → Tune to a station
 - `q` → Quit the program
 
+## Station list
+
+The receiver ships with every FM, wide-FM and NHK-FM transmitter in Japan —
+983 transmitters from 145 broadcasters, listed under the name each station
+is actually known by (`TOKYO FM`, not `エフエム東京`).
+
+`fm_radio/data/stations.json` is a generated snapshot; do not edit it by
+hand. Regenerate it when the upstream lists change:
+
+```bash
+python tools/fetch_stations.py
+```
+
+It merges three primary sources: the
+[総務省 list](https://www.soumu.go.jp/menu_seisaku/ictseisaku/housou_suishin/fm-list.html)
+of commercial FM and wide-FM transmitters, the JSON behind
+[NHK's own frequency page](https://www.nhk.or.jp/radio/info/frequency.html?ch=fm),
+and [radiko](https://radiko.jp/)'s station list for the brand names.
+
+### Adding your own stations
+
+Community FM stations are not in the bundled list, and you will want your own
+presets. Create `stations.toml` — `%APPDATA%m_radio\stations.toml` on
+Windows, `~/.config/fm_radio/stations.toml` elsewhere, or anywhere you like
+with `--stations PATH`:
+
+```toml
+# Add a station the bundled list does not have
+[[station]]
+name = "レインボータウンFM"
+freq_mhz = 79.2
+site = "江東"
+area = "関東"
+favorite = true
+
+# Correct or hide a bundled entry
+[[override]]
+match_name = "TOKYO FM"
+match_site = "八王子"
+hidden = true
+```
+
+`favorite = true` puts a station in the preset list that `list` shows and the
+numeric tune command indexes into. As soon as you mark any favourite, the
+shipped preset list is replaced by yours. Reading this file needs Python 3.11
+or newer (`tomllib`); on older versions the bundled list still loads.
+
 ## Code Structure
 
 - `fm_receiver.py` → Main script containing all functionality
+- `fm_radio/stations.py` → Station catalogue: bundled snapshot + user overrides
 - `DeemphasisIIRFilter` → Implements FM **de-emphasis filtering**
 - `LowpassFilter`, `BandpassFilter` → Filter implementations for processing signals
 - `PLL` → Phase-Locked Loop for FM demodulation

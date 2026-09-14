@@ -40,6 +40,9 @@ from fm_radio.audio_output import AudioOutput
 from fm_radio.cli import CommandLineInterface
 from fm_radio.auto_gain import AutoGainController
 from fm_radio.exceptions import SDRDeviceError, AudioOutputError
+from fm_radio.stations import (
+    Station, load_stations, favorites, search, in_area, nearest,
+)
 from fm_radio.constants import (
     SDR_SAMPLE_RATE, SDR_SAMPLE_RATE_LIGHT, SDR_CENTER_FREQ_DEFAULT,
     AUDIO_OUTPUT_RATE, AUDIO_FRAMES_PER_BUFFER,
@@ -144,26 +147,21 @@ class FMReceiverController:
     Integrates SDR reception, FM demodulation, audio output, and command input.
     The 'light' parameter selects between the standard and light demodulation versions.
     """
-    def __init__(self, light: bool = False) -> None:
+    def __init__(self, light: bool = False,
+                 stations_path: str | None = None) -> None:
         self.logger: logging.Logger = logging.getLogger('fm_receiver.FMReceiverController')
         self.light: bool = light
         self.quit_event: threading.Event = threading.Event()
-        # Predefined station list (station name and frequency)
-        self.stations: dict[str, float] = {
-            "bayfm":        78.0e6,
-            "NACK5":        79.5e6,
-            "TOKYO FM":     80.0e6,
-            "J-WAVE":       81.3e6,
-            "NHK-FM":       82.5e6,
-            "Fm yokohama":  84.7e6,
-            "InterFM":      89.7e6,
-            "JOKR":         90.5e6,
-            "JOQR":         91.6e6,
-            "JOLF":         93.0e6,
-        }
-        self.stations_list: list[tuple[str, float]] = sorted(
-            self.stations.items(), key=lambda x: x[1],
-        )
+        # Nationwide catalogue (bundled snapshot + the user's stations.toml)
+        # and the short preset list the CLI tunes by number.
+        self.catalogue: list[Station] = load_stations(stations_path)
+        self.presets: list[Station] = favorites(self.catalogue)
+        if not self.catalogue:
+            self.logger.warning(
+                "Station catalogue is empty; tune by frequency instead")
+        else:
+            self.logger.info("Station catalogue: %d transmitters, %d presets",
+                             len(self.catalogue), len(self.presets))
 
         try:
             # Select demodulator version based on 'light' parameter
@@ -204,8 +202,32 @@ class FMReceiverController:
     # ------------------------------------------------------------------
 
     def get_stations_list(self) -> list[tuple[str, float]]:
-        """Return the sorted list of (station_name, frequency_hz) tuples."""
-        return self.stations_list
+        """Return the preset stations as (station_name, frequency_hz) tuples.
+
+        These are the favourites — the entries the CLI lists and tunes by
+        number.  The full catalogue is available via :meth:`get_catalogue`.
+        """
+        return [(s.name, s.freq_hz) for s in self.presets]
+
+    def get_catalogue(self) -> list[Station]:
+        """Return every known transmitter, sorted by area then frequency."""
+        return self.catalogue
+
+    def search_stations(self, query: str) -> list[Station]:
+        """Return catalogue entries matching *query*.
+
+        Matches the brand name, the legal name, the transmitter site, the
+        area and the frequency in MHz, case-insensitively.
+        """
+        return search(self.catalogue, query)
+
+    def stations_in_area(self, area: str) -> list[Station]:
+        """Return every catalogue entry in *area* (e.g. ``"関東"``)."""
+        return in_area(self.catalogue, area)
+
+    def current_station(self) -> Station | None:
+        """Return the catalogue entry the tuner is currently sitting on."""
+        return nearest(self.catalogue, self.get_frequency())
 
     def tune(self, freq_hz: float) -> None:
         """Tune to a new frequency.
@@ -458,7 +480,10 @@ class FMReceiverController:
                 print(f"SDR sample_rate: {self.sdr_receiver.sample_rate:.0f} Hz, Audio: {self.audio_output.output_rate} Hz")
             else:
                 print(f"SDR sample_rate: {self.sdr_receiver.sample_rate:.0f} Hz, Composite: {self.fm_demodulator.composite_rate:.0f} Hz, Audio: {self.audio_output.output_rate} Hz")
-                print(f"Default station: {self.sdr_receiver.get_center_frequency()/1e6:.1f} MHz")
+                station = self.current_station()
+                print(f"Default station: "
+                      f"{self.sdr_receiver.get_center_frequency()/1e6:.1f} MHz"
+                      + (f" ({station.name})" if station else ""))
                 print("Stereo demodulation enabled.")
                 print("Commands: q, list, <freq>, stereo on/off, record start/stop, iqrec start/stop, agc on/off, gain <value>, etc.")
             print("Auto gain control: ON")

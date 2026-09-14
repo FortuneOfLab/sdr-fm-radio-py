@@ -56,6 +56,12 @@ def build_recording_path(freq_mhz: float, iq: bool = False) -> str:
     return os.path.join(RECORDINGS_DIR, f"{stamp}_{freq_mhz:.1f}MHz{suffix}.wav")
 
 
+#: Upper bound on catalogue rows printed at once.  The command prompt
+#: shares the terminal with this output, so a full 983-line dump would
+#: scroll the prompt away.
+_MAX_LISTED_STATIONS = 40
+
+
 class CommandLineInterface(threading.Thread):
     """Thread for handling command line input.
 
@@ -120,6 +126,10 @@ class CommandLineInterface(threading.Thread):
             return self._cmd_agc(cmd)
         if cmd.startswith('gain'):
             return self._cmd_gain(cmd)
+        if cmd.startswith('list '):
+            return self._cmd_list(cmd)
+        if cmd.startswith('search'):
+            return self._cmd_search(cmd)
 
         # 3. Numeric / frequency input -> tune
         return self._cmd_tune(cmd)
@@ -132,7 +142,9 @@ class CommandLineInterface(threading.Thread):
     def _print_help() -> None:
         """Display available commands."""
         print("\nEnter command:")
-        print("  'list' -> show station list")
+        print("  'list' -> show preset stations")
+        print("  'list all' or 'list <area>' -> browse the full catalogue")
+        print("  'search <text>' -> find a station by name, site or frequency")
         print("  'stereo on/off' or 'mono' -> toggle stereo demodulation")
         print("  'record start' -> start recording with auto-generated filename")
         print("  'record stop' -> stop recording")
@@ -151,11 +163,57 @@ class CommandLineInterface(threading.Thread):
         return False
 
     def _cmd_list(self, cmd: str) -> bool:
-        """Handle 'list' — display station list."""
-        print("Available stations:")
-        for i, (name, freq) in enumerate(self.controller.get_stations_list(), start=1):
-            print(f"{i}: {name} ({freq/1e6:.1f} MHz)")
+        """Handle 'list', 'list all' and 'list <area>'.
+
+        Bare 'list' shows the presets, which are the entries the numeric
+        tune command indexes into.  With an argument it browses the full
+        catalogue, which is far too long to tune by number.
+        """
+        argument = cmd[len('list'):].strip()
+        if not argument:
+            print("Preset stations:")
+            for i, (name, freq) in enumerate(
+                    self.controller.get_stations_list(), start=1):
+                print(f"{i}: {name} ({freq/1e6:.1f} MHz)")
+            print("('list all' or 'list <area>' for every known station)")
+            return True
+
+        catalogue = self.controller.get_catalogue()
+        if argument == 'all':
+            self._print_stations(catalogue, "All stations")
+        else:
+            matched = self.controller.stations_in_area(argument)
+            if matched:
+                self._print_stations(matched, f"Stations in {argument}")
+            else:
+                areas = sorted({s.area for s in catalogue if s.area})
+                print(f"Unknown area: {argument}")
+                print("Areas: " + " / ".join(areas))
         return True
+
+    def _cmd_search(self, cmd: str) -> bool:
+        """Handle 'search <text>' — find stations anywhere in the catalogue."""
+        query = cmd[len('search'):].strip()
+        if not query:
+            print("Usage: search <name, transmitter site or frequency>")
+            return True
+        self._print_stations(self.controller.search_stations(query),
+                             f"Search: {query}")
+        return True
+
+    @staticmethod
+    def _print_stations(stations: list, title: str) -> None:
+        """Print a catalogue slice, truncated so it cannot flood the prompt."""
+        if not stations:
+            print(f"{title}: no match")
+            return
+        print(f"{title} ({len(stations)}):")
+        for station in stations[:_MAX_LISTED_STATIONS]:
+            print(f"  {station.describe()}")
+        hidden = len(stations) - _MAX_LISTED_STATIONS
+        if hidden > 0:
+            print(f"  ... and {hidden} more - narrow the search to see them")
+        print("Tune by typing the frequency in MHz.")
 
     def _cmd_stereo_on(self, cmd: str) -> bool:
         """Handle 'stereo on' / 'stereo' — enable stereo demodulation."""

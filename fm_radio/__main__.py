@@ -115,10 +115,13 @@ def main() -> None:
     enable_logging: bool = False
     log_level: int = logging.INFO
     log_file: str | None = None
+    stations_path: str | None = None
 
     for i, arg in enumerate(sys.argv[1:], 1):
         if arg == '--light':
             light_mode = True
+        elif arg == '--stations' and i + 1 < len(sys.argv):
+            stations_path = sys.argv[i + 1]
         elif arg in ('--log', '--verbose', '-v'):
             enable_logging = True
         elif arg == '--debug':
@@ -142,7 +145,8 @@ def main() -> None:
         logging.disable(logging.CRITICAL)
 
     try:
-        controller = FMReceiverController(light=light_mode)
+        controller = FMReceiverController(light=light_mode,
+                                          stations_path=stations_path)
         controller.start()
     except Exception as e:
         if enable_logging:
