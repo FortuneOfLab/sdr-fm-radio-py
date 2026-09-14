@@ -1,11 +1,15 @@
 """What telemetry costs the processing thread, measured on the real path.
 
-Marked slow and excluded from the default run. A threshold on wall-clock
-time is not a correctness check: a CI runner that gets descheduled fails it
-whatever the code does. These exist to produce a number on demand
-(``pytest -m slow -s tests/test_telemetry_benchmark.py``) and to catch a
-gross regression, so the bounds are an order of magnitude above what the
-code does rather than a tight fit.
+Opt-in only: these are skipped unless ``FM_RADIO_BENCHMARK`` is set in the
+environment, and are marked slow on top of that.  A threshold on wall-clock
+time is not a correctness check — a CI runner that gets descheduled fails it
+whatever the code does — and CI here runs the whole suite, slow tests
+included, so a marker alone would not keep it out.  Run them deliberately::
+
+    FM_RADIO_BENCHMARK=1 pytest -s tests/test_telemetry_benchmark.py
+
+The bounds are an order of magnitude above what the code does, so they catch
+a gross regression rather than fitting the current machine.
 
 What the default run checks instead is the property that keeps the cost low:
 that a block which is not due does no work. See
@@ -16,6 +20,7 @@ in tests/test_controller_telemetry.py.
 
 from __future__ import annotations
 
+import os
 import time
 
 import numpy as np
@@ -24,7 +29,11 @@ import pytest
 from fm_radio.controller import FMReceiverController, _BlockProfiler
 from fm_radio.telemetry import TelemetryPublisher
 
-pytestmark = pytest.mark.slow
+pytestmark = [
+    pytest.mark.slow,
+    pytest.mark.skipif(not os.environ.get("FM_RADIO_BENCHMARK"),
+                       reason="benchmark: set FM_RADIO_BENCHMARK=1 to measure"),
+]
 
 #: Bounds, in milliseconds, against the 16 ms per-block budget.  Measured at
 #: 0.067 ms for a snapshot and 0.00018 ms for the due() check; these are far
