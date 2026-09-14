@@ -1,0 +1,8862 @@
+{
+ "sources": {
+  "soumu": "https://www.soumu.go.jp/menu_seisaku/ictseisaku/housou_suishin/fm-list.html",
+  "nhk": "https://www.nhk.or.jp/radio/include/freq.json",
+  "radiko": "https://radiko.jp/v3/station/region/full.xml"
+ },
+ "counts": {
+  "total": 983,
+  "commercial": 451,
+  "nhk": 532,
+  "broadcasters": 145
+ },
+ "stations": [
+  {
+   "name": "AIR-G'",
+   "legal_name": "エフエム北海道",
+   "freq_mhz": 76.4,
+   "site": "旭川",
+   "area": "北海道",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM NORTH WAVE",
+   "legal_name": "エフエム・ノースウエーブ",
+   "freq_mhz": 77.2,
+   "site": "札幌大通",
+   "area": "北海道",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "AIR-G'",
+   "legal_name": "エフエム北海道",
+   "freq_mhz": 78.5,
+   "site": "帯広",
+   "area": "北海道",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 78.9,
+   "site": "ニセコ",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "AIR-G'",
+   "legal_name": "エフエム北海道",
+   "freq_mhz": 79.2,
+   "site": "札幌大通",
+   "area": "北海道",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM NORTH WAVE",
+   "legal_name": "エフエム・ノースウエーブ",
+   "freq_mhz": 79.4,
+   "site": "函館",
+   "area": "北海道",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM NORTH WAVE",
+   "legal_name": "エフエム・ノースウエーブ",
+   "freq_mhz": 79.5,
+   "site": "小樽",
+   "area": "北海道",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM NORTH WAVE",
+   "legal_name": "エフエム・ノースウエーブ",
+   "freq_mhz": 79.8,
+   "site": "旭川",
+   "area": "北海道",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "AIR-G'",
+   "legal_name": "エフエム北海道",
+   "freq_mhz": 80.4,
+   "site": "札幌",
+   "area": "北海道",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM NORTH WAVE",
+   "legal_name": "エフエム・ノースウエーブ",
+   "freq_mhz": 80.7,
+   "site": "釧路",
+   "area": "北海道",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 81.6,
+   "site": "札幌大通",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 81.6,
+   "site": "洞爺",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "AIR-G'",
+   "legal_name": "エフエム北海道",
+   "freq_mhz": 81.9,
+   "site": "小樽",
+   "area": "北海道",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM NORTH WAVE",
+   "legal_name": "エフエム・ノースウエーブ",
+   "freq_mhz": 82.1,
+   "site": "帯広",
+   "area": "北海道",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM NORTH WAVE",
+   "legal_name": "エフエム・ノースウエーブ",
+   "freq_mhz": 82.5,
+   "site": "札幌",
+   "area": "北海道",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "AIR-G'",
+   "legal_name": "エフエム北海道",
+   "freq_mhz": 83.1,
+   "site": "網走",
+   "area": "北海道",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 83.1,
+   "site": "南羊蹄",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 83.5,
+   "site": "新得",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 83.6,
+   "site": "日浦",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 83.6,
+   "site": "滝上",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 83.8,
+   "site": "芦別",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 83.8,
+   "site": "羽幌",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 83.8,
+   "site": "広尾",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 83.8,
+   "site": "遠軽",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 83.9,
+   "site": "夕張",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 83.9,
+   "site": "本別",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 84.0,
+   "site": "深川",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 84.0,
+   "site": "静内",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 84.1,
+   "site": "日高",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 84.2,
+   "site": "岩内",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 84.2,
+   "site": "渡島福島",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 84.2,
+   "site": "富良野",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 84.3,
+   "site": "歌志内",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 84.3,
+   "site": "奥尻大成",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 84.4,
+   "site": "陸別",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 84.5,
+   "site": "小樽",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 84.5,
+   "site": "稚内",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 84.5,
+   "site": "上川",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 84.5,
+   "site": "新北見",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 84.5,
+   "site": "丸瀬布",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 84.6,
+   "site": "黒松内",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 84.7,
+   "site": "札前",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 84.7,
+   "site": "幾寅",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 84.8,
+   "site": "留萌",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 84.8,
+   "site": "振内",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 84.9,
+   "site": "登別",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 85.1,
+   "site": "紋別",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 85.2,
+   "site": "札幌",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 85.5,
+   "site": "厚岸",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 85.6,
+   "site": "根室",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 85.7,
+   "site": "島牧",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 85.7,
+   "site": "松前",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 85.8,
+   "site": "旭川",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 85.9,
+   "site": "夕張清水沢",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 86.0,
+   "site": "北檜山",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 86.0,
+   "site": "北見",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 86.1,
+   "site": "浦河",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "AIR-G'",
+   "legal_name": "エフエム北海道",
+   "freq_mhz": 86.4,
+   "site": "釧路",
+   "area": "北海道",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "AIR-G'",
+   "legal_name": "エフエム北海道",
+   "freq_mhz": 86.5,
+   "site": "洞爺",
+   "area": "北海道",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 87.0,
+   "site": "函館",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 87.5,
+   "site": "帯広",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "AIR-G'",
+   "legal_name": "エフエム北海道",
+   "freq_mhz": 87.8,
+   "site": "北見",
+   "area": "北海道",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 88.0,
+   "site": "室蘭",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 88.2,
+   "site": "名寄",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 88.5,
+   "site": "釧路",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "AIR-G'",
+   "legal_name": "エフエム北海道",
+   "freq_mhz": 88.8,
+   "site": "函館",
+   "area": "北海道",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 88.8,
+   "site": "羅臼",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 89.1,
+   "site": "知駒",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "AIR-G'",
+   "legal_name": "エフエム北海道",
+   "freq_mhz": 89.4,
+   "site": "室蘭",
+   "area": "北海道",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 89.5,
+   "site": "弟子屈",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 89.7,
+   "site": "江差",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 89.7,
+   "site": "礼文",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 89.7,
+   "site": "足寄",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 89.9,
+   "site": "枝幸",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 北海道",
+   "legal_name": "",
+   "freq_mhz": 89.9,
+   "site": "中標津",
+   "area": "北海道",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "STVラジオ",
+   "legal_name": "",
+   "freq_mhz": 90.4,
+   "site": "手稲",
+   "area": "北海道",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "HBCラジオ",
+   "legal_name": "北海道放送",
+   "freq_mhz": 91.5,
+   "site": "札幌",
+   "area": "北海道",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "エフエム岩手",
+   "legal_name": "",
+   "freq_mhz": 76.1,
+   "site": "盛岡",
+   "area": "東北",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "IBCラジオ",
+   "legal_name": "アイビーシー岩手放送",
+   "freq_mhz": 76.7,
+   "site": "山田",
+   "area": "東北",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "Rhythm Station",
+   "legal_name": "エフエム山形",
+   "freq_mhz": 76.9,
+   "site": "鶴岡",
+   "area": "東北",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "エフエム岩手",
+   "legal_name": "",
+   "freq_mhz": 77.0,
+   "site": "野田",
+   "area": "東北",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "Date fm",
+   "legal_name": "エフエム仙台",
+   "freq_mhz": 77.1,
+   "site": "仙台",
+   "area": "東北",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "エフエム秋田",
+   "legal_name": "",
+   "freq_mhz": 77.1,
+   "site": "花輪",
+   "area": "東北",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "Rhythm Station",
+   "legal_name": "エフエム山形",
+   "freq_mhz": 77.3,
+   "site": "米沢",
+   "area": "東北",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "エフエム秋田",
+   "legal_name": "",
+   "freq_mhz": 77.7,
+   "site": "本荘",
+   "area": "東北",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "RFCラジオ福島",
+   "legal_name": "ラジオ福島",
+   "freq_mhz": 77.8,
+   "site": "東金山",
+   "area": "東北",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "エフエム秋田",
+   "legal_name": "",
+   "freq_mhz": 78.0,
+   "site": "湯沢",
+   "area": "東北",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "Rhythm Station",
+   "legal_name": "エフエム山形",
+   "freq_mhz": 78.2,
+   "site": "新庄",
+   "area": "東北",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "エフエム青森",
+   "legal_name": "",
+   "freq_mhz": 78.2,
+   "site": "深浦",
+   "area": "東北",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "エフエム岩手",
+   "legal_name": "",
+   "freq_mhz": 78.3,
+   "site": "岩泉",
+   "area": "東北",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "エフエム岩手",
+   "legal_name": "",
+   "freq_mhz": 78.4,
+   "site": "大槌",
+   "area": "東北",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "エフエム青森",
+   "legal_name": "",
+   "freq_mhz": 78.4,
+   "site": "八戸",
+   "area": "東北",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "ふくしまFM",
+   "legal_name": "エフエム福島",
+   "freq_mhz": 78.6,
+   "site": "いわき",
+   "area": "東北",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "ふくしまFM",
+   "legal_name": "エフエム福島",
+   "freq_mhz": 78.6,
+   "site": "原町",
+   "area": "東北",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "RAB青森放送",
+   "legal_name": "青森放送",
+   "freq_mhz": 78.8,
+   "site": "大間下北",
+   "area": "東北",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "エフエム秋田",
+   "legal_name": "",
+   "freq_mhz": 78.9,
+   "site": "角館",
+   "area": "東北",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "エフエム岩手",
+   "legal_name": "",
+   "freq_mhz": 79.2,
+   "site": "釜石",
+   "area": "東北",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "RFCラジオ福島",
+   "legal_name": "ラジオ福島",
+   "freq_mhz": 79.3,
+   "site": "西金山",
+   "area": "東北",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "RFCラジオ福島",
+   "legal_name": "ラジオ福島",
+   "freq_mhz": 79.3,
+   "site": "金山",
+   "area": "東北",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "エフエム岩手",
+   "legal_name": "",
+   "freq_mhz": 79.7,
+   "site": "大船渡",
+   "area": "東北",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "ふくしまFM",
+   "legal_name": "エフエム福島",
+   "freq_mhz": 79.8,
+   "site": "白河",
+   "area": "東北",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "エフエム青森",
+   "legal_name": "",
+   "freq_mhz": 80.0,
+   "site": "青森",
+   "area": "東北",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "IBCラジオ",
+   "legal_name": "アイビーシー岩手放送",
+   "freq_mhz": 80.3,
+   "site": "岩泉小本",
+   "area": "東北",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "エフエム岩手",
+   "legal_name": "",
+   "freq_mhz": 80.3,
+   "site": "一関",
+   "area": "東北",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "Rhythm Station",
+   "legal_name": "エフエム山形",
+   "freq_mhz": 80.4,
+   "site": "山形",
+   "area": "東北",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "IBCラジオ",
+   "legal_name": "アイビーシー岩手放送",
+   "freq_mhz": 80.5,
+   "site": "二戸",
+   "area": "東北",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "IBCラジオ",
+   "legal_name": "アイビーシー岩手放送",
+   "freq_mhz": 80.5,
+   "site": "大槌",
+   "area": "東北",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "エフエム岩手",
+   "legal_name": "",
+   "freq_mhz": 80.7,
+   "site": "遠野",
+   "area": "東北",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "Date fm",
+   "legal_name": "エフエム仙台",
+   "freq_mhz": 81.3,
+   "site": "気仙沼",
+   "area": "東北",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "エフエム青森",
+   "legal_name": "",
+   "freq_mhz": 81.3,
+   "site": "むつ",
+   "area": "東北",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "Date fm",
+   "legal_name": "エフエム仙台",
+   "freq_mhz": 81.4,
+   "site": "白石",
+   "area": "東北",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 岩手",
+   "legal_name": "",
+   "freq_mhz": 81.4,
+   "site": "釜石鈴子",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "IBCラジオ",
+   "legal_name": "アイビーシー岩手放送",
+   "freq_mhz": 81.5,
+   "site": "田野畑",
+   "area": "東北",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 岩手",
+   "legal_name": "",
+   "freq_mhz": 81.6,
+   "site": "室根",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 青森",
+   "legal_name": "",
+   "freq_mhz": 81.8,
+   "site": "八戸",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "ふくしまFM",
+   "legal_name": "エフエム福島",
+   "freq_mhz": 81.8,
+   "site": "福島",
+   "area": "東北",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "エフエム岩手",
+   "legal_name": "",
+   "freq_mhz": 82.0,
+   "site": "山田",
+   "area": "東北",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 山形",
+   "legal_name": "",
+   "freq_mhz": 82.1,
+   "site": "山形",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "エフエム岩手",
+   "legal_name": "",
+   "freq_mhz": 82.2,
+   "site": "二戸",
+   "area": "東北",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 宮城",
+   "legal_name": "",
+   "freq_mhz": 82.5,
+   "site": "仙台",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 秋田",
+   "legal_name": "",
+   "freq_mhz": 82.5,
+   "site": "二ツ井",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 青森",
+   "legal_name": "",
+   "freq_mhz": 82.7,
+   "site": "むつ",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "ふくしまFM",
+   "legal_name": "エフエム福島",
+   "freq_mhz": 82.8,
+   "site": "会津若松",
+   "area": "東北",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "エフエム秋田",
+   "legal_name": "",
+   "freq_mhz": 82.8,
+   "site": "秋田",
+   "area": "東北",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 岩手",
+   "legal_name": "",
+   "freq_mhz": 83.1,
+   "site": "盛岡",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 福島",
+   "legal_name": "",
+   "freq_mhz": 83.3,
+   "site": "原町",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 福島",
+   "legal_name": "",
+   "freq_mhz": 83.3,
+   "site": "西金山",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 青森",
+   "legal_name": "",
+   "freq_mhz": 83.4,
+   "site": "上北烏帽子",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 岩手",
+   "legal_name": "",
+   "freq_mhz": 83.5,
+   "site": "宮古",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 岩手",
+   "legal_name": "",
+   "freq_mhz": 83.5,
+   "site": "陸前高田",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 岩手",
+   "legal_name": "",
+   "freq_mhz": 83.6,
+   "site": "大槌",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 岩手",
+   "legal_name": "",
+   "freq_mhz": 83.6,
+   "site": "湯田",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 福島",
+   "legal_name": "",
+   "freq_mhz": 83.6,
+   "site": "勿来",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 秋田",
+   "legal_name": "",
+   "freq_mhz": 83.6,
+   "site": "能代",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 山形",
+   "legal_name": "",
+   "freq_mhz": 83.7,
+   "site": "朝日",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 福島",
+   "legal_name": "",
+   "freq_mhz": 83.7,
+   "site": "東只見",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 岩手",
+   "legal_name": "",
+   "freq_mhz": 83.8,
+   "site": "一関",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 福島",
+   "legal_name": "",
+   "freq_mhz": 83.8,
+   "site": "塙",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 秋田",
+   "legal_name": "",
+   "freq_mhz": 83.8,
+   "site": "花輪",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 秋田",
+   "legal_name": "",
+   "freq_mhz": 83.9,
+   "site": "本荘",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 山形",
+   "legal_name": "",
+   "freq_mhz": 84.0,
+   "site": "白鷹",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 岩手",
+   "legal_name": "",
+   "freq_mhz": 84.0,
+   "site": "山田",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 福島",
+   "legal_name": "",
+   "freq_mhz": 84.0,
+   "site": "小野",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "Date fm",
+   "legal_name": "エフエム仙台",
+   "freq_mhz": 84.1,
+   "site": "志津川",
+   "area": "東北",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "Date fm",
+   "legal_name": "エフエム仙台",
+   "freq_mhz": 84.1,
+   "site": "鳴子",
+   "area": "東北",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 福島",
+   "legal_name": "",
+   "freq_mhz": 84.1,
+   "site": "東金山",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 山形",
+   "legal_name": "",
+   "freq_mhz": 84.2,
+   "site": "米沢",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 宮城",
+   "legal_name": "",
+   "freq_mhz": 84.3,
+   "site": "白石",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 岩手",
+   "legal_name": "",
+   "freq_mhz": 84.3,
+   "site": "大船渡",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 岩手",
+   "legal_name": "",
+   "freq_mhz": 84.3,
+   "site": "岩泉",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 福島",
+   "legal_name": "",
+   "freq_mhz": 84.3,
+   "site": "白河",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 青森",
+   "legal_name": "",
+   "freq_mhz": 84.3,
+   "site": "深浦",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "エフエム青森",
+   "legal_name": "",
+   "freq_mhz": 84.3,
+   "site": "上北",
+   "area": "東北",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 岩手",
+   "legal_name": "",
+   "freq_mhz": 84.5,
+   "site": "遠野",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 岩手",
+   "legal_name": "",
+   "freq_mhz": 84.5,
+   "site": "沢内",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 福島",
+   "legal_name": "",
+   "freq_mhz": 84.5,
+   "site": "南郷",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 福島",
+   "legal_name": "",
+   "freq_mhz": 84.5,
+   "site": "富岡",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 秋田",
+   "legal_name": "",
+   "freq_mhz": 84.5,
+   "site": "阿仁",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 宮城",
+   "legal_name": "",
+   "freq_mhz": 84.6,
+   "site": "気仙沼",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 山形",
+   "legal_name": "",
+   "freq_mhz": 84.6,
+   "site": "長井",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 福島",
+   "legal_name": "",
+   "freq_mhz": 84.6,
+   "site": "月館",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 山形",
+   "legal_name": "",
+   "freq_mhz": 84.8,
+   "site": "温海",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 岩手",
+   "legal_name": "",
+   "freq_mhz": 84.8,
+   "site": "岩手川崎",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 福島",
+   "legal_name": "",
+   "freq_mhz": 84.8,
+   "site": "只見",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 岩手",
+   "legal_name": "",
+   "freq_mhz": 84.9,
+   "site": "二戸",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 福島",
+   "legal_name": "",
+   "freq_mhz": 84.9,
+   "site": "柳津三島",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 秋田",
+   "legal_name": "",
+   "freq_mhz": 84.9,
+   "site": "湯沢",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 福島",
+   "legal_name": "",
+   "freq_mhz": 85.0,
+   "site": "田島",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 青森",
+   "legal_name": "",
+   "freq_mhz": 85.0,
+   "site": "南鰺ケ沢",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 岩手",
+   "legal_name": "",
+   "freq_mhz": 85.1,
+   "site": "釜石",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 宮城",
+   "legal_name": "",
+   "freq_mhz": 85.2,
+   "site": "鳴子",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 宮城",
+   "legal_name": "",
+   "freq_mhz": 85.2,
+   "site": "志津川",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 秋田",
+   "legal_name": "",
+   "freq_mhz": 85.2,
+   "site": "矢島",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 福島",
+   "legal_name": "",
+   "freq_mhz": 85.3,
+   "site": "福島",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 秋田",
+   "legal_name": "",
+   "freq_mhz": 85.3,
+   "site": "東由利",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "IBCラジオ",
+   "legal_name": "アイビーシー岩手放送",
+   "freq_mhz": 85.5,
+   "site": "一関",
+   "area": "東北",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 岩手",
+   "legal_name": "",
+   "freq_mhz": 85.5,
+   "site": "野田",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 秋田",
+   "legal_name": "",
+   "freq_mhz": 85.7,
+   "site": "花矢",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 秋田",
+   "legal_name": "",
+   "freq_mhz": 85.8,
+   "site": "角館",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 福島",
+   "legal_name": "",
+   "freq_mhz": 85.9,
+   "site": "会津若松",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "エフエム岩手",
+   "legal_name": "",
+   "freq_mhz": 85.9,
+   "site": "陸前高田",
+   "area": "東北",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 山形",
+   "legal_name": "",
+   "freq_mhz": 86.0,
+   "site": "鶴岡",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 青森",
+   "legal_name": "",
+   "freq_mhz": 86.0,
+   "site": "青森",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 福島",
+   "legal_name": "",
+   "freq_mhz": 86.1,
+   "site": "いわき",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "IBCラジオ",
+   "legal_name": "アイビーシー岩手放送",
+   "freq_mhz": 86.4,
+   "site": "室根",
+   "area": "東北",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 岩手",
+   "legal_name": "",
+   "freq_mhz": 86.5,
+   "site": "普代田野畑",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 秋田",
+   "legal_name": "",
+   "freq_mhz": 86.7,
+   "site": "秋田",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "IBCラジオ",
+   "legal_name": "アイビーシー岩手放送",
+   "freq_mhz": 87.2,
+   "site": "宮古",
+   "area": "東北",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 岩手",
+   "legal_name": "",
+   "freq_mhz": 87.6,
+   "site": "西根松尾",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "IBCラジオ",
+   "legal_name": "アイビーシー岩手放送",
+   "freq_mhz": 87.8,
+   "site": "遠野",
+   "area": "東北",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 山形",
+   "legal_name": "",
+   "freq_mhz": 88.3,
+   "site": "新庄",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 岩手",
+   "legal_name": "",
+   "freq_mhz": 88.3,
+   "site": "陸中川井",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 秋田",
+   "legal_name": "",
+   "freq_mhz": 88.3,
+   "site": "大館",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "IBCラジオ",
+   "legal_name": "アイビーシー岩手放送",
+   "freq_mhz": 88.5,
+   "site": "釜石",
+   "area": "東北",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "エフエム秋田",
+   "legal_name": "",
+   "freq_mhz": 89.0,
+   "site": "羽後",
+   "area": "東北",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "エフエム秋田",
+   "legal_name": "",
+   "freq_mhz": 89.2,
+   "site": "大館",
+   "area": "東北",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "エフエム岩手",
+   "legal_name": "",
+   "freq_mhz": 89.3,
+   "site": "宮古",
+   "area": "東北",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "エフエム秋田",
+   "legal_name": "",
+   "freq_mhz": 89.4,
+   "site": "東成瀬",
+   "area": "東北",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 岩手",
+   "legal_name": "",
+   "freq_mhz": 89.5,
+   "site": "安代田山",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "エフエム秋田",
+   "legal_name": "",
+   "freq_mhz": 89.7,
+   "site": "能代",
+   "area": "東北",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 山形",
+   "legal_name": "",
+   "freq_mhz": 89.8,
+   "site": "小国",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 岩手",
+   "legal_name": "",
+   "freq_mhz": 89.9,
+   "site": "葛巻",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 岩手",
+   "legal_name": "",
+   "freq_mhz": 89.9,
+   "site": "種市",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 秋田",
+   "legal_name": "",
+   "freq_mhz": 89.9,
+   "site": "田沢湖",
+   "area": "東北",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "ABSラジオ",
+   "legal_name": "秋田放送",
+   "freq_mhz": 90.1,
+   "site": "秋田",
+   "area": "東北",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "RFCラジオ福島",
+   "legal_name": "ラジオ福島",
+   "freq_mhz": 90.2,
+   "site": "いわき",
+   "area": "東北",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "RFCラジオ福島",
+   "legal_name": "ラジオ福島",
+   "freq_mhz": 90.2,
+   "site": "原町",
+   "area": "東北",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "IBCラジオ",
+   "legal_name": "アイビーシー岩手放送",
+   "freq_mhz": 90.6,
+   "site": "盛岡",
+   "area": "東北",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "RFCラジオ福島",
+   "legal_name": "ラジオ福島",
+   "freq_mhz": 90.8,
+   "site": "福島",
+   "area": "東北",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "RFCラジオ福島",
+   "legal_name": "ラジオ福島",
+   "freq_mhz": 90.8,
+   "site": "郡山",
+   "area": "東北",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "RFCラジオ福島",
+   "legal_name": "ラジオ福島",
+   "freq_mhz": 90.8,
+   "site": "若松",
+   "area": "東北",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "RAB青森放送",
+   "legal_name": "青森放送",
+   "freq_mhz": 91.7,
+   "site": "青森",
+   "area": "東北",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "YBC山形放送",
+   "legal_name": "山形放送",
+   "freq_mhz": 92.4,
+   "site": "山形",
+   "area": "東北",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "RAB青森放送",
+   "legal_name": "青森放送",
+   "freq_mhz": 92.7,
+   "site": "八戸",
+   "area": "東北",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "RAB青森放送",
+   "legal_name": "青森放送",
+   "freq_mhz": 93.2,
+   "site": "野辺地陸奥湾",
+   "area": "東北",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "tbcラジオ",
+   "legal_name": "東北放送",
+   "freq_mhz": 93.5,
+   "site": "仙台",
+   "area": "東北",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "RADIO BERRY",
+   "legal_name": "エフエム栃木",
+   "freq_mhz": 76.4,
+   "site": "宇都宮",
+   "area": "関東",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "InterFM897",
+   "legal_name": "",
+   "freq_mhz": 76.5,
+   "site": "横浜",
+   "area": "関東",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM GUNMA",
+   "legal_name": "エフエム群馬",
+   "freq_mhz": 76.7,
+   "site": "草津",
+   "area": "関東",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "TOKYO FM",
+   "legal_name": "エフエム東京",
+   "freq_mhz": 76.7,
+   "site": "新島",
+   "area": "関東",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NACK5",
+   "legal_name": "エフエムナックファイブ",
+   "freq_mhz": 77.5,
+   "site": "秩父",
+   "area": "関東",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 東京",
+   "legal_name": "",
+   "freq_mhz": 77.5,
+   "site": "新島",
+   "area": "関東",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "BAYFM78",
+   "legal_name": "ベイエフエム",
+   "freq_mhz": 77.7,
+   "site": "館山",
+   "area": "関東",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM GUNMA",
+   "legal_name": "エフエム群馬",
+   "freq_mhz": 77.8,
+   "site": "沼田",
+   "area": "関東",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "BAYFM78",
+   "legal_name": "ベイエフエム",
+   "freq_mhz": 78.0,
+   "site": "千葉",
+   "area": "関東",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "RADIO BERRY",
+   "legal_name": "エフエム栃木",
+   "freq_mhz": 78.3,
+   "site": "足利",
+   "area": "関東",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "RADIO BERRY",
+   "legal_name": "エフエム栃木",
+   "freq_mhz": 78.5,
+   "site": "塩原",
+   "area": "関東",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM FUJI",
+   "legal_name": "エフエム富士",
+   "freq_mhz": 78.6,
+   "site": "三ッ峠",
+   "area": "関東",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 千葉",
+   "legal_name": "",
+   "freq_mhz": 79.0,
+   "site": "館山",
+   "area": "関東",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "RADIO BERRY",
+   "legal_name": "エフエム栃木",
+   "freq_mhz": 79.1,
+   "site": "今市",
+   "area": "関東",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "BAYFM78",
+   "legal_name": "ベイエフエム",
+   "freq_mhz": 79.3,
+   "site": "銚子",
+   "area": "関東",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM GUNMA",
+   "legal_name": "エフエム群馬",
+   "freq_mhz": 79.4,
+   "site": "利根",
+   "area": "関東",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NACK5",
+   "legal_name": "エフエムナックファイブ",
+   "freq_mhz": 79.5,
+   "site": "さいたま",
+   "area": "関東",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 東京",
+   "legal_name": "",
+   "freq_mhz": 79.6,
+   "site": "父島",
+   "area": "関東",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 東京",
+   "legal_name": "",
+   "freq_mhz": 79.6,
+   "site": "母島",
+   "area": "関東",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "BAYFM78",
+   "legal_name": "ベイエフエム",
+   "freq_mhz": 79.7,
+   "site": "白浜",
+   "area": "関東",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "TOKYO FM",
+   "legal_name": "エフエム東京",
+   "freq_mhz": 80.0,
+   "site": "東京",
+   "area": "関東",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 栃木",
+   "legal_name": "",
+   "freq_mhz": 80.3,
+   "site": "宇都宮",
+   "area": "関東",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "FMヨコハマ",
+   "legal_name": "横浜エフエム放送",
+   "freq_mhz": 80.4,
+   "site": "小田原",
+   "area": "関東",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM FUJI",
+   "legal_name": "エフエム富士",
+   "freq_mhz": 80.5,
+   "site": "身延",
+   "area": "関東",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 群馬",
+   "legal_name": "",
+   "freq_mhz": 80.5,
+   "site": "榛名",
+   "area": "関東",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "TOKYO FM",
+   "legal_name": "エフエム東京",
+   "freq_mhz": 80.5,
+   "site": "八王子",
+   "area": "関東",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 千葉",
+   "legal_name": "",
+   "freq_mhz": 80.7,
+   "site": "千葉",
+   "area": "関東",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "J-WAVE",
+   "legal_name": "",
+   "freq_mhz": 81.3,
+   "site": "東京",
+   "area": "関東",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 群馬",
+   "legal_name": "",
+   "freq_mhz": 81.6,
+   "site": "前橋",
+   "area": "関東",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 神奈川",
+   "legal_name": "",
+   "freq_mhz": 81.9,
+   "site": "横浜",
+   "area": "関東",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "FM GUNMA",
+   "legal_name": "エフエム群馬",
+   "freq_mhz": 82.0,
+   "site": "長野原",
+   "area": "関東",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM GUNMA",
+   "legal_name": "エフエム群馬",
+   "freq_mhz": 82.2,
+   "site": "榛名",
+   "area": "関東",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 東京",
+   "legal_name": "",
+   "freq_mhz": 82.5,
+   "site": "東京",
+   "area": "関東",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 千葉",
+   "legal_name": "",
+   "freq_mhz": 82.9,
+   "site": "白浜",
+   "area": "関東",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 東京",
+   "legal_name": "",
+   "freq_mhz": 82.9,
+   "site": "八丈",
+   "area": "関東",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 栃木",
+   "legal_name": "",
+   "freq_mhz": 82.9,
+   "site": "葛生",
+   "area": "関東",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 茨城",
+   "legal_name": "",
+   "freq_mhz": 82.9,
+   "site": "北茨城",
+   "area": "関東",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "FM FUJI",
+   "legal_name": "エフエム富士",
+   "freq_mhz": 83.0,
+   "site": "甲府",
+   "area": "関東",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 群馬",
+   "legal_name": "",
+   "freq_mhz": 83.1,
+   "site": "長野原",
+   "area": "関東",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 茨城",
+   "legal_name": "",
+   "freq_mhz": 83.2,
+   "site": "水戸",
+   "area": "関東",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 群馬",
+   "legal_name": "",
+   "freq_mhz": 83.4,
+   "site": "沼田",
+   "area": "関東",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 埼玉",
+   "legal_name": "",
+   "freq_mhz": 83.5,
+   "site": "秩父",
+   "area": "関東",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 神奈川",
+   "legal_name": "",
+   "freq_mhz": 83.5,
+   "site": "小田原",
+   "area": "関東",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "TOKYO FM",
+   "legal_name": "エフエム東京",
+   "freq_mhz": 83.6,
+   "site": "青梅",
+   "area": "関東",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 千葉",
+   "legal_name": "",
+   "freq_mhz": 83.7,
+   "site": "勝浦",
+   "area": "関東",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 栃木",
+   "legal_name": "",
+   "freq_mhz": 83.7,
+   "site": "足利",
+   "area": "関東",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 群馬",
+   "legal_name": "",
+   "freq_mhz": 83.8,
+   "site": "利根",
+   "area": "関東",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 千葉",
+   "legal_name": "",
+   "freq_mhz": 83.9,
+   "site": "銚子",
+   "area": "関東",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 栃木",
+   "legal_name": "",
+   "freq_mhz": 84.0,
+   "site": "今市",
+   "area": "関東",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 群馬",
+   "legal_name": "",
+   "freq_mhz": 84.2,
+   "site": "草津",
+   "area": "関東",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 茨城",
+   "legal_name": "",
+   "freq_mhz": 84.2,
+   "site": "日立",
+   "area": "関東",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "TOKYO FM",
+   "legal_name": "エフエム東京",
+   "freq_mhz": 84.3,
+   "site": "八丈",
+   "area": "関東",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "RADIO BERRY",
+   "legal_name": "エフエム栃木",
+   "freq_mhz": 84.4,
+   "site": "葛生",
+   "area": "関東",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FMヨコハマ",
+   "legal_name": "横浜エフエム放送",
+   "freq_mhz": 84.7,
+   "site": "横浜",
+   "area": "関東",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 山梨",
+   "legal_name": "",
+   "freq_mhz": 84.7,
+   "site": "身延",
+   "area": "関東",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 茨城",
+   "legal_name": "",
+   "freq_mhz": 84.8,
+   "site": "大子",
+   "area": "関東",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 栃木",
+   "legal_name": "",
+   "freq_mhz": 84.9,
+   "site": "塩原",
+   "area": "関東",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 埼玉",
+   "legal_name": "",
+   "freq_mhz": 85.1,
+   "site": "さいたま",
+   "area": "関東",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 山梨",
+   "legal_name": "",
+   "freq_mhz": 85.6,
+   "site": "甲府",
+   "area": "関東",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 群馬",
+   "legal_name": "",
+   "freq_mhz": 85.9,
+   "site": "万場",
+   "area": "関東",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 山梨",
+   "legal_name": "",
+   "freq_mhz": 86.0,
+   "site": "三ツ峠",
+   "area": "関東",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "FM GUNMA",
+   "legal_name": "エフエム群馬",
+   "freq_mhz": 86.3,
+   "site": "前橋",
+   "area": "関東",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 栃木",
+   "legal_name": "",
+   "freq_mhz": 86.5,
+   "site": "足尾",
+   "area": "関東",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "TOKYO FM",
+   "legal_name": "エフエム東京",
+   "freq_mhz": 86.6,
+   "site": "檜原",
+   "area": "関東",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FMヨコハマ",
+   "legal_name": "横浜エフエム放送",
+   "freq_mhz": 87.0,
+   "site": "磯子",
+   "area": "関東",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM GUNMA",
+   "legal_name": "エフエム群馬",
+   "freq_mhz": 87.1,
+   "site": "三波川",
+   "area": "関東",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "BAYFM78",
+   "legal_name": "ベイエフエム",
+   "freq_mhz": 87.4,
+   "site": "勝浦",
+   "area": "関東",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM GUNMA",
+   "legal_name": "エフエム群馬",
+   "freq_mhz": 88.0,
+   "site": "万場",
+   "area": "関東",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "LuckyFM 茨城放送",
+   "legal_name": "LuckyFM茨城放送",
+   "freq_mhz": 88.1,
+   "site": "高鈴山",
+   "area": "関東",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "LuckyFM 茨城放送",
+   "legal_name": "LuckyFM茨城放送",
+   "freq_mhz": 88.1,
+   "site": "宝篋山",
+   "area": "関東",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "J-WAVE",
+   "legal_name": "",
+   "freq_mhz": 88.3,
+   "site": "港",
+   "area": "関東",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 群馬",
+   "legal_name": "",
+   "freq_mhz": 89.0,
+   "site": "三波川",
+   "area": "関東",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "InterFM897",
+   "legal_name": "",
+   "freq_mhz": 89.7,
+   "site": "東京",
+   "area": "関東",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "TBSラジオ",
+   "legal_name": "",
+   "freq_mhz": 90.5,
+   "site": "墨田",
+   "area": "関東",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "YBSラジオ",
+   "legal_name": "山梨放送",
+   "freq_mhz": 90.9,
+   "site": "甲府",
+   "area": "関東",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "YBSラジオ",
+   "legal_name": "山梨放送",
+   "freq_mhz": 90.9,
+   "site": "三ッ峠",
+   "area": "関東",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "YBSラジオ",
+   "legal_name": "山梨放送",
+   "freq_mhz": 90.9,
+   "site": "身延",
+   "area": "関東",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "CRT栃木放送",
+   "legal_name": "栃木放送",
+   "freq_mhz": 91.1,
+   "site": "足利",
+   "area": "関東",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "文化放送",
+   "legal_name": "",
+   "freq_mhz": 91.6,
+   "site": "墨田",
+   "area": "関東",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "ラジオ日本",
+   "legal_name": "アール・エフ・ラジオ日本",
+   "freq_mhz": 92.4,
+   "site": "横浜",
+   "area": "関東",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "ニッポン放送",
+   "legal_name": "",
+   "freq_mhz": 93.0,
+   "site": "墨田",
+   "area": "関東",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "CRT栃木放送",
+   "legal_name": "栃木放送",
+   "freq_mhz": 93.4,
+   "site": "葛生",
+   "area": "関東",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "CRT栃木放送",
+   "legal_name": "栃木放送",
+   "freq_mhz": 93.4,
+   "site": "今市",
+   "area": "関東",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "CRT栃木放送",
+   "legal_name": "栃木放送",
+   "freq_mhz": 93.4,
+   "site": "塩原",
+   "area": "関東",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "CRT栃木放送",
+   "legal_name": "栃木放送",
+   "freq_mhz": 94.1,
+   "site": "宇都宮",
+   "area": "関東",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "LuckyFM 茨城放送",
+   "legal_name": "LuckyFM茨城放送",
+   "freq_mhz": 94.6,
+   "site": "加波山",
+   "area": "関東",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 長野",
+   "legal_name": "",
+   "freq_mhz": 77.4,
+   "site": "飯田",
+   "area": "信越",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "FM NIIGATA",
+   "legal_name": "エフエムラジオ新潟",
+   "freq_mhz": 77.5,
+   "site": "新潟",
+   "area": "信越",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM長野",
+   "legal_name": "長野エフエム放送",
+   "freq_mhz": 78.1,
+   "site": "聖",
+   "area": "信越",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM NIIGATA",
+   "legal_name": "エフエムラジオ新潟",
+   "freq_mhz": 79.2,
+   "site": "糸魚川",
+   "area": "信越",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM長野",
+   "legal_name": "長野エフエム放送",
+   "freq_mhz": 79.7,
+   "site": "長野",
+   "area": "信越",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM NIIGATA",
+   "legal_name": "エフエムラジオ新潟",
+   "freq_mhz": 80.2,
+   "site": "津川",
+   "area": "信越",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM NIIGATA",
+   "legal_name": "エフエムラジオ新潟",
+   "freq_mhz": 80.2,
+   "site": "津南",
+   "area": "信越",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM長野",
+   "legal_name": "長野エフエム放送",
+   "freq_mhz": 80.3,
+   "site": "小海",
+   "area": "信越",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM NIIGATA",
+   "legal_name": "エフエムラジオ新潟",
+   "freq_mhz": 80.4,
+   "site": "安塚",
+   "area": "信越",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM長野",
+   "legal_name": "長野エフエム放送",
+   "freq_mhz": 81.5,
+   "site": "木曽福島",
+   "area": "信越",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM NIIGATA",
+   "legal_name": "エフエムラジオ新潟",
+   "freq_mhz": 81.7,
+   "site": "越後湯沢",
+   "area": "信越",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM長野",
+   "legal_name": "長野エフエム放送",
+   "freq_mhz": 81.8,
+   "site": "岡谷諏訪",
+   "area": "信越",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM長野",
+   "legal_name": "長野エフエム放送",
+   "freq_mhz": 81.8,
+   "site": "飯山野沢",
+   "area": "信越",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM長野",
+   "legal_name": "長野エフエム放送",
+   "freq_mhz": 81.8,
+   "site": "大鹿",
+   "area": "信越",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 長野",
+   "legal_name": "",
+   "freq_mhz": 82.0,
+   "site": "南木曽",
+   "area": "信越",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 新潟",
+   "legal_name": "",
+   "freq_mhz": 82.3,
+   "site": "新潟",
+   "area": "信越",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 長野",
+   "legal_name": "",
+   "freq_mhz": 82.8,
+   "site": "飯山",
+   "area": "信越",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 長野",
+   "legal_name": "",
+   "freq_mhz": 82.8,
+   "site": "信濃阿南",
+   "area": "信越",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 長野",
+   "legal_name": "",
+   "freq_mhz": 82.9,
+   "site": "木曽福島",
+   "area": "信越",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 長野",
+   "legal_name": "",
+   "freq_mhz": 83.0,
+   "site": "聖",
+   "area": "信越",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 長野",
+   "legal_name": "",
+   "freq_mhz": 83.2,
+   "site": "木祖楢川",
+   "area": "信越",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "FM長野",
+   "legal_name": "長野エフエム放送",
+   "freq_mhz": 83.3,
+   "site": "善光寺平",
+   "area": "信越",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 長野",
+   "legal_name": "",
+   "freq_mhz": 83.3,
+   "site": "白馬",
+   "area": "信越",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 新潟",
+   "legal_name": "",
+   "freq_mhz": 83.5,
+   "site": "大和",
+   "area": "信越",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 長野",
+   "legal_name": "",
+   "freq_mhz": 84.0,
+   "site": "長野",
+   "area": "信越",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 新潟",
+   "legal_name": "",
+   "freq_mhz": 84.4,
+   "site": "松代",
+   "area": "信越",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "FM NIIGATA",
+   "legal_name": "エフエムラジオ新潟",
+   "freq_mhz": 84.7,
+   "site": "高田",
+   "area": "信越",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 長野",
+   "legal_name": "",
+   "freq_mhz": 84.7,
+   "site": "小谷",
+   "area": "信越",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 長野",
+   "legal_name": "",
+   "freq_mhz": 84.8,
+   "site": "松本",
+   "area": "信越",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 長野",
+   "legal_name": "",
+   "freq_mhz": 84.9,
+   "site": "小海",
+   "area": "信越",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 長野",
+   "legal_name": "",
+   "freq_mhz": 84.9,
+   "site": "栄村",
+   "area": "信越",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 長野",
+   "legal_name": "",
+   "freq_mhz": 85.0,
+   "site": "高遠",
+   "area": "信越",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 長野",
+   "legal_name": "",
+   "freq_mhz": 85.0,
+   "site": "大鹿",
+   "area": "信越",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 新潟",
+   "legal_name": "",
+   "freq_mhz": 85.1,
+   "site": "糸魚川",
+   "area": "信越",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 新潟",
+   "legal_name": "",
+   "freq_mhz": 85.1,
+   "site": "津川",
+   "area": "信越",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 長野",
+   "legal_name": "",
+   "freq_mhz": 85.1,
+   "site": "遠山",
+   "area": "信越",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 新潟",
+   "legal_name": "",
+   "freq_mhz": 85.2,
+   "site": "安塚",
+   "area": "信越",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 新潟",
+   "legal_name": "",
+   "freq_mhz": 85.3,
+   "site": "越後湯沢",
+   "area": "信越",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 長野",
+   "legal_name": "",
+   "freq_mhz": 85.3,
+   "site": "岡谷諏訪",
+   "area": "信越",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 長野",
+   "legal_name": "",
+   "freq_mhz": 85.4,
+   "site": "牟礼",
+   "area": "信越",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 長野",
+   "legal_name": "",
+   "freq_mhz": 85.4,
+   "site": "奈川",
+   "area": "信越",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 新潟",
+   "legal_name": "",
+   "freq_mhz": 85.5,
+   "site": "能生",
+   "area": "信越",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 新潟",
+   "legal_name": "",
+   "freq_mhz": 85.6,
+   "site": "府屋",
+   "area": "信越",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 長野",
+   "legal_name": "",
+   "freq_mhz": 85.6,
+   "site": "倉本",
+   "area": "信越",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 長野",
+   "legal_name": "",
+   "freq_mhz": 85.7,
+   "site": "善光寺平",
+   "area": "信越",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 長野",
+   "legal_name": "",
+   "freq_mhz": 85.7,
+   "site": "辰野",
+   "area": "信越",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 長野",
+   "legal_name": "",
+   "freq_mhz": 85.9,
+   "site": "天龍平岡",
+   "area": "信越",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 新潟",
+   "legal_name": "",
+   "freq_mhz": 86.0,
+   "site": "高田",
+   "area": "信越",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 新潟",
+   "legal_name": "",
+   "freq_mhz": 86.1,
+   "site": "高千",
+   "area": "信越",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "FM長野",
+   "legal_name": "長野エフエム放送",
+   "freq_mhz": 86.4,
+   "site": "松本",
+   "area": "信越",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM NIIGATA",
+   "legal_name": "エフエムラジオ新潟",
+   "freq_mhz": 86.5,
+   "site": "大和",
+   "area": "信越",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 新潟",
+   "legal_name": "",
+   "freq_mhz": 86.9,
+   "site": "両津",
+   "area": "信越",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 新潟",
+   "legal_name": "",
+   "freq_mhz": 87.0,
+   "site": "津南",
+   "area": "信越",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 新潟",
+   "legal_name": "",
+   "freq_mhz": 87.5,
+   "site": "相川",
+   "area": "信越",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "FM長野",
+   "legal_name": "長野エフエム放送",
+   "freq_mhz": 88.3,
+   "site": "飯田",
+   "area": "信越",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 長野",
+   "legal_name": "",
+   "freq_mhz": 89.8,
+   "site": "戸倉上山田",
+   "area": "信越",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 長野",
+   "legal_name": "",
+   "freq_mhz": 89.8,
+   "site": "鬼無里",
+   "area": "信越",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "SBCラジオ",
+   "legal_name": "信越放送",
+   "freq_mhz": 91.2,
+   "site": "飯山野沢",
+   "area": "信越",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "SBCラジオ",
+   "legal_name": "信越放送",
+   "freq_mhz": 91.2,
+   "site": "善光寺平",
+   "area": "信越",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "SBCラジオ",
+   "legal_name": "信越放送",
+   "freq_mhz": 91.2,
+   "site": "聖",
+   "area": "信越",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "SBCラジオ",
+   "legal_name": "信越放送",
+   "freq_mhz": 91.2,
+   "site": "小海",
+   "area": "信越",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "SBCラジオ",
+   "legal_name": "信越放送",
+   "freq_mhz": 92.2,
+   "site": "長野",
+   "area": "信越",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "BSNラジオ",
+   "legal_name": "新潟放送",
+   "freq_mhz": 92.7,
+   "site": "新潟",
+   "area": "信越",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "SBCラジオ",
+   "legal_name": "信越放送",
+   "freq_mhz": 94.2,
+   "site": "高ボッチ",
+   "area": "信越",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "SBCラジオ",
+   "legal_name": "信越放送",
+   "freq_mhz": 94.2,
+   "site": "飯田",
+   "area": "信越",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "BSNラジオ",
+   "legal_name": "新潟放送",
+   "freq_mhz": 94.8,
+   "site": "高田",
+   "area": "信越",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "BSNラジオ",
+   "legal_name": "新潟放送",
+   "freq_mhz": 94.8,
+   "site": "大和",
+   "area": "信越",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "BSNラジオ",
+   "legal_name": "新潟放送",
+   "freq_mhz": 94.8,
+   "site": "糸魚川",
+   "area": "信越",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM福井",
+   "legal_name": "福井エフエム放送",
+   "freq_mhz": 76.1,
+   "site": "福井",
+   "area": "北陸",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "MROラジオ",
+   "legal_name": "北陸放送",
+   "freq_mhz": 76.7,
+   "site": "珠洲",
+   "area": "北陸",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "MROラジオ",
+   "legal_name": "北陸放送",
+   "freq_mhz": 77.1,
+   "site": "輪島",
+   "area": "北陸",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "エフエム石川",
+   "legal_name": "",
+   "freq_mhz": 78.4,
+   "site": "七尾",
+   "area": "北陸",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM福井",
+   "legal_name": "福井エフエム放送",
+   "freq_mhz": 80.3,
+   "site": "美浜",
+   "area": "北陸",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "エフエム石川",
+   "legal_name": "",
+   "freq_mhz": 80.5,
+   "site": "金沢",
+   "area": "北陸",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 富山",
+   "legal_name": "",
+   "freq_mhz": 81.5,
+   "site": "富山",
+   "area": "北陸",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "エフエム石川",
+   "legal_name": "",
+   "freq_mhz": 81.9,
+   "site": "珠洲",
+   "area": "北陸",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM福井",
+   "legal_name": "福井エフエム放送",
+   "freq_mhz": 82.0,
+   "site": "高浜",
+   "area": "北陸",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 石川",
+   "legal_name": "",
+   "freq_mhz": 82.2,
+   "site": "金沢",
+   "area": "北陸",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "FM福井",
+   "legal_name": "福井エフエム放送",
+   "freq_mhz": 82.5,
+   "site": "小浜",
+   "area": "北陸",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FMとやま",
+   "legal_name": "富山エフエム放送",
+   "freq_mhz": 82.7,
+   "site": "富山",
+   "area": "北陸",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 石川",
+   "legal_name": "",
+   "freq_mhz": 83.0,
+   "site": "羽咋",
+   "area": "北陸",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 石川",
+   "legal_name": "",
+   "freq_mhz": 83.2,
+   "site": "珠洲",
+   "area": "北陸",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 福井",
+   "legal_name": "",
+   "freq_mhz": 83.4,
+   "site": "福井",
+   "area": "北陸",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 石川",
+   "legal_name": "",
+   "freq_mhz": 83.6,
+   "site": "輪島町野",
+   "area": "北陸",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 石川",
+   "legal_name": "",
+   "freq_mhz": 83.9,
+   "site": "輪島",
+   "area": "北陸",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 石川",
+   "legal_name": "",
+   "freq_mhz": 84.2,
+   "site": "山中",
+   "area": "北陸",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 石川",
+   "legal_name": "",
+   "freq_mhz": 84.4,
+   "site": "七尾",
+   "area": "北陸",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "FMとやま",
+   "legal_name": "富山エフエム放送",
+   "freq_mhz": 84.6,
+   "site": "福光",
+   "area": "北陸",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM福井",
+   "legal_name": "福井エフエム放送",
+   "freq_mhz": 84.7,
+   "site": "大野",
+   "area": "北陸",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 石川",
+   "legal_name": "",
+   "freq_mhz": 84.8,
+   "site": "東門前",
+   "area": "北陸",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 富山",
+   "legal_name": "",
+   "freq_mhz": 84.9,
+   "site": "宇奈月",
+   "area": "北陸",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 福井",
+   "legal_name": "",
+   "freq_mhz": 84.9,
+   "site": "敦賀",
+   "area": "北陸",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 石川",
+   "legal_name": "",
+   "freq_mhz": 85.3,
+   "site": "富来",
+   "area": "北陸",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "エフエム石川",
+   "legal_name": "",
+   "freq_mhz": 85.5,
+   "site": "羽咋",
+   "area": "北陸",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 福井",
+   "legal_name": "",
+   "freq_mhz": 85.7,
+   "site": "越前",
+   "area": "北陸",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "FMとやま",
+   "legal_name": "富山エフエム放送",
+   "freq_mhz": 85.8,
+   "site": "宇奈月",
+   "area": "北陸",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 福井",
+   "legal_name": "",
+   "freq_mhz": 85.9,
+   "site": "美浜",
+   "area": "北陸",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 福井",
+   "legal_name": "",
+   "freq_mhz": 86.0,
+   "site": "大野",
+   "area": "北陸",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "FM福井",
+   "legal_name": "福井エフエム放送",
+   "freq_mhz": 86.3,
+   "site": "三国",
+   "area": "北陸",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM福井",
+   "legal_name": "福井エフエム放送",
+   "freq_mhz": 86.4,
+   "site": "敦賀",
+   "area": "北陸",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 福井",
+   "legal_name": "",
+   "freq_mhz": 87.8,
+   "site": "小浜",
+   "area": "北陸",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "MROラジオ",
+   "legal_name": "北陸放送",
+   "freq_mhz": 88.6,
+   "site": "七尾",
+   "area": "北陸",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 福井",
+   "legal_name": "",
+   "freq_mhz": 88.8,
+   "site": "高浜",
+   "area": "北陸",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "エフエム石川",
+   "legal_name": "",
+   "freq_mhz": 89.9,
+   "site": "輪島",
+   "area": "北陸",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "KNBラジオ",
+   "legal_name": "北日本放送",
+   "freq_mhz": 90.2,
+   "site": "富山",
+   "area": "北陸",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "MROラジオ",
+   "legal_name": "北陸放送",
+   "freq_mhz": 93.1,
+   "site": "羽咋",
+   "area": "北陸",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "FBCラジオ",
+   "legal_name": "福井放送",
+   "freq_mhz": 93.6,
+   "site": "小浜",
+   "area": "北陸",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "FBCラジオ",
+   "legal_name": "福井放送",
+   "freq_mhz": 93.6,
+   "site": "美浜",
+   "area": "北陸",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "FBCラジオ",
+   "legal_name": "福井放送",
+   "freq_mhz": 93.6,
+   "site": "敦賀",
+   "area": "北陸",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "FBCラジオ",
+   "legal_name": "福井放送",
+   "freq_mhz": 93.6,
+   "site": "高浜",
+   "area": "北陸",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "FBCラジオ",
+   "legal_name": "福井放送",
+   "freq_mhz": 93.6,
+   "site": "三国",
+   "area": "北陸",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "MROラジオ",
+   "legal_name": "北陸放送",
+   "freq_mhz": 94.0,
+   "site": "金沢",
+   "area": "北陸",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "FBCラジオ",
+   "legal_name": "福井放送",
+   "freq_mhz": 94.6,
+   "site": "足羽",
+   "area": "北陸",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "FBCラジオ",
+   "legal_name": "福井放送",
+   "freq_mhz": 94.6,
+   "site": "大野",
+   "area": "北陸",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "レディオキューブ FM三重",
+   "legal_name": "三重エフエム放送",
+   "freq_mhz": 76.8,
+   "site": "輪内",
+   "area": "東海",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "ZIP-FM",
+   "legal_name": "",
+   "freq_mhz": 77.1,
+   "site": "豊橋",
+   "area": "東海",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "ZIP-FM",
+   "legal_name": "",
+   "freq_mhz": 77.8,
+   "site": "名古屋",
+   "area": "東海",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "レディオキューブ FM三重",
+   "legal_name": "三重エフエム放送",
+   "freq_mhz": 78.1,
+   "site": "磯部",
+   "area": "東海",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM GIFU",
+   "legal_name": "エフエム岐阜",
+   "freq_mhz": 78.3,
+   "site": "中津川",
+   "area": "東海",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "K-MIX",
+   "legal_name": "静岡エフエム放送",
+   "freq_mhz": 78.4,
+   "site": "浜松",
+   "area": "東海",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "K-MIX",
+   "legal_name": "静岡エフエム放送",
+   "freq_mhz": 78.6,
+   "site": "東伊豆",
+   "area": "東海",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "レディオキューブ FM三重",
+   "legal_name": "三重エフエム放送",
+   "freq_mhz": 78.9,
+   "site": "津",
+   "area": "東海",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "K-MIX",
+   "legal_name": "静岡エフエム放送",
+   "freq_mhz": 79.2,
+   "site": "静岡",
+   "area": "東海",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM GIFU",
+   "legal_name": "エフエム岐阜",
+   "freq_mhz": 79.3,
+   "site": "郡上八幡",
+   "area": "東海",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM GIFU",
+   "legal_name": "エフエム岐阜",
+   "freq_mhz": 79.3,
+   "site": "神岡流葉",
+   "area": "東海",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM GIFU",
+   "legal_name": "エフエム岐阜",
+   "freq_mhz": 80.0,
+   "site": "岐阜",
+   "area": "東海",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM GIFU",
+   "legal_name": "エフエム岐阜",
+   "freq_mhz": 80.0,
+   "site": "高山",
+   "area": "東海",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "K-MIX",
+   "legal_name": "静岡エフエム放送",
+   "freq_mhz": 80.3,
+   "site": "掛川",
+   "area": "東海",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "レディオキューブ FM三重",
+   "legal_name": "三重エフエム放送",
+   "freq_mhz": 80.4,
+   "site": "尾鷲",
+   "area": "東海",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "K-MIX",
+   "legal_name": "静岡エフエム放送",
+   "freq_mhz": 80.5,
+   "site": "下田",
+   "area": "東海",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM AICHI",
+   "legal_name": "エフエム愛知／ FM-AICHI",
+   "freq_mhz": 80.7,
+   "site": "名古屋",
+   "area": "東海",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM AICHI",
+   "legal_name": "エフエム愛知／ FM-AICHI",
+   "freq_mhz": 81.3,
+   "site": "豊橋",
+   "area": "東海",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 三重",
+   "legal_name": "",
+   "freq_mhz": 81.4,
+   "site": "宮川",
+   "area": "東海",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "FM GIFU",
+   "legal_name": "エフエム岐阜",
+   "freq_mhz": 81.5,
+   "site": "土岐南",
+   "area": "東海",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "K-MIX",
+   "legal_name": "静岡エフエム放送",
+   "freq_mhz": 81.6,
+   "site": "御殿場",
+   "area": "東海",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 三重",
+   "legal_name": "",
+   "freq_mhz": 81.8,
+   "site": "津",
+   "area": "東海",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "FM GIFU",
+   "legal_name": "エフエム岐阜",
+   "freq_mhz": 82.1,
+   "site": "下呂",
+   "area": "東海",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 静岡",
+   "legal_name": "",
+   "freq_mhz": 82.1,
+   "site": "浜松",
+   "area": "東海",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 静岡",
+   "legal_name": "",
+   "freq_mhz": 82.2,
+   "site": "河津",
+   "area": "東海",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 愛知",
+   "legal_name": "",
+   "freq_mhz": 82.5,
+   "site": "名古屋",
+   "area": "東海",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 三重",
+   "legal_name": "",
+   "freq_mhz": 82.8,
+   "site": "磯部",
+   "area": "東海",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "K-MIX",
+   "legal_name": "静岡エフエム放送",
+   "freq_mhz": 83.0,
+   "site": "熱海",
+   "area": "東海",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 静岡",
+   "legal_name": "",
+   "freq_mhz": 83.0,
+   "site": "島田",
+   "area": "東海",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 岐阜",
+   "legal_name": "",
+   "freq_mhz": 83.1,
+   "site": "飛騨金山",
+   "area": "東海",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "レディオキューブ FM三重",
+   "legal_name": "三重エフエム放送",
+   "freq_mhz": 83.2,
+   "site": "鳥羽",
+   "area": "東海",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "レディオキューブ FM三重",
+   "legal_name": "三重エフエム放送",
+   "freq_mhz": 83.2,
+   "site": "大宮",
+   "area": "東海",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 愛知",
+   "legal_name": "",
+   "freq_mhz": 83.3,
+   "site": "設楽",
+   "area": "東海",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 静岡",
+   "legal_name": "",
+   "freq_mhz": 83.3,
+   "site": "東伊豆",
+   "area": "東海",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 静岡",
+   "legal_name": "",
+   "freq_mhz": 83.4,
+   "site": "中川根",
+   "area": "東海",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 岐阜",
+   "legal_name": "",
+   "freq_mhz": 83.6,
+   "site": "岐阜",
+   "area": "東海",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 静岡",
+   "legal_name": "",
+   "freq_mhz": 83.8,
+   "site": "御殿場",
+   "area": "東海",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 静岡",
+   "legal_name": "",
+   "freq_mhz": 83.8,
+   "site": "東佐久間",
+   "area": "東海",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 三重",
+   "legal_name": "",
+   "freq_mhz": 84.1,
+   "site": "大宮",
+   "area": "東海",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 静岡",
+   "legal_name": "",
+   "freq_mhz": 84.1,
+   "site": "下田",
+   "area": "東海",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 静岡",
+   "legal_name": "",
+   "freq_mhz": 84.1,
+   "site": "水窪",
+   "area": "東海",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 静岡",
+   "legal_name": "",
+   "freq_mhz": 84.2,
+   "site": "熱海",
+   "area": "東海",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 岐阜",
+   "legal_name": "",
+   "freq_mhz": 84.3,
+   "site": "宮",
+   "area": "東海",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 三重",
+   "legal_name": "",
+   "freq_mhz": 84.4,
+   "site": "名張",
+   "area": "東海",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 岐阜",
+   "legal_name": "",
+   "freq_mhz": 84.4,
+   "site": "下呂",
+   "area": "東海",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 三重",
+   "legal_name": "",
+   "freq_mhz": 84.5,
+   "site": "尾鷲",
+   "area": "東海",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 静岡",
+   "legal_name": "",
+   "freq_mhz": 84.5,
+   "site": "春野",
+   "area": "東海",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 三重",
+   "legal_name": "",
+   "freq_mhz": 84.7,
+   "site": "鳥羽",
+   "area": "東海",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 三重",
+   "legal_name": "",
+   "freq_mhz": 84.7,
+   "site": "輪内",
+   "area": "東海",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 岐阜",
+   "legal_name": "",
+   "freq_mhz": 84.8,
+   "site": "土岐南",
+   "area": "東海",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 静岡",
+   "legal_name": "",
+   "freq_mhz": 84.8,
+   "site": "佐久間",
+   "area": "東海",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 三重",
+   "legal_name": "",
+   "freq_mhz": 84.9,
+   "site": "熊野",
+   "area": "東海",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 静岡",
+   "legal_name": "",
+   "freq_mhz": 84.9,
+   "site": "芝川",
+   "area": "東海",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "レディオキューブ FM三重",
+   "legal_name": "三重エフエム放送",
+   "freq_mhz": 84.9,
+   "site": "宮川",
+   "area": "東海",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "レディオキューブ FM三重",
+   "legal_name": "三重エフエム放送",
+   "freq_mhz": 85.0,
+   "site": "北勢",
+   "area": "東海",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 岐阜",
+   "legal_name": "",
+   "freq_mhz": 85.3,
+   "site": "神岡",
+   "area": "東海",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 愛知",
+   "legal_name": "",
+   "freq_mhz": 85.3,
+   "site": "豊橋",
+   "area": "東海",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 静岡",
+   "legal_name": "",
+   "freq_mhz": 85.3,
+   "site": "伊豆長岡",
+   "area": "東海",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "レディオキューブ FM三重",
+   "legal_name": "三重エフエム放送",
+   "freq_mhz": 85.5,
+   "site": "名張",
+   "area": "東海",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 岐阜",
+   "legal_name": "",
+   "freq_mhz": 85.6,
+   "site": "郡上八幡",
+   "area": "東海",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 岐阜",
+   "legal_name": "",
+   "freq_mhz": 85.6,
+   "site": "小坂",
+   "area": "東海",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "レディオキューブ FM三重",
+   "legal_name": "三重エフエム放送",
+   "freq_mhz": 85.7,
+   "site": "熊野",
+   "area": "東海",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "K-MIX",
+   "legal_name": "静岡エフエム放送",
+   "freq_mhz": 85.8,
+   "site": "富士",
+   "area": "東海",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 岐阜",
+   "legal_name": "",
+   "freq_mhz": 85.8,
+   "site": "中津川",
+   "area": "東海",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "K-MIX",
+   "legal_name": "静岡エフエム放送",
+   "freq_mhz": 85.9,
+   "site": "島田",
+   "area": "東海",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 岐阜",
+   "legal_name": "",
+   "freq_mhz": 86.1,
+   "site": "高山",
+   "area": "東海",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "K-MIX",
+   "legal_name": "静岡エフエム放送",
+   "freq_mhz": 86.6,
+   "site": "伊豆長岡",
+   "area": "東海",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 静岡",
+   "legal_name": "",
+   "freq_mhz": 88.8,
+   "site": "静岡",
+   "area": "東海",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "SBSラジオ",
+   "legal_name": "静岡放送",
+   "freq_mhz": 90.1,
+   "site": "三島",
+   "area": "東海",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "SBSラジオ",
+   "legal_name": "静岡放送",
+   "freq_mhz": 90.1,
+   "site": "下田",
+   "area": "東海",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "ぎふチャン",
+   "legal_name": "岐阜放送",
+   "freq_mhz": 90.4,
+   "site": "上加納山",
+   "area": "東海",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "東海ラジオ",
+   "legal_name": "",
+   "freq_mhz": 91.0,
+   "site": "豊橋",
+   "area": "東海",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "CBCラジオ",
+   "legal_name": "",
+   "freq_mhz": 91.8,
+   "site": "豊橋",
+   "area": "東海",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "SBSラジオ",
+   "legal_name": "静岡放送",
+   "freq_mhz": 92.1,
+   "site": "御殿場",
+   "area": "東海",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "東海ラジオ",
+   "legal_name": "",
+   "freq_mhz": 92.9,
+   "site": "三国山",
+   "area": "東海",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "CBCラジオ",
+   "legal_name": "",
+   "freq_mhz": 93.7,
+   "site": "三国山",
+   "area": "東海",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "SBSラジオ",
+   "legal_name": "静岡放送",
+   "freq_mhz": 93.9,
+   "site": "高草",
+   "area": "東海",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "SBSラジオ",
+   "legal_name": "静岡放送",
+   "freq_mhz": 94.7,
+   "site": "浜松",
+   "area": "東海",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "SBSラジオ",
+   "legal_name": "静岡放送",
+   "freq_mhz": 94.7,
+   "site": "富士富士宮",
+   "area": "東海",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM COCOLO",
+   "legal_name": "",
+   "freq_mhz": 76.5,
+   "site": "大阪",
+   "area": "近畿",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "e-radio",
+   "legal_name": "エフエム滋賀",
+   "freq_mhz": 77.0,
+   "site": "大津",
+   "area": "近畿",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM大阪",
+   "legal_name": "エフエム大阪",
+   "freq_mhz": 77.4,
+   "site": "中能勢",
+   "area": "近畿",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "Kiss FM KOBE",
+   "legal_name": "兵庫エフエム放送",
+   "freq_mhz": 77.6,
+   "site": "姫路",
+   "area": "近畿",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM802",
+   "legal_name": "",
+   "freq_mhz": 78.3,
+   "site": "中能勢",
+   "area": "近畿",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "Kiss FM KOBE",
+   "legal_name": "兵庫エフエム放送",
+   "freq_mhz": 78.3,
+   "site": "氷上",
+   "area": "近畿",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "Kiss FM KOBE",
+   "legal_name": "兵庫エフエム放送",
+   "freq_mhz": 78.4,
+   "site": "香住",
+   "area": "近畿",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "α-STATION",
+   "legal_name": "エフエム京都",
+   "freq_mhz": 79.8,
+   "site": "宮津",
+   "area": "近畿",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "Kiss FM KOBE",
+   "legal_name": "兵庫エフエム放送",
+   "freq_mhz": 79.9,
+   "site": "淡路三原",
+   "area": "近畿",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM802",
+   "legal_name": "",
+   "freq_mhz": 80.2,
+   "site": "大阪",
+   "area": "近畿",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "α-STATION",
+   "legal_name": "エフエム京都",
+   "freq_mhz": 81.3,
+   "site": "福知山",
+   "area": "近畿",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 和歌山",
+   "legal_name": "",
+   "freq_mhz": 81.8,
+   "site": "田辺",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 京都",
+   "legal_name": "",
+   "freq_mhz": 81.9,
+   "site": "綾部八津合",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 兵庫",
+   "legal_name": "",
+   "freq_mhz": 82.0,
+   "site": "温泉",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "e-radio",
+   "legal_name": "エフエム滋賀",
+   "freq_mhz": 82.2,
+   "site": "長浜",
+   "area": "近畿",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 奈良",
+   "legal_name": "",
+   "freq_mhz": 82.3,
+   "site": "山添",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 兵庫",
+   "legal_name": "",
+   "freq_mhz": 82.4,
+   "site": "八鹿",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 大阪",
+   "legal_name": "",
+   "freq_mhz": 82.5,
+   "site": "中能勢",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 兵庫",
+   "legal_name": "",
+   "freq_mhz": 82.7,
+   "site": "波賀",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 和歌山",
+   "legal_name": "",
+   "freq_mhz": 82.7,
+   "site": "紀伊清水西",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 京都",
+   "legal_name": "",
+   "freq_mhz": 82.8,
+   "site": "京都",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 兵庫",
+   "legal_name": "",
+   "freq_mhz": 82.8,
+   "site": "相生",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 兵庫",
+   "legal_name": "",
+   "freq_mhz": 82.9,
+   "site": "淡路三原",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 兵庫",
+   "legal_name": "",
+   "freq_mhz": 83.0,
+   "site": "山崎",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 兵庫",
+   "legal_name": "",
+   "freq_mhz": 83.1,
+   "site": "川西北",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 滋賀",
+   "legal_name": "",
+   "freq_mhz": 83.1,
+   "site": "山東",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 兵庫",
+   "legal_name": "",
+   "freq_mhz": 83.2,
+   "site": "香住",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 兵庫",
+   "legal_name": "",
+   "freq_mhz": 83.2,
+   "site": "赤穂",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 和歌山",
+   "legal_name": "",
+   "freq_mhz": 83.2,
+   "site": "九度山",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 奈良",
+   "legal_name": "",
+   "freq_mhz": 83.3,
+   "site": "川上東川",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 奈良",
+   "legal_name": "",
+   "freq_mhz": 83.4,
+   "site": "東生駒",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 奈良",
+   "legal_name": "",
+   "freq_mhz": 83.4,
+   "site": "下北山",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 京都",
+   "legal_name": "",
+   "freq_mhz": 83.5,
+   "site": "峰山",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 京都",
+   "legal_name": "",
+   "freq_mhz": 83.6,
+   "site": "丹波美山",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 兵庫",
+   "legal_name": "",
+   "freq_mhz": 83.6,
+   "site": "上郡",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 奈良",
+   "legal_name": "",
+   "freq_mhz": 83.7,
+   "site": "栃原",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 兵庫",
+   "legal_name": "",
+   "freq_mhz": 83.8,
+   "site": "篠山",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 兵庫",
+   "legal_name": "",
+   "freq_mhz": 83.8,
+   "site": "千種",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 和歌山",
+   "legal_name": "",
+   "freq_mhz": 83.8,
+   "site": "新宮",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 兵庫",
+   "legal_name": "",
+   "freq_mhz": 83.9,
+   "site": "城崎",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 兵庫",
+   "legal_name": "",
+   "freq_mhz": 83.9,
+   "site": "西宮山口",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 和歌山",
+   "legal_name": "",
+   "freq_mhz": 83.9,
+   "site": "御坊",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 滋賀",
+   "legal_name": "",
+   "freq_mhz": 84.0,
+   "site": "大津",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 京都",
+   "legal_name": "",
+   "freq_mhz": 84.2,
+   "site": "舞鶴",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 兵庫",
+   "legal_name": "",
+   "freq_mhz": 84.2,
+   "site": "姫路",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 兵庫",
+   "legal_name": "",
+   "freq_mhz": 84.4,
+   "site": "村岡",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 和歌山",
+   "legal_name": "",
+   "freq_mhz": 84.4,
+   "site": "本宮",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 兵庫",
+   "legal_name": "",
+   "freq_mhz": 84.5,
+   "site": "和田山",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 和歌山",
+   "legal_name": "",
+   "freq_mhz": 84.7,
+   "site": "和歌山",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 奈良",
+   "legal_name": "",
+   "freq_mhz": 84.7,
+   "site": "十津川小原",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 京都",
+   "legal_name": "",
+   "freq_mhz": 84.8,
+   "site": "福知山",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 奈良",
+   "legal_name": "",
+   "freq_mhz": 84.8,
+   "site": "御杖土屋原",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "FM大阪",
+   "legal_name": "エフエム大阪",
+   "freq_mhz": 85.1,
+   "site": "大阪",
+   "area": "近畿",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 和歌山",
+   "legal_name": "",
+   "freq_mhz": 85.2,
+   "site": "すさみ",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 兵庫",
+   "legal_name": "",
+   "freq_mhz": 85.3,
+   "site": "佐用",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 和歌山",
+   "legal_name": "",
+   "freq_mhz": 85.4,
+   "site": "串本",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "α-STATION",
+   "legal_name": "エフエム京都",
+   "freq_mhz": 85.4,
+   "site": "峰山",
+   "area": "近畿",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 兵庫",
+   "legal_name": "",
+   "freq_mhz": 85.9,
+   "site": "生野",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 京都",
+   "legal_name": "",
+   "freq_mhz": 86.1,
+   "site": "宮津",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 兵庫",
+   "legal_name": "",
+   "freq_mhz": 86.5,
+   "site": "神戸",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "Kiss FM KOBE",
+   "legal_name": "兵庫エフエム放送",
+   "freq_mhz": 87.1,
+   "site": "北阪神",
+   "area": "近畿",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "α-STATION",
+   "legal_name": "エフエム京都",
+   "freq_mhz": 87.2,
+   "site": "舞鶴",
+   "area": "近畿",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 奈良",
+   "legal_name": "",
+   "freq_mhz": 87.4,
+   "site": "奈良",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "Kiss FM KOBE",
+   "legal_name": "兵庫エフエム放送",
+   "freq_mhz": 87.9,
+   "site": "城崎",
+   "area": "近畿",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 京都",
+   "legal_name": "",
+   "freq_mhz": 87.9,
+   "site": "京北",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 大阪",
+   "legal_name": "",
+   "freq_mhz": 88.1,
+   "site": "大阪",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 兵庫",
+   "legal_name": "",
+   "freq_mhz": 88.4,
+   "site": "一宮安積",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 奈良",
+   "legal_name": "",
+   "freq_mhz": 88.5,
+   "site": "宇陀",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 兵庫",
+   "legal_name": "",
+   "freq_mhz": 88.6,
+   "site": "氷上",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 兵庫",
+   "legal_name": "",
+   "freq_mhz": 88.6,
+   "site": "北阪神",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 兵庫",
+   "legal_name": "",
+   "freq_mhz": 88.8,
+   "site": "大屋",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 滋賀",
+   "legal_name": "",
+   "freq_mhz": 88.9,
+   "site": "信楽",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 奈良",
+   "legal_name": "",
+   "freq_mhz": 89.0,
+   "site": "西吉野",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 兵庫",
+   "legal_name": "",
+   "freq_mhz": 89.2,
+   "site": "西脇",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "α-STATION",
+   "legal_name": "エフエム京都",
+   "freq_mhz": 89.4,
+   "site": "京都",
+   "area": "近畿",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 奈良",
+   "legal_name": "",
+   "freq_mhz": 89.6,
+   "site": "天川川合",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 兵庫",
+   "legal_name": "",
+   "freq_mhz": 89.8,
+   "site": "一宮三方",
+   "area": "近畿",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "Kiss FM KOBE",
+   "legal_name": "兵庫エフエム放送",
+   "freq_mhz": 89.9,
+   "site": "神戸",
+   "area": "近畿",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "MBSラジオ",
+   "legal_name": "",
+   "freq_mhz": 90.6,
+   "site": "大阪",
+   "area": "近畿",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "ラジオ関西",
+   "legal_name": "",
+   "freq_mhz": 91.1,
+   "site": "神戸",
+   "area": "近畿",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "ラジオ関西",
+   "legal_name": "",
+   "freq_mhz": 91.1,
+   "site": "姫路",
+   "area": "近畿",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "wbs和歌山放送",
+   "legal_name": "和歌山放送",
+   "freq_mhz": 91.6,
+   "site": "田辺",
+   "area": "近畿",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "wbs和歌山放送",
+   "legal_name": "和歌山放送",
+   "freq_mhz": 91.6,
+   "site": "九度山",
+   "area": "近畿",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "OBCラジオ大阪",
+   "legal_name": "大阪放送",
+   "freq_mhz": 91.9,
+   "site": "大阪",
+   "area": "近畿",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "wbs和歌山放送",
+   "legal_name": "和歌山放送",
+   "freq_mhz": 92.4,
+   "site": "御坊",
+   "area": "近畿",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "wbs和歌山放送",
+   "legal_name": "和歌山放送",
+   "freq_mhz": 92.4,
+   "site": "串本",
+   "area": "近畿",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "ABCラジオ",
+   "legal_name": "朝日放送ラジオ",
+   "freq_mhz": 93.3,
+   "site": "大阪",
+   "area": "近畿",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "wbs和歌山放送",
+   "legal_name": "和歌山放送",
+   "freq_mhz": 94.2,
+   "site": "和歌山",
+   "area": "近畿",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "wbs和歌山放送",
+   "legal_name": "和歌山放送",
+   "freq_mhz": 94.2,
+   "site": "新宮",
+   "area": "近畿",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "KBS京都ラジオ",
+   "legal_name": "京都放送",
+   "freq_mhz": 94.9,
+   "site": "京都",
+   "area": "近畿",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "広島FM",
+   "legal_name": "広島エフエム放送",
+   "freq_mhz": 76.4,
+   "site": "大崎",
+   "area": "中国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM岡山",
+   "legal_name": "岡山エフエム放送",
+   "freq_mhz": 76.8,
+   "site": "岡山",
+   "area": "中国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "広島FM",
+   "legal_name": "広島エフエム放送",
+   "freq_mhz": 77.1,
+   "site": "尾道",
+   "area": "中国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "エフエム山陰",
+   "legal_name": "",
+   "freq_mhz": 77.2,
+   "site": "用瀬",
+   "area": "中国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "エフエム山陰",
+   "legal_name": "",
+   "freq_mhz": 77.4,
+   "site": "松江",
+   "area": "中国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "エフエム山口",
+   "legal_name": "",
+   "freq_mhz": 77.7,
+   "site": "下関",
+   "area": "中国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "広島FM",
+   "legal_name": "広島エフエム放送",
+   "freq_mhz": 77.8,
+   "site": "西条",
+   "area": "中国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "エフエム山口",
+   "legal_name": "",
+   "freq_mhz": 77.9,
+   "site": "柳井",
+   "area": "中国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "広島FM",
+   "legal_name": "広島エフエム放送",
+   "freq_mhz": 78.2,
+   "site": "広島",
+   "area": "中国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "エフエム山口",
+   "legal_name": "",
+   "freq_mhz": 78.3,
+   "site": "豊浦",
+   "area": "中国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "エフエム山口",
+   "legal_name": "",
+   "freq_mhz": 78.6,
+   "site": "萩",
+   "area": "中国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "エフエム山陰",
+   "legal_name": "",
+   "freq_mhz": 78.8,
+   "site": "鳥取",
+   "area": "中国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 島根",
+   "legal_name": "",
+   "freq_mhz": 78.9,
+   "site": "邑智萩原山",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "エフエム山口",
+   "legal_name": "",
+   "freq_mhz": 79.2,
+   "site": "山口",
+   "area": "中国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 広島",
+   "legal_name": "",
+   "freq_mhz": 80.1,
+   "site": "五日市",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "FM岡山",
+   "legal_name": "岡山エフエム放送",
+   "freq_mhz": 80.4,
+   "site": "津山",
+   "area": "中国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM岡山",
+   "legal_name": "岡山エフエム放送",
+   "freq_mhz": 80.4,
+   "site": "笠岡",
+   "area": "中国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM岡山",
+   "legal_name": "岡山エフエム放送",
+   "freq_mhz": 80.4,
+   "site": "新見",
+   "area": "中国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 島根",
+   "legal_name": "",
+   "freq_mhz": 80.4,
+   "site": "西ノ島",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "広島FM",
+   "legal_name": "広島エフエム放送",
+   "freq_mhz": 80.4,
+   "site": "可部",
+   "area": "中国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "エフエム山陰",
+   "legal_name": "",
+   "freq_mhz": 80.7,
+   "site": "邑智",
+   "area": "中国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM岡山",
+   "legal_name": "岡山エフエム放送",
+   "freq_mhz": 81.3,
+   "site": "高梁",
+   "area": "中国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 山口",
+   "legal_name": "",
+   "freq_mhz": 81.3,
+   "site": "山口豊浦",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "広島FM",
+   "legal_name": "広島エフエム放送",
+   "freq_mhz": 81.3,
+   "site": "五日市",
+   "area": "中国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "広島FM",
+   "legal_name": "広島エフエム放送",
+   "freq_mhz": 81.4,
+   "site": "世羅甲山",
+   "area": "中国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 島根",
+   "legal_name": "",
+   "freq_mhz": 81.5,
+   "site": "西郷",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "エフエム山口",
+   "legal_name": "",
+   "freq_mhz": 81.5,
+   "site": "美祢",
+   "area": "中国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 鳥取",
+   "legal_name": "",
+   "freq_mhz": 81.7,
+   "site": "智頭山形",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "広島FM",
+   "legal_name": "広島エフエム放送",
+   "freq_mhz": 81.7,
+   "site": "呉",
+   "area": "中国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 山口",
+   "legal_name": "",
+   "freq_mhz": 81.9,
+   "site": "豊北",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 広島",
+   "legal_name": "",
+   "freq_mhz": 81.9,
+   "site": "豊栄",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 岡山",
+   "legal_name": "",
+   "freq_mhz": 82.0,
+   "site": "和気",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 広島",
+   "legal_name": "",
+   "freq_mhz": 82.0,
+   "site": "南加計",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "エフエム山口",
+   "legal_name": "",
+   "freq_mhz": 82.1,
+   "site": "山口鴻ノ峯",
+   "area": "中国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "エフエム山口",
+   "legal_name": "",
+   "freq_mhz": 82.1,
+   "site": "岩国",
+   "area": "中国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "エフエム山陰",
+   "legal_name": "",
+   "freq_mhz": 82.1,
+   "site": "大田",
+   "area": "中国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "広島FM",
+   "legal_name": "広島エフエム放送",
+   "freq_mhz": 82.1,
+   "site": "福山",
+   "area": "中国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "広島FM",
+   "legal_name": "広島エフエム放送",
+   "freq_mhz": 82.3,
+   "site": "佐東",
+   "area": "中国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 山口",
+   "legal_name": "",
+   "freq_mhz": 82.4,
+   "site": "萩",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 広島",
+   "legal_name": "",
+   "freq_mhz": 82.4,
+   "site": "世羅甲山",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 山口",
+   "legal_name": "",
+   "freq_mhz": 82.5,
+   "site": "東和",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 岡山",
+   "legal_name": "",
+   "freq_mhz": 82.5,
+   "site": "有漢",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 岡山",
+   "legal_name": "",
+   "freq_mhz": 82.6,
+   "site": "備前",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 広島",
+   "legal_name": "",
+   "freq_mhz": 82.6,
+   "site": "油木",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "エフエム山陰",
+   "legal_name": "",
+   "freq_mhz": 82.7,
+   "site": "隠岐",
+   "area": "中国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 広島",
+   "legal_name": "",
+   "freq_mhz": 82.8,
+   "site": "黒瀬",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "FM岡山",
+   "legal_name": "岡山エフエム放送",
+   "freq_mhz": 82.9,
+   "site": "久世",
+   "area": "中国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 山口",
+   "legal_name": "",
+   "freq_mhz": 82.9,
+   "site": "須佐田万川",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 岡山",
+   "legal_name": "",
+   "freq_mhz": 82.9,
+   "site": "井原",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 広島",
+   "legal_name": "",
+   "freq_mhz": 83.0,
+   "site": "安芸千代田",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 山口",
+   "legal_name": "",
+   "freq_mhz": 83.1,
+   "site": "山口錦",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 山口",
+   "legal_name": "",
+   "freq_mhz": 83.1,
+   "site": "下関",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 広島",
+   "legal_name": "",
+   "freq_mhz": 83.1,
+   "site": "三原",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 広島",
+   "legal_name": "",
+   "freq_mhz": 83.1,
+   "site": "甲奴",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 山口",
+   "legal_name": "",
+   "freq_mhz": 83.3,
+   "site": "宇部",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 岡山",
+   "legal_name": "",
+   "freq_mhz": 83.3,
+   "site": "日生",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 広島",
+   "legal_name": "",
+   "freq_mhz": 83.3,
+   "site": "西条",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 広島",
+   "legal_name": "",
+   "freq_mhz": 83.3,
+   "site": "東城",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 広島",
+   "legal_name": "",
+   "freq_mhz": 83.3,
+   "site": "大朝",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 広島",
+   "legal_name": "",
+   "freq_mhz": 83.4,
+   "site": "可部",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "エフエム山陰",
+   "legal_name": "",
+   "freq_mhz": 83.4,
+   "site": "智頭",
+   "area": "中国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 山口",
+   "legal_name": "",
+   "freq_mhz": 83.5,
+   "site": "長門",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 広島",
+   "legal_name": "",
+   "freq_mhz": 83.5,
+   "site": "因島",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "広島FM",
+   "legal_name": "広島エフエム放送",
+   "freq_mhz": 83.5,
+   "site": "三次",
+   "area": "中国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 島根",
+   "legal_name": "",
+   "freq_mhz": 83.6,
+   "site": "横田",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 岡山",
+   "legal_name": "",
+   "freq_mhz": 83.7,
+   "site": "笠岡",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 広島",
+   "legal_name": "",
+   "freq_mhz": 83.7,
+   "site": "呉",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 鳥取",
+   "legal_name": "",
+   "freq_mhz": 83.7,
+   "site": "若桜",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "FM岡山",
+   "legal_name": "岡山エフエム放送",
+   "freq_mhz": 83.8,
+   "site": "備前",
+   "area": "中国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 山口",
+   "legal_name": "",
+   "freq_mhz": 83.8,
+   "site": "山口豊田",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 鳥取",
+   "legal_name": "",
+   "freq_mhz": 83.8,
+   "site": "岩美",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 岡山",
+   "legal_name": "",
+   "freq_mhz": 83.9,
+   "site": "久世",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 島根",
+   "legal_name": "",
+   "freq_mhz": 83.9,
+   "site": "羽須美",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 山口",
+   "legal_name": "",
+   "freq_mhz": 84.0,
+   "site": "柳井",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 鳥取",
+   "legal_name": "",
+   "freq_mhz": 84.0,
+   "site": "日野",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "FM岡山",
+   "legal_name": "岡山エフエム放送",
+   "freq_mhz": 84.1,
+   "site": "児島",
+   "area": "中国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 岡山",
+   "legal_name": "",
+   "freq_mhz": 84.1,
+   "site": "哲西",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 広島",
+   "legal_name": "",
+   "freq_mhz": 84.1,
+   "site": "府中",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 山口",
+   "legal_name": "",
+   "freq_mhz": 84.2,
+   "site": "阿東",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 広島",
+   "legal_name": "",
+   "freq_mhz": 84.2,
+   "site": "大崎",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "FM岡山",
+   "legal_name": "岡山エフエム放送",
+   "freq_mhz": 84.3,
+   "site": "井原",
+   "area": "中国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 広島",
+   "legal_name": "",
+   "freq_mhz": 84.3,
+   "site": "佐東",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 鳥取",
+   "legal_name": "",
+   "freq_mhz": 84.4,
+   "site": "智頭",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 山口",
+   "legal_name": "",
+   "freq_mhz": 84.5,
+   "site": "美祢",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 岡山",
+   "legal_name": "",
+   "freq_mhz": 84.5,
+   "site": "三石",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 島根",
+   "legal_name": "",
+   "freq_mhz": 84.5,
+   "site": "松江",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 広島",
+   "legal_name": "",
+   "freq_mhz": 84.5,
+   "site": "三次",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "エフエム山口",
+   "legal_name": "",
+   "freq_mhz": 84.5,
+   "site": "周防大島",
+   "area": "中国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 岡山",
+   "legal_name": "",
+   "freq_mhz": 84.6,
+   "site": "北房",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 岡山",
+   "legal_name": "",
+   "freq_mhz": 84.7,
+   "site": "柵原",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 島根",
+   "legal_name": "",
+   "freq_mhz": 84.7,
+   "site": "日原",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 広島",
+   "legal_name": "",
+   "freq_mhz": 84.8,
+   "site": "尾道",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 岡山",
+   "legal_name": "",
+   "freq_mhz": 84.9,
+   "site": "大原",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 鳥取",
+   "legal_name": "",
+   "freq_mhz": 84.9,
+   "site": "用瀬",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 山口",
+   "legal_name": "",
+   "freq_mhz": 85.0,
+   "site": "岩国",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 島根",
+   "legal_name": "",
+   "freq_mhz": 85.0,
+   "site": "邑智",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 島根",
+   "legal_name": "",
+   "freq_mhz": 85.1,
+   "site": "石見",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 島根",
+   "legal_name": "",
+   "freq_mhz": 85.1,
+   "site": "木次",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 広島",
+   "legal_name": "",
+   "freq_mhz": 85.1,
+   "site": "西城",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 山口",
+   "legal_name": "",
+   "freq_mhz": 85.3,
+   "site": "山口",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 鳥取",
+   "legal_name": "",
+   "freq_mhz": 85.3,
+   "site": "米子日南",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 島根",
+   "legal_name": "",
+   "freq_mhz": 85.4,
+   "site": "大田",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 岡山",
+   "legal_name": "",
+   "freq_mhz": 85.5,
+   "site": "津山",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 島根",
+   "legal_name": "",
+   "freq_mhz": 85.5,
+   "site": "大東",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 広島",
+   "legal_name": "",
+   "freq_mhz": 85.5,
+   "site": "吉田",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "広島FM",
+   "legal_name": "広島エフエム放送",
+   "freq_mhz": 85.5,
+   "site": "府中",
+   "area": "中国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 岡山",
+   "legal_name": "",
+   "freq_mhz": 85.6,
+   "site": "児島",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 広島",
+   "legal_name": "",
+   "freq_mhz": 85.7,
+   "site": "福山南",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 島根",
+   "legal_name": "",
+   "freq_mhz": 85.8,
+   "site": "浜田",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 鳥取",
+   "legal_name": "",
+   "freq_mhz": 85.8,
+   "site": "鳥取",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 山口",
+   "legal_name": "",
+   "freq_mhz": 85.9,
+   "site": "山口鴻ノ峯",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 岡山",
+   "legal_name": "",
+   "freq_mhz": 86.0,
+   "site": "新見",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 岡山",
+   "legal_name": "",
+   "freq_mhz": 86.3,
+   "site": "美作加茂",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "広島FM",
+   "legal_name": "広島エフエム放送",
+   "freq_mhz": 86.3,
+   "site": "千代田",
+   "area": "中国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "KRY山口放送",
+   "legal_name": "山口放送",
+   "freq_mhz": 86.4,
+   "site": "美祢",
+   "area": "中国",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "KRY山口放送",
+   "legal_name": "山口放送",
+   "freq_mhz": 86.4,
+   "site": "長門",
+   "area": "中国",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "KRY山口放送",
+   "legal_name": "山口放送",
+   "freq_mhz": 86.4,
+   "site": "萩",
+   "area": "中国",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "KRY山口放送",
+   "legal_name": "山口放送",
+   "freq_mhz": 86.4,
+   "site": "豊浦",
+   "area": "中国",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "KRY山口放送",
+   "legal_name": "山口放送",
+   "freq_mhz": 86.4,
+   "site": "須佐田万川",
+   "area": "中国",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "KRY山口放送",
+   "legal_name": "山口放送",
+   "freq_mhz": 86.4,
+   "site": "豊田",
+   "area": "中国",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "エフエム山陰",
+   "legal_name": "",
+   "freq_mhz": 86.6,
+   "site": "浜田",
+   "area": "中国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "エフエム山陰",
+   "legal_name": "",
+   "freq_mhz": 86.9,
+   "site": "石見大和",
+   "area": "中国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "BSSラジオ",
+   "legal_name": "山陰放送",
+   "freq_mhz": 87.1,
+   "site": "松江",
+   "area": "中国",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "エフエム山陰",
+   "legal_name": "",
+   "freq_mhz": 87.3,
+   "site": "羽須美",
+   "area": "中国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 島根",
+   "legal_name": "",
+   "freq_mhz": 87.8,
+   "site": "石見大和",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 岡山",
+   "legal_name": "",
+   "freq_mhz": 87.9,
+   "site": "高梁",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 広島",
+   "legal_name": "",
+   "freq_mhz": 88.3,
+   "site": "広島",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "エフエム山口",
+   "legal_name": "",
+   "freq_mhz": 88.6,
+   "site": "宇部",
+   "area": "中国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 岡山",
+   "legal_name": "",
+   "freq_mhz": 88.7,
+   "site": "岡山",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 広島",
+   "legal_name": "",
+   "freq_mhz": 88.9,
+   "site": "安芸佐伯",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "エフエム山口",
+   "legal_name": "",
+   "freq_mhz": 89.4,
+   "site": "長門",
+   "area": "中国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 島根",
+   "legal_name": "",
+   "freq_mhz": 89.8,
+   "site": "津和野",
+   "area": "中国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "RSKラジオ",
+   "legal_name": "山陽放送",
+   "freq_mhz": 91.4,
+   "site": "岡山",
+   "area": "中国",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "BSSラジオ",
+   "legal_name": "山陰放送",
+   "freq_mhz": 92.2,
+   "site": "鳥取",
+   "area": "中国",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "KRY山口放送",
+   "legal_name": "山口放送",
+   "freq_mhz": 92.3,
+   "site": "山口",
+   "area": "中国",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "KRY山口放送",
+   "legal_name": "山口放送",
+   "freq_mhz": 92.3,
+   "site": "柳井",
+   "area": "中国",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "KRY山口放送",
+   "legal_name": "山口放送",
+   "freq_mhz": 92.3,
+   "site": "岩国",
+   "area": "中国",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "KRY山口放送",
+   "legal_name": "山口放送",
+   "freq_mhz": 92.3,
+   "site": "下関",
+   "area": "中国",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "KRY山口放送",
+   "legal_name": "山口放送",
+   "freq_mhz": 92.3,
+   "site": "阿東",
+   "area": "中国",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "KRY山口放送",
+   "legal_name": "山口放送",
+   "freq_mhz": 92.3,
+   "site": "宇部",
+   "area": "中国",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "KRY山口放送",
+   "legal_name": "山口放送",
+   "freq_mhz": 92.3,
+   "site": "山口鴻ノ峯",
+   "area": "中国",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "KRY山口放送",
+   "legal_name": "山口放送",
+   "freq_mhz": 92.3,
+   "site": "周防大島",
+   "area": "中国",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "RCCラジオ",
+   "legal_name": "中国放送",
+   "freq_mhz": 94.6,
+   "site": "広島",
+   "area": "中国",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "RCCラジオ",
+   "legal_name": "中国放送",
+   "freq_mhz": 94.6,
+   "site": "福山",
+   "area": "中国",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "RCCラジオ",
+   "legal_name": "中国放送",
+   "freq_mhz": 94.6,
+   "site": "三原久井",
+   "area": "中国",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "RCCラジオ",
+   "legal_name": "中国放送",
+   "freq_mhz": 94.6,
+   "site": "三次",
+   "area": "中国",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "RCCラジオ",
+   "legal_name": "中国放送",
+   "freq_mhz": 94.6,
+   "site": "西条",
+   "area": "中国",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM愛媛",
+   "legal_name": "エフエム愛媛",
+   "freq_mhz": 77.6,
+   "site": "八幡浜",
+   "area": "四国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM徳島",
+   "legal_name": "エフエム徳島",
+   "freq_mhz": 77.7,
+   "site": "日和佐",
+   "area": "四国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM徳島",
+   "legal_name": "エフエム徳島",
+   "freq_mhz": 78.4,
+   "site": "阿南",
+   "area": "四国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "Hi-Six",
+   "legal_name": "エフエム高知",
+   "freq_mhz": 78.5,
+   "site": "中村",
+   "area": "四国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "エフエム香川",
+   "legal_name": "",
+   "freq_mhz": 78.6,
+   "site": "高松",
+   "area": "四国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM愛媛",
+   "legal_name": "エフエム愛媛",
+   "freq_mhz": 78.8,
+   "site": "大洲",
+   "area": "四国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM愛媛",
+   "legal_name": "エフエム愛媛",
+   "freq_mhz": 78.8,
+   "site": "愛南",
+   "area": "四国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM愛媛",
+   "legal_name": "エフエム愛媛",
+   "freq_mhz": 79.7,
+   "site": "松山",
+   "area": "四国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "Hi-Six",
+   "legal_name": "エフエム高知",
+   "freq_mhz": 79.9,
+   "site": "安芸",
+   "area": "四国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM愛媛",
+   "legal_name": "エフエム愛媛",
+   "freq_mhz": 80.0,
+   "site": "川之江",
+   "area": "四国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM愛媛",
+   "legal_name": "エフエム愛媛",
+   "freq_mhz": 80.2,
+   "site": "城川",
+   "area": "四国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM愛媛",
+   "legal_name": "エフエム愛媛",
+   "freq_mhz": 80.6,
+   "site": "今治",
+   "area": "四国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "Hi-Six",
+   "legal_name": "エフエム高知",
+   "freq_mhz": 80.6,
+   "site": "窪川",
+   "area": "四国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM徳島",
+   "legal_name": "エフエム徳島",
+   "freq_mhz": 80.7,
+   "site": "徳島",
+   "area": "四国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "Hi-Six",
+   "legal_name": "エフエム高知",
+   "freq_mhz": 81.3,
+   "site": "宿毛",
+   "area": "四国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 徳島",
+   "legal_name": "",
+   "freq_mhz": 81.3,
+   "site": "阿南",
+   "area": "四国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "Hi-Six",
+   "legal_name": "エフエム高知",
+   "freq_mhz": 81.6,
+   "site": "高知",
+   "area": "四国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 徳島",
+   "legal_name": "",
+   "freq_mhz": 82.0,
+   "site": "鷲敷",
+   "area": "四国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "FM愛媛",
+   "legal_name": "エフエム愛媛",
+   "freq_mhz": 82.1,
+   "site": "宇和島",
+   "area": "四国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 愛媛",
+   "legal_name": "",
+   "freq_mhz": 82.2,
+   "site": "菊間",
+   "area": "四国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "FM徳島",
+   "legal_name": "エフエム徳島",
+   "freq_mhz": 82.3,
+   "site": "池田",
+   "area": "四国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 徳島",
+   "legal_name": "",
+   "freq_mhz": 82.4,
+   "site": "上勝",
+   "area": "四国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 徳島",
+   "legal_name": "",
+   "freq_mhz": 82.5,
+   "site": "一宇",
+   "area": "四国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 高知",
+   "legal_name": "",
+   "freq_mhz": 82.5,
+   "site": "宿毛",
+   "area": "四国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "Hi-Six",
+   "legal_name": "エフエム高知",
+   "freq_mhz": 82.7,
+   "site": "須崎",
+   "area": "四国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 高知",
+   "legal_name": "",
+   "freq_mhz": 82.9,
+   "site": "土佐町",
+   "area": "四国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 徳島",
+   "legal_name": "",
+   "freq_mhz": 83.0,
+   "site": "上那賀",
+   "area": "四国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 徳島",
+   "legal_name": "",
+   "freq_mhz": 83.4,
+   "site": "徳島",
+   "area": "四国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 愛媛",
+   "legal_name": "",
+   "freq_mhz": 83.5,
+   "site": "南宇和",
+   "area": "四国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 愛媛",
+   "legal_name": "",
+   "freq_mhz": 83.6,
+   "site": "城川",
+   "area": "四国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 高知",
+   "legal_name": "",
+   "freq_mhz": 83.7,
+   "site": "窪川",
+   "area": "四国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 愛媛",
+   "legal_name": "",
+   "freq_mhz": 83.8,
+   "site": "大三島",
+   "area": "四国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 高知",
+   "legal_name": "",
+   "freq_mhz": 83.8,
+   "site": "安芸",
+   "area": "四国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 徳島",
+   "legal_name": "",
+   "freq_mhz": 83.9,
+   "site": "一宇東",
+   "area": "四国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 高知",
+   "legal_name": "",
+   "freq_mhz": 84.0,
+   "site": "佐川",
+   "area": "四国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 高知",
+   "legal_name": "",
+   "freq_mhz": 84.2,
+   "site": "中土佐",
+   "area": "四国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 徳島",
+   "legal_name": "",
+   "freq_mhz": 84.3,
+   "site": "東祖谷山",
+   "area": "四国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 徳島",
+   "legal_name": "",
+   "freq_mhz": 84.4,
+   "site": "阿波",
+   "area": "四国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 愛媛",
+   "legal_name": "",
+   "freq_mhz": 84.4,
+   "site": "川之江",
+   "area": "四国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 高知",
+   "legal_name": "",
+   "freq_mhz": 84.4,
+   "site": "中村",
+   "area": "四国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 愛媛",
+   "legal_name": "",
+   "freq_mhz": 84.8,
+   "site": "宇和島",
+   "area": "四国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 高知",
+   "legal_name": "",
+   "freq_mhz": 84.8,
+   "site": "吾川村",
+   "area": "四国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 徳島",
+   "legal_name": "",
+   "freq_mhz": 84.9,
+   "site": "神山",
+   "area": "四国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 高知",
+   "legal_name": "",
+   "freq_mhz": 84.9,
+   "site": "須崎",
+   "area": "四国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 徳島",
+   "legal_name": "",
+   "freq_mhz": 85.0,
+   "site": "池田",
+   "area": "四国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 高知",
+   "legal_name": "",
+   "freq_mhz": 85.0,
+   "site": "豊永",
+   "area": "四国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 愛媛",
+   "legal_name": "",
+   "freq_mhz": 85.1,
+   "site": "中山",
+   "area": "四国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 高知",
+   "legal_name": "",
+   "freq_mhz": 85.2,
+   "site": "十和",
+   "area": "四国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 愛媛",
+   "legal_name": "",
+   "freq_mhz": 85.4,
+   "site": "城辺",
+   "area": "四国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 愛媛",
+   "legal_name": "",
+   "freq_mhz": 85.5,
+   "site": "美川",
+   "area": "四国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 徳島",
+   "legal_name": "",
+   "freq_mhz": 85.6,
+   "site": "美馬",
+   "area": "四国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 徳島",
+   "legal_name": "",
+   "freq_mhz": 85.6,
+   "site": "阿波勝浦",
+   "area": "四国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 愛媛",
+   "legal_name": "",
+   "freq_mhz": 85.6,
+   "site": "野村",
+   "area": "四国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 高知",
+   "legal_name": "",
+   "freq_mhz": 85.6,
+   "site": "大豊",
+   "area": "四国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 徳島",
+   "legal_name": "",
+   "freq_mhz": 85.7,
+   "site": "日和佐",
+   "area": "四国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 高知",
+   "legal_name": "",
+   "freq_mhz": 85.8,
+   "site": "仁淀",
+   "area": "四国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 愛媛",
+   "legal_name": "",
+   "freq_mhz": 85.9,
+   "site": "大洲",
+   "area": "四国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 高知",
+   "legal_name": "",
+   "freq_mhz": 85.9,
+   "site": "土佐大月",
+   "area": "四国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 高知",
+   "legal_name": "",
+   "freq_mhz": 85.9,
+   "site": "土佐佐賀",
+   "area": "四国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 香川",
+   "legal_name": "",
+   "freq_mhz": 86.0,
+   "site": "高松",
+   "area": "四国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 愛媛",
+   "legal_name": "",
+   "freq_mhz": 86.5,
+   "site": "八幡浜",
+   "area": "四国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 愛媛",
+   "legal_name": "",
+   "freq_mhz": 86.8,
+   "site": "久万",
+   "area": "四国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 高知",
+   "legal_name": "",
+   "freq_mhz": 86.8,
+   "site": "室戸岬",
+   "area": "四国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 愛媛",
+   "legal_name": "",
+   "freq_mhz": 87.0,
+   "site": "新居浜",
+   "area": "四国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 高知",
+   "legal_name": "",
+   "freq_mhz": 87.5,
+   "site": "高知",
+   "area": "四国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 愛媛",
+   "legal_name": "",
+   "freq_mhz": 87.7,
+   "site": "松山",
+   "area": "四国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 高知",
+   "legal_name": "",
+   "freq_mhz": 87.8,
+   "site": "東洋野根",
+   "area": "四国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 愛媛",
+   "legal_name": "",
+   "freq_mhz": 88.7,
+   "site": "小田",
+   "area": "四国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 高知",
+   "legal_name": "",
+   "freq_mhz": 89.1,
+   "site": "室戸",
+   "area": "四国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "FM愛媛",
+   "legal_name": "エフエム愛媛",
+   "freq_mhz": 89.2,
+   "site": "新居浜",
+   "area": "四国",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 徳島",
+   "legal_name": "",
+   "freq_mhz": 89.9,
+   "site": "宍喰",
+   "area": "四国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 高知",
+   "legal_name": "",
+   "freq_mhz": 89.9,
+   "site": "物部",
+   "area": "四国",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "RNC西日本放送",
+   "legal_name": "西日本放送",
+   "freq_mhz": 90.3,
+   "site": "高松",
+   "area": "四国",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "RKC高知放送",
+   "legal_name": "高知放送",
+   "freq_mhz": 90.8,
+   "site": "高知",
+   "area": "四国",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "RNB南海放送",
+   "legal_name": "南海放送",
+   "freq_mhz": 91.2,
+   "site": "川之江",
+   "area": "四国",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "RNB南海放送",
+   "legal_name": "南海放送",
+   "freq_mhz": 91.2,
+   "site": "八幡浜",
+   "area": "四国",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "RNB南海放送",
+   "legal_name": "南海放送",
+   "freq_mhz": 91.2,
+   "site": "久万",
+   "area": "四国",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "RNB南海放送",
+   "legal_name": "南海放送",
+   "freq_mhz": 91.2,
+   "site": "壺神",
+   "area": "四国",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "RNB南海放送",
+   "legal_name": "南海放送",
+   "freq_mhz": 91.2,
+   "site": "大三島",
+   "area": "四国",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "RNB南海放送",
+   "legal_name": "南海放送",
+   "freq_mhz": 91.7,
+   "site": "松山",
+   "area": "四国",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "RNB南海放送",
+   "legal_name": "南海放送",
+   "freq_mhz": 91.7,
+   "site": "新居浜",
+   "area": "四国",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "RNB南海放送",
+   "legal_name": "南海放送",
+   "freq_mhz": 91.7,
+   "site": "宇和島",
+   "area": "四国",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "RNB南海放送",
+   "legal_name": "南海放送",
+   "freq_mhz": 91.7,
+   "site": "大洲",
+   "area": "四国",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "RNB南海放送",
+   "legal_name": "南海放送",
+   "freq_mhz": 91.7,
+   "site": "今治",
+   "area": "四国",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "RNB南海放送",
+   "legal_name": "南海放送",
+   "freq_mhz": 91.7,
+   "site": "御荘",
+   "area": "四国",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "RNB南海放送",
+   "legal_name": "南海放送",
+   "freq_mhz": 91.7,
+   "site": "野村",
+   "area": "四国",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "JRT四国放送",
+   "legal_name": "四国放送",
+   "freq_mhz": 93.0,
+   "site": "徳島",
+   "area": "四国",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "JRT四国放送",
+   "legal_name": "四国放送",
+   "freq_mhz": 93.0,
+   "site": "池田",
+   "area": "四国",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "JRT四国放送",
+   "legal_name": "四国放送",
+   "freq_mhz": 93.0,
+   "site": "日和佐",
+   "area": "四国",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "JRT四国放送",
+   "legal_name": "四国放送",
+   "freq_mhz": 93.9,
+   "site": "阿南",
+   "area": "四国",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "LOVE FM",
+   "legal_name": "",
+   "freq_mhz": 76.1,
+   "site": "福岡",
+   "area": "九州・沖縄",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "μFM",
+   "legal_name": "エフエム鹿児島",
+   "freq_mhz": 76.6,
+   "site": "枕崎",
+   "area": "九州・沖縄",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FMK",
+   "legal_name": "エフエム熊本",
+   "freq_mhz": 76.8,
+   "site": "南阿蘇",
+   "area": "九州・沖縄",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FMK",
+   "legal_name": "エフエム熊本",
+   "freq_mhz": 76.9,
+   "site": "牛深",
+   "area": "九州・沖縄",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "CROSS FM",
+   "legal_name": "",
+   "freq_mhz": 77.0,
+   "site": "北九州",
+   "area": "九州・沖縄",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FMK",
+   "legal_name": "エフエム熊本",
+   "freq_mhz": 77.4,
+   "site": "熊本",
+   "area": "九州・沖縄",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM沖縄",
+   "legal_name": "エフエム沖縄",
+   "freq_mhz": 77.4,
+   "site": "伊良部",
+   "area": "九州・沖縄",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 沖縄",
+   "legal_name": "",
+   "freq_mhz": 77.7,
+   "site": "川平",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "FM長崎",
+   "legal_name": "エフエム長崎",
+   "freq_mhz": 77.8,
+   "site": "南有馬",
+   "area": "九州・沖縄",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "エフエム佐賀",
+   "legal_name": "",
+   "freq_mhz": 77.9,
+   "site": "佐賀",
+   "area": "九州・沖縄",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FMK",
+   "legal_name": "エフエム熊本",
+   "freq_mhz": 78.4,
+   "site": "御所浦",
+   "area": "九州・沖縄",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "CROSS FM",
+   "legal_name": "",
+   "freq_mhz": 78.7,
+   "site": "福岡",
+   "area": "九州・沖縄",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM長崎",
+   "legal_name": "エフエム長崎",
+   "freq_mhz": 78.9,
+   "site": "諫早",
+   "area": "九州・沖縄",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "μFM",
+   "legal_name": "エフエム鹿児島",
+   "freq_mhz": 79.0,
+   "site": "鹿屋",
+   "area": "九州・沖縄",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM長崎",
+   "legal_name": "エフエム長崎",
+   "freq_mhz": 79.2,
+   "site": "平戸",
+   "area": "九州・沖縄",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM長崎",
+   "legal_name": "エフエム長崎",
+   "freq_mhz": 79.5,
+   "site": "長崎",
+   "area": "九州・沖縄",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "エフエム佐賀",
+   "legal_name": "",
+   "freq_mhz": 79.7,
+   "site": "鳥栖",
+   "area": "九州・沖縄",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "μFM",
+   "legal_name": "エフエム鹿児島",
+   "freq_mhz": 79.8,
+   "site": "鹿児島",
+   "area": "九州・沖縄",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "エフエム佐賀",
+   "legal_name": "",
+   "freq_mhz": 79.9,
+   "site": "有田",
+   "area": "九州・沖縄",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM FUKUOKA",
+   "legal_name": "エフエム福岡",
+   "freq_mhz": 80.0,
+   "site": "北九州",
+   "area": "九州・沖縄",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "RKKラジオ",
+   "legal_name": "熊本放送",
+   "freq_mhz": 80.0,
+   "site": "水上",
+   "area": "九州・沖縄",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM長崎",
+   "legal_name": "エフエム長崎",
+   "freq_mhz": 80.3,
+   "site": "佐世保",
+   "area": "九州・沖縄",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FMK",
+   "legal_name": "エフエム熊本",
+   "freq_mhz": 80.4,
+   "site": "小国",
+   "area": "九州・沖縄",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 大分",
+   "legal_name": "",
+   "freq_mhz": 80.4,
+   "site": "東蒲江",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "μFM",
+   "legal_name": "エフエム鹿児島",
+   "freq_mhz": 80.5,
+   "site": "阿久根",
+   "area": "九州・沖縄",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM FUKUOKA",
+   "legal_name": "エフエム福岡",
+   "freq_mhz": 80.7,
+   "site": "福岡",
+   "area": "九州・沖縄",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "エフエム大分",
+   "legal_name": "",
+   "freq_mhz": 80.7,
+   "site": "津久見",
+   "area": "九州・沖縄",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "エフエム宮崎",
+   "legal_name": "",
+   "freq_mhz": 80.7,
+   "site": "串間",
+   "area": "九州・沖縄",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM FUKUOKA",
+   "legal_name": "エフエム福岡",
+   "freq_mhz": 81.3,
+   "site": "糸島",
+   "area": "九州・沖縄",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FMK",
+   "legal_name": "エフエム熊本",
+   "freq_mhz": 81.3,
+   "site": "阿蘇",
+   "area": "九州・沖縄",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FMK",
+   "legal_name": "エフエム熊本",
+   "freq_mhz": 81.3,
+   "site": "五木",
+   "area": "九州・沖縄",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "μFM",
+   "legal_name": "エフエム鹿児島",
+   "freq_mhz": 81.4,
+   "site": "蒲生(姶良)",
+   "area": "九州・沖縄",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 熊本",
+   "legal_name": "",
+   "freq_mhz": 81.5,
+   "site": "芦北",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 佐賀",
+   "legal_name": "",
+   "freq_mhz": 81.6,
+   "site": "佐賀",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 鹿児島",
+   "legal_name": "",
+   "freq_mhz": 81.6,
+   "site": "徳之島",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 長崎",
+   "legal_name": "",
+   "freq_mhz": 81.7,
+   "site": "南有馬",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "FM FUKUOKA",
+   "legal_name": "エフエム福岡",
+   "freq_mhz": 81.8,
+   "site": "行橋",
+   "area": "九州・沖縄",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "エフエム大分",
+   "legal_name": "",
+   "freq_mhz": 81.8,
+   "site": "佐伯",
+   "area": "九州・沖縄",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "エフエム大分",
+   "legal_name": "",
+   "freq_mhz": 81.8,
+   "site": "竹田",
+   "area": "九州・沖縄",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FMK",
+   "legal_name": "エフエム熊本",
+   "freq_mhz": 82.0,
+   "site": "人吉",
+   "area": "九州・沖縄",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM FUKUOKA",
+   "legal_name": "エフエム福岡",
+   "freq_mhz": 82.1,
+   "site": "久留米",
+   "area": "九州・沖縄",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 福岡",
+   "legal_name": "",
+   "freq_mhz": 82.2,
+   "site": "門司",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 鹿児島",
+   "legal_name": "",
+   "freq_mhz": 82.2,
+   "site": "名瀬",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "MBCラジオ",
+   "legal_name": "南日本放送",
+   "freq_mhz": 82.3,
+   "site": "種子島",
+   "area": "九州・沖縄",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 大分",
+   "legal_name": "",
+   "freq_mhz": 82.3,
+   "site": "玖珠",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "LOVE FM",
+   "legal_name": "",
+   "freq_mhz": 82.5,
+   "site": "福岡西",
+   "area": "九州・沖縄",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 熊本",
+   "legal_name": "",
+   "freq_mhz": 82.5,
+   "site": "水俣",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 大分",
+   "legal_name": "",
+   "freq_mhz": 82.6,
+   "site": "山国",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 長崎",
+   "legal_name": "",
+   "freq_mhz": 82.6,
+   "site": "厳原",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "LOVE FM",
+   "legal_name": "",
+   "freq_mhz": 82.7,
+   "site": "北九州",
+   "area": "九州・沖縄",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 長崎",
+   "legal_name": "",
+   "freq_mhz": 82.7,
+   "site": "有川",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 長崎",
+   "legal_name": "",
+   "freq_mhz": 82.7,
+   "site": "島原",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 熊本",
+   "legal_name": "",
+   "freq_mhz": 82.8,
+   "site": "人吉",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 長崎",
+   "legal_name": "",
+   "freq_mhz": 82.8,
+   "site": "大瀬戸",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 熊本",
+   "legal_name": "",
+   "freq_mhz": 82.9,
+   "site": "天草",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 福岡",
+   "legal_name": "",
+   "freq_mhz": 82.9,
+   "site": "筑前山田",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 長崎",
+   "legal_name": "",
+   "freq_mhz": 83.0,
+   "site": "諫早",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 熊本",
+   "legal_name": "",
+   "freq_mhz": 83.1,
+   "site": "坂本",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "エフエム宮崎",
+   "legal_name": "",
+   "freq_mhz": 83.2,
+   "site": "宮崎",
+   "area": "九州・沖縄",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 熊本",
+   "legal_name": "",
+   "freq_mhz": 83.3,
+   "site": "牛深",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 長崎",
+   "legal_name": "",
+   "freq_mhz": 83.3,
+   "site": "郷ノ浦",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 福岡",
+   "legal_name": "",
+   "freq_mhz": 83.4,
+   "site": "久留米",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 大分",
+   "legal_name": "",
+   "freq_mhz": 83.5,
+   "site": "国東",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 長崎",
+   "legal_name": "",
+   "freq_mhz": 83.5,
+   "site": "福江",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 福岡",
+   "legal_name": "",
+   "freq_mhz": 83.6,
+   "site": "行橋",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "FM沖縄",
+   "legal_name": "エフエム沖縄",
+   "freq_mhz": 83.7,
+   "site": "今帰仁",
+   "area": "九州・沖縄",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 鹿児島",
+   "legal_name": "",
+   "freq_mhz": 83.7,
+   "site": "阿久根",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 大分",
+   "legal_name": "",
+   "freq_mhz": 83.8,
+   "site": "津久見",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 熊本",
+   "legal_name": "",
+   "freq_mhz": 83.8,
+   "site": "南阿蘇",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 長崎",
+   "legal_name": "",
+   "freq_mhz": 83.8,
+   "site": "東長崎",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 熊本",
+   "legal_name": "",
+   "freq_mhz": 83.9,
+   "site": "肥後小国",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 長崎",
+   "legal_name": "",
+   "freq_mhz": 83.9,
+   "site": "平戸",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 宮崎",
+   "legal_name": "",
+   "freq_mhz": 84.0,
+   "site": "東郷",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 熊本",
+   "legal_name": "",
+   "freq_mhz": 84.0,
+   "site": "五木",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 鹿児島",
+   "legal_name": "",
+   "freq_mhz": 84.0,
+   "site": "知名",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "FM FUKUOKA",
+   "legal_name": "エフエム福岡",
+   "freq_mhz": 84.1,
+   "site": "宗像",
+   "area": "九州・沖縄",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 鹿児島",
+   "legal_name": "",
+   "freq_mhz": 84.1,
+   "site": "鹿屋",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 大分",
+   "legal_name": "",
+   "freq_mhz": 84.2,
+   "site": "日田",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 大分",
+   "legal_name": "",
+   "freq_mhz": 84.2,
+   "site": "宇目",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 沖縄",
+   "legal_name": "",
+   "freq_mhz": 84.2,
+   "site": "久米島",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 熊本",
+   "legal_name": "",
+   "freq_mhz": 84.2,
+   "site": "河浦",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 長崎",
+   "legal_name": "",
+   "freq_mhz": 84.2,
+   "site": "松浦",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 大分",
+   "legal_name": "",
+   "freq_mhz": 84.3,
+   "site": "蒲江",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 鹿児島",
+   "legal_name": "",
+   "freq_mhz": 84.3,
+   "site": "東市来",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 鹿児島",
+   "legal_name": "",
+   "freq_mhz": 84.4,
+   "site": "種子島",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 長崎",
+   "legal_name": "",
+   "freq_mhz": 84.5,
+   "site": "長崎",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 鹿児島",
+   "legal_name": "",
+   "freq_mhz": 84.5,
+   "site": "瀬戸内",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 大分",
+   "legal_name": "",
+   "freq_mhz": 84.6,
+   "site": "佐伯",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 大分",
+   "legal_name": "",
+   "freq_mhz": 84.6,
+   "site": "安心院",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 鹿児島",
+   "legal_name": "",
+   "freq_mhz": 84.7,
+   "site": "枕崎",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 沖縄",
+   "legal_name": "",
+   "freq_mhz": 84.8,
+   "site": "今帰仁",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 福岡",
+   "legal_name": "",
+   "freq_mhz": 84.8,
+   "site": "福岡",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 鹿児島",
+   "legal_name": "",
+   "freq_mhz": 84.9,
+   "site": "末吉",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "エフエム大分",
+   "legal_name": "",
+   "freq_mhz": 84.9,
+   "site": "中津",
+   "area": "九州・沖縄",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "エフエム宮崎",
+   "legal_name": "",
+   "freq_mhz": 84.9,
+   "site": "高千穂",
+   "area": "九州・沖縄",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 大分",
+   "legal_name": "",
+   "freq_mhz": 85.0,
+   "site": "三重",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 沖縄",
+   "legal_name": "",
+   "freq_mhz": 85.0,
+   "site": "平良",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "エフエム大分",
+   "legal_name": "",
+   "freq_mhz": 85.1,
+   "site": "日田",
+   "area": "九州・沖縄",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 宮崎",
+   "legal_name": "",
+   "freq_mhz": 85.2,
+   "site": "串間",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 宮崎",
+   "legal_name": "",
+   "freq_mhz": 85.2,
+   "site": "入郷",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 熊本",
+   "legal_name": "",
+   "freq_mhz": 85.4,
+   "site": "熊本",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 鹿児島",
+   "legal_name": "",
+   "freq_mhz": 85.6,
+   "site": "鹿児島",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 福岡",
+   "legal_name": "",
+   "freq_mhz": 85.7,
+   "site": "北九州",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 宮崎",
+   "legal_name": "",
+   "freq_mhz": 85.8,
+   "site": "日向西郷",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 沖縄",
+   "legal_name": "",
+   "freq_mhz": 85.8,
+   "site": "与那国",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 福岡",
+   "legal_name": "",
+   "freq_mhz": 85.8,
+   "site": "大牟田",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 鹿児島",
+   "legal_name": "",
+   "freq_mhz": 85.9,
+   "site": "栗野",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 大分",
+   "legal_name": "",
+   "freq_mhz": 86.0,
+   "site": "竹田",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 長崎",
+   "legal_name": "",
+   "freq_mhz": 86.0,
+   "site": "佐世保",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 大分",
+   "legal_name": "",
+   "freq_mhz": 86.2,
+   "site": "中津",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 宮崎",
+   "legal_name": "",
+   "freq_mhz": 86.2,
+   "site": "宮崎",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 沖縄",
+   "legal_name": "",
+   "freq_mhz": 86.2,
+   "site": "多良間",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 熊本",
+   "legal_name": "",
+   "freq_mhz": 86.3,
+   "site": "阿蘇",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "CROSS FM",
+   "legal_name": "",
+   "freq_mhz": 86.5,
+   "site": "久留米",
+   "area": "九州・沖縄",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "MBCラジオ",
+   "legal_name": "南日本放送",
+   "freq_mhz": 86.7,
+   "site": "蒲生",
+   "area": "九州・沖縄",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 大分",
+   "legal_name": "",
+   "freq_mhz": 86.8,
+   "site": "本耶馬渓",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 熊本",
+   "legal_name": "",
+   "freq_mhz": 86.8,
+   "site": "蘇陽",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "FM FUKUOKA",
+   "legal_name": "エフエム福岡",
+   "freq_mhz": 87.0,
+   "site": "大牟田",
+   "area": "九州・沖縄",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 宮崎",
+   "legal_name": "",
+   "freq_mhz": 87.0,
+   "site": "延岡",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 沖縄",
+   "legal_name": "",
+   "freq_mhz": 87.0,
+   "site": "石垣",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "CROSS FM",
+   "legal_name": "",
+   "freq_mhz": 87.2,
+   "site": "行橋",
+   "area": "九州・沖縄",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "FM沖縄",
+   "legal_name": "エフエム沖縄",
+   "freq_mhz": 87.3,
+   "site": "沖縄",
+   "area": "九州・沖縄",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "CROSS FM",
+   "legal_name": "",
+   "freq_mhz": 87.8,
+   "site": "大牟田",
+   "area": "九州・沖縄",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 長崎",
+   "legal_name": "",
+   "freq_mhz": 88.0,
+   "site": "宇久",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "エフエム大分",
+   "legal_name": "",
+   "freq_mhz": 88.0,
+   "site": "大分",
+   "area": "九州・沖縄",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 宮崎",
+   "legal_name": "",
+   "freq_mhz": 88.1,
+   "site": "高千穂",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 沖縄",
+   "legal_name": "",
+   "freq_mhz": 88.1,
+   "site": "沖縄",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 宮崎",
+   "legal_name": "",
+   "freq_mhz": 88.2,
+   "site": "椎葉",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 佐賀",
+   "legal_name": "",
+   "freq_mhz": 88.9,
+   "site": "肥前有田",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "NHK-FM 大分",
+   "legal_name": "",
+   "freq_mhz": 88.9,
+   "site": "大分",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "FM長崎",
+   "legal_name": "エフエム長崎",
+   "freq_mhz": 89.3,
+   "site": "島原",
+   "area": "九州・沖縄",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "エフエム大分",
+   "legal_name": "",
+   "freq_mhz": 89.3,
+   "site": "玖珠",
+   "area": "九州・沖縄",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "エフエム宮崎",
+   "legal_name": "",
+   "freq_mhz": 89.5,
+   "site": "延岡",
+   "area": "九州・沖縄",
+   "kind": "fm",
+   "source": "soumu"
+  },
+  {
+   "name": "NHK-FM 熊本",
+   "legal_name": "",
+   "freq_mhz": 89.8,
+   "site": "矢部",
+   "area": "九州・沖縄",
+   "kind": "nhk",
+   "source": "nhk"
+  },
+  {
+   "name": "KBCラジオ",
+   "legal_name": "九州朝日放送",
+   "freq_mhz": 90.2,
+   "site": "福岡",
+   "area": "九州・沖縄",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "宮崎放送",
+   "legal_name": "",
+   "freq_mhz": 90.4,
+   "site": "宮崎",
+   "area": "九州・沖縄",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "NBCラジオ",
+   "legal_name": "長崎放送",
+   "freq_mhz": 90.6,
+   "site": "佐世保",
+   "area": "九州・沖縄",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "RKBラジオ",
+   "legal_name": "RKB毎日放送",
+   "freq_mhz": 91.0,
+   "site": "福岡",
+   "area": "九州・沖縄",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "RKKラジオ",
+   "legal_name": "熊本放送",
+   "freq_mhz": 91.4,
+   "site": "熊本",
+   "area": "九州・沖縄",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "RKBラジオ",
+   "legal_name": "RKB毎日放送",
+   "freq_mhz": 91.5,
+   "site": "北九州",
+   "area": "九州・沖縄",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "NBCラジオ",
+   "legal_name": "長崎放送",
+   "freq_mhz": 91.8,
+   "site": "諫早",
+   "area": "九州・沖縄",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "NBCラジオ",
+   "legal_name": "長崎放送",
+   "freq_mhz": 92.1,
+   "site": "鳥栖",
+   "area": "九州・沖縄",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "RBCiラジオ",
+   "legal_name": "琉球放送",
+   "freq_mhz": 92.1,
+   "site": "那覇",
+   "area": "九州・沖縄",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "RKKラジオ",
+   "legal_name": "熊本放送",
+   "freq_mhz": 92.3,
+   "site": "人吉",
+   "area": "九州・沖縄",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "RKKラジオ",
+   "legal_name": "熊本放送",
+   "freq_mhz": 92.3,
+   "site": "阿蘇",
+   "area": "九州・沖縄",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "NBCラジオ",
+   "legal_name": "長崎放送",
+   "freq_mhz": 92.6,
+   "site": "長崎",
+   "area": "九州・沖縄",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "KBCラジオ",
+   "legal_name": "九州朝日放送",
+   "freq_mhz": 92.7,
+   "site": "行橋",
+   "area": "九州・沖縄",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "MBCラジオ",
+   "legal_name": "南日本放送",
+   "freq_mhz": 92.8,
+   "site": "鹿児島",
+   "area": "九州・沖縄",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "KBCラジオ",
+   "legal_name": "九州朝日放送",
+   "freq_mhz": 93.0,
+   "site": "糸島",
+   "area": "九州・沖縄",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "ラジオ沖縄",
+   "legal_name": "",
+   "freq_mhz": 93.1,
+   "site": "那覇",
+   "area": "九州・沖縄",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "OBSラジオ",
+   "legal_name": "大分放送",
+   "freq_mhz": 93.3,
+   "site": "大分",
+   "area": "九州・沖縄",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "OBSラジオ",
+   "legal_name": "大分放送",
+   "freq_mhz": 93.3,
+   "site": "十文字原",
+   "area": "九州・沖縄",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "NBCラジオ",
+   "legal_name": "長崎放送",
+   "freq_mhz": 93.5,
+   "site": "佐賀",
+   "area": "九州・沖縄",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "MBCラジオ",
+   "legal_name": "南日本放送",
+   "freq_mhz": 93.7,
+   "site": "阿久根",
+   "area": "九州・沖縄",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "KBCラジオ",
+   "legal_name": "九州朝日放送",
+   "freq_mhz": 94.0,
+   "site": "北九州",
+   "area": "九州・沖縄",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "MBCラジオ",
+   "legal_name": "南日本放送",
+   "freq_mhz": 94.2,
+   "site": "鹿屋",
+   "area": "九州・沖縄",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "RKKラジオ",
+   "legal_name": "熊本放送",
+   "freq_mhz": 94.2,
+   "site": "水俣",
+   "area": "九州・沖縄",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "RKBラジオ",
+   "legal_name": "RKB毎日放送",
+   "freq_mhz": 94.6,
+   "site": "糸島",
+   "area": "九州・沖縄",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "宮崎放送",
+   "legal_name": "",
+   "freq_mhz": 94.7,
+   "site": "延岡",
+   "area": "九州・沖縄",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "MBCラジオ",
+   "legal_name": "南日本放送",
+   "freq_mhz": 94.8,
+   "site": "枕崎",
+   "area": "九州・沖縄",
+   "kind": "widefm",
+   "source": "soumu"
+  },
+  {
+   "name": "RKBラジオ",
+   "legal_name": "RKB毎日放送",
+   "freq_mhz": 94.8,
+   "site": "行橋",
+   "area": "九州・沖縄",
+   "kind": "widefm",
+   "source": "soumu"
+  }
+ ]
+}

@@ -56,6 +56,12 @@ def build_recording_path(freq_mhz: float, iq: bool = False) -> str:
     return os.path.join(RECORDINGS_DIR, f"{stamp}_{freq_mhz:.1f}MHz{suffix}.wav")
 
 
+#: Upper bound on catalogue rows printed at once.  The command prompt
+#: shares the terminal with this output, so a full 983-line dump would
+#: scroll the prompt away.
+_MAX_LISTED_STATIONS = 40
+
+
 class CommandLineInterface(threading.Thread):
     """Thread for handling command line input.
 
@@ -91,7 +97,7 @@ class CommandLineInterface(threading.Thread):
     def run(self) -> None:
         while not self.controller.quit_event.is_set():
             self._print_help()
-            cmd = input().strip().lower()
+            cmd = input().strip()
             if not self._dispatch(cmd):
                 break
 
@@ -104,22 +110,34 @@ class CommandLineInterface(threading.Thread):
 
         Resolution order:
           1. Exact match in the dispatch table.
-          2. Prefix match (``agc``, ``gain``).
+          2. First whole word (``agc``, ``gain``, ``list``, ``search``).
           3. Numeric input interpreted as station number or frequency.
+
+        Commands are matched case-insensitively, but the argument keeps the
+        case it was typed in: a user-defined area or a station name is not
+        ours to fold.  Matching on the first *word* rather than on a prefix
+        keeps ``searchlight`` from being read as ``search light``.
 
         Returns:
             bool: True to continue the command loop, False to quit.
         """
+        cmd = cmd.strip()
+
         # 1. Exact match
-        handler = self._commands.get(cmd)
+        handler = self._commands.get(cmd.lower())
         if handler:
             return handler(cmd)
 
-        # 2. Prefix match
-        if cmd.startswith('agc'):
-            return self._cmd_agc(cmd)
-        if cmd.startswith('gain'):
-            return self._cmd_gain(cmd)
+        # 2. First-word match
+        verb = cmd.split(maxsplit=1)[0].lower() if cmd.split() else ""
+        if verb == 'agc':
+            return self._cmd_agc(cmd.lower())
+        if verb == 'gain':
+            return self._cmd_gain(cmd.lower())
+        if verb == 'list':
+            return self._cmd_list(cmd)
+        if verb == 'search':
+            return self._cmd_search(cmd)
 
         # 3. Numeric / frequency input -> tune
         return self._cmd_tune(cmd)
@@ -132,7 +150,9 @@ class CommandLineInterface(threading.Thread):
     def _print_help() -> None:
         """Display available commands."""
         print("\nEnter command:")
-        print("  'list' -> show station list")
+        print("  'list' -> show preset stations")
+        print("  'list all' or 'list <area>' -> browse the full catalogue")
+        print("  'search <text>' -> find a station by name, site or frequency")
         print("  'stereo on/off' or 'mono' -> toggle stereo demodulation")
         print("  'record start' -> start recording with auto-generated filename")
         print("  'record stop' -> stop recording")
@@ -151,11 +171,58 @@ class CommandLineInterface(threading.Thread):
         return False
 
     def _cmd_list(self, cmd: str) -> bool:
-        """Handle 'list' — display station list."""
-        print("Available stations:")
-        for i, (name, freq) in enumerate(self.controller.get_stations_list(), start=1):
-            print(f"{i}: {name} ({freq/1e6:.1f} MHz)")
+        """Handle 'list', 'list all' and 'list <area>'.
+
+        Bare 'list' shows the presets, which are the entries the numeric
+        tune command indexes into.  With an argument it browses the full
+        catalogue, which is far too long to tune by number.
+        """
+        argument = cmd.split(maxsplit=1)[1].strip() if len(cmd.split()) > 1 else ''
+        if not argument:
+            print("Preset stations:")
+            for i, (name, freq) in enumerate(
+                    self.controller.get_stations_list(), start=1):
+                print(f"{i}: {name} ({freq/1e6:.1f} MHz)")
+            print("('list all' or 'list <area>' for every known station)")
+            return True
+
+        catalogue = self.controller.get_catalogue()
+        if argument.lower() == 'all':
+            self._print_stations(catalogue, "All stations")
+        else:
+            matched = self.controller.stations_in_area(argument)
+            if matched:
+                # Echo the area as the catalogue spells it, not as it was typed.
+                self._print_stations(matched, f"Stations in {matched[0].area}")
+            else:
+                areas = sorted({s.area for s in catalogue if s.area})
+                print(f"Unknown area: {argument}")
+                print("Areas: " + " / ".join(areas))
         return True
+
+    def _cmd_search(self, cmd: str) -> bool:
+        """Handle 'search <text>' — find stations anywhere in the catalogue."""
+        query = cmd.split(maxsplit=1)[1].strip() if len(cmd.split()) > 1 else ''
+        if not query:
+            print("Usage: search <name, transmitter site or frequency>")
+            return True
+        self._print_stations(self.controller.search_stations(query),
+                             f"Search: {query}")
+        return True
+
+    @staticmethod
+    def _print_stations(stations: list, title: str) -> None:
+        """Print a catalogue slice, truncated so it cannot flood the prompt."""
+        if not stations:
+            print(f"{title}: no match")
+            return
+        print(f"{title} ({len(stations)}):")
+        for station in stations[:_MAX_LISTED_STATIONS]:
+            print(f"  {station.describe()}")
+        hidden = len(stations) - _MAX_LISTED_STATIONS
+        if hidden > 0:
+            print(f"  ... and {hidden} more - narrow the search to see them")
+        print("Tune by typing the frequency in MHz.")
 
     def _cmd_stereo_on(self, cmd: str) -> bool:
         """Handle 'stereo on' / 'stereo' — enable stereo demodulation."""
