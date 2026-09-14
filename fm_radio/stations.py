@@ -214,11 +214,16 @@ def _make_reporter(warn: Reporter | None) -> Reporter:
     return report
 
 
-def _dict_items(value: object, table: str, report: Reporter) -> list[dict]:
-    """Return the ``[[table]]`` entries in *value*, dropping what is not one.
+def _dict_items(value: object, table: str,
+                report: Reporter) -> list[tuple[int, dict]]:
+    """Return the ``[[table]]`` entries as (position, entry) pairs.
+
+    The position is where the entry sits in the file, counting the ones that
+    were dropped: renumbering what survives would point every later
+    diagnostic at the wrong rule.
 
     TOML lets ``station = 1`` parse happily, and iterating that raises.  A
-    wrong type here means one mistyped line, so the table is skipped and the
+    wrong type here means one mistyped line, so that entry is skipped and the
     rest of the file still applies.
     """
     if value is None:
@@ -227,12 +232,12 @@ def _dict_items(value: object, table: str, report: Reporter) -> list[dict]:
         report(f"stations.toml: [[{table}]] must be a table array, "
                f"found {type(value).__name__}; ignoring it")
         return []
-    entries: list[dict] = []
-    for index, entry in enumerate(value, start=1):
+    entries: list[tuple[int, dict]] = []
+    for position, entry in enumerate(value, start=1):
         if isinstance(entry, dict):
-            entries.append(entry)
+            entries.append((position, entry))
         else:
-            report(f"stations.toml: [[{table}]] #{index} is a "
+            report(f"stations.toml: [[{table}]] #{position} is a "
                    f"{type(entry).__name__}, not a table; ignoring it")
     return entries
 
@@ -326,21 +331,23 @@ def _as_bool(value: object, where: str, report: Reporter) -> bool | None:
     return None
 
 
-def _station_from_toml(entry: dict, report: Reporter) -> Station | None:
+def _station_from_toml(entry: dict, position: int,
+                       report: Reporter) -> Station | None:
     freq_mhz = normalize_freq(entry.get("freq_mhz"))
     if freq_mhz is None:
-        report(f"stations.toml: [[station]] needs a finite freq_mhz, "
-               f"found {entry.get('freq_mhz')!r}; skipping it")
+        report(f"stations.toml: [[station]] #{position} needs a finite "
+               f"freq_mhz, found {entry.get('freq_mhz')!r}; skipping it")
         return None
     if not (BAND_MIN_MHZ <= freq_mhz <= BAND_MAX_MHZ):
-        report(f"stations.toml: {freq_mhz} MHz is outside the FM band "
-               f"({BAND_MIN_MHZ}-{BAND_MAX_MHZ} MHz); keeping it anyway")
+        report(f"stations.toml: [[station]] #{position} is at {freq_mhz} MHz, "
+               f"outside the FM band ({BAND_MIN_MHZ}-{BAND_MAX_MHZ} MHz); "
+               f"keeping it anyway")
     name = entry.get("name")
     name = str(name) if name else f"{freq_mhz:.1f} MHz"
     favorite = None
     if "favorite" in entry:
         favorite = _as_bool(entry["favorite"],
-                            f"[[station]] {name!r} favorite", report)
+                            f"[[station]] #{position} favorite", report)
     return Station(
         name=name,
         freq_mhz=freq_mhz,
@@ -388,7 +395,7 @@ def _override_matches(station: Station, rule: dict) -> bool:
     return checked
 
 
-def _clean_rule(rule: dict, index: int, report: Reporter) -> dict:
+def _clean_rule(rule: dict, position: int, report: Reporter) -> dict:
     """Return *rule* with unusable settings dropped, reporting each once.
 
     Done up front rather than per station: the same rule is tested against
@@ -399,20 +406,20 @@ def _clean_rule(rule: dict, index: int, report: Reporter) -> dict:
 
     for field in ("hidden", "favorite"):
         if field in cleaned and _as_bool(
-                cleaned[field], f"[[override]] #{index} {field}", report) is None:
+                cleaned[field], f"[[override]] #{position} {field}", report) is None:
             del cleaned[field]
 
     if "freq_mhz" in cleaned and normalize_freq(cleaned["freq_mhz"]) is None:
-        report(f"stations.toml: [[override]] #{index} has a non-finite "
+        report(f"stations.toml: [[override]] #{position} has a non-finite "
                f"freq_mhz ({cleaned['freq_mhz']!r}); the frequency is left alone")
         del cleaned["freq_mhz"]
 
     if "match_freq_mhz" in cleaned and normalize_freq(cleaned["match_freq_mhz"]) is None:
-        report(f"stations.toml: [[override]] #{index} has a non-finite "
+        report(f"stations.toml: [[override]] #{position} has a non-finite "
                f"match_freq_mhz ({cleaned['match_freq_mhz']!r}); it matches nothing")
     elif not any(k in cleaned for k in
                  ("match_name", "match_site", "match_freq_mhz")):
-        report(f"stations.toml: [[override]] #{index} has no match_name / "
+        report(f"stations.toml: [[override]] #{position} has no match_name / "
                f"match_site / match_freq_mhz; it matches nothing")
     return cleaned
 
@@ -439,9 +446,8 @@ def _apply_override(station: Station, rule: dict) -> Station:
 def _merge_user_layer(stations: list[Station], config: dict,
                       report: Reporter) -> list[Station]:
     """Apply ``[[override]]`` rules, then append ``[[station]]`` entries."""
-    rules = [_clean_rule(rule, index, report) for index, rule
-             in enumerate(_dict_items(config.get("override"), "override", report),
-                          start=1)]
+    rules = [(position, _clean_rule(rule, position, report)) for position, rule
+             in _dict_items(config.get("override"), "override", report)]
 
     if rules:
         match_counts = [0] * len(rules)
@@ -451,10 +457,10 @@ def _merge_user_layer(stations: list[Station], config: dict,
             # station cannot change which later rules apply to it.
             matching = []
             hidden = False
-            for index, rule in enumerate(rules):
+            for slot, (_, rule) in enumerate(rules):
                 if not _override_matches(station, rule):
                     continue
-                match_counts[index] += 1
+                match_counts[slot] += 1
                 if rule.get("hidden"):
                     hidden = True              # hiding wins over editing
                 else:
@@ -468,13 +474,14 @@ def _merge_user_layer(stations: list[Station], config: dict,
 
         # A rule that matches nothing is almost always a typo, or a station
         # the upstream list renamed; either way its effect is simply missing.
-        for index, count in enumerate(match_counts, start=1):
-            if count == 0 and _can_match(rules[index - 1]):
-                report(f"stations.toml: [[override]] #{index} matched no "
-                       f"station; check the name, site or frequency")
+        for slot, (position, rule) in enumerate(rules):
+            if match_counts[slot] == 0 and _can_match(rule):
+                report(f"stations.toml: [[override]] #{position} matched no "
+                       f"station in the bundled catalogue; check the name, "
+                       f"site or frequency")
 
-    for entry in _dict_items(config.get("station"), "station", report):
-        added = _station_from_toml(entry, report)
+    for position, entry in _dict_items(config.get("station"), "station", report):
+        added = _station_from_toml(entry, position, report)
         if added is None:
             continue
         # A user entry replaces the bundled one it collides with, so that

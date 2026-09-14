@@ -57,17 +57,22 @@ def test_normalize_freq_survives_an_unconvertible_integer():
 # ----------------------------------------------------------------------
 
 def test_an_unreadable_config_path_does_not_stop_the_catalogue(monkeypatch):
-    """Path.exists() can raise on a locked or unreachable location."""
+    """Path.exists() can raise on a locked or unreachable location.
+
+    Only the user configuration path is made to fail; every other path keeps
+    the real implementation, so the test cannot pass for the wrong reason.
+    """
+    locked = "/locked/stations.toml"
+    original = pathlib.Path.exists
+
     def explode(self):
-        raise PermissionError(13, "permission denied")
+        if str(self) == str(pathlib.Path(locked)):
+            raise PermissionError(13, "permission denied")
+        return original(self)
 
     monkeypatch.setattr(pathlib.Path, "exists", explode)
     warnings: list[str] = []
-    # The bundled JSON is read through the same Path type, so point the
-    # loader at data it can still open: only the user path is consulted
-    # through exists().
-    loaded = st.load_stations(user_path="/locked/stations.toml",
-                              warn=warnings.append)
+    loaded = st.load_stations(user_path=locked, warn=warnings.append)
     assert loaded
     assert any("Could not check for" in w for w in warnings)
 
@@ -207,3 +212,61 @@ favorite = true
     absent = tmp_path / "absent.toml"
     assert ([s.freq_mhz for s in st.favorites(st.load_stations(user_path=absent))]
             == legacy_preset_mhz)
+
+
+# ----------------------------------------------------------------------
+# Diagnostics point at the entry the user actually wrote
+# ----------------------------------------------------------------------
+
+@needs_tomllib
+def test_positions_survive_a_dropped_entry(load_config):
+    """Renumbering what survives would blame the wrong rule."""
+    _, warnings = load_config("""
+override = [
+  1,
+  { match_name = "存在しない局名", hidden = true },
+]
+""")
+    assert any("[[override]] #1 is a int" in w for w in warnings)
+    assert any("[[override]] #2 matched no station" in w for w in warnings)
+    assert not any("#1 matched no station" in w for w in warnings)
+
+
+@needs_tomllib
+def test_a_bad_field_is_reported_at_its_own_position(load_config):
+    _, warnings = load_config("""
+override = [
+  "not a table",
+  "not a table either",
+  { match_name = "TOKYO FM", hidden = "false" },
+]
+""")
+    assert any("[[override]] #3 hidden must be true or false" in w
+               for w in warnings)
+
+
+@needs_tomllib
+def test_station_positions_survive_a_dropped_entry(load_config):
+    _, warnings = load_config("""
+station = [
+  1,
+  { name = "周波数なし" },
+]
+""")
+    assert any("[[station]] #1 is a int" in w for w in warnings)
+    assert any("[[station]] #2 needs a finite freq_mhz" in w for w in warnings)
+
+
+@needs_tomllib
+def test_an_invalid_field_does_not_discard_the_rest_of_the_rule(load_config):
+    """Only the unusable setting is dropped; the rule still does its job."""
+    loaded, warnings = load_config("""
+[[override]]
+match_name = "TOKYO FM"
+match_site = "東京"
+name = "改名後"
+hidden = "false"
+""")
+    tokyo = [s for s in loaded if s.key == (80.0, "東京")]
+    assert tokyo and tokyo[0].name == "改名後"      # the rename applied
+    assert any("hidden must be true or false" in w for w in warnings)

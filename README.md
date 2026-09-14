@@ -82,12 +82,18 @@ shorter one.
 
 The counts are compared against `fm_radio/data/stations.json`, not against
 wherever `-o` points, so writing a copy elsewhere for review does not switch
-the comparison off. Use `--baseline` to compare against something else. If the
-baseline does not exist the comparison is skipped and says so — that is the
-first generation in a fresh tree. If it exists but cannot be read, the build
-stops: a checkout in that state is exactly when a truncated list gets
-committed unnoticed. `--force` waives the count comparison and nothing else;
-the structural checks always apply.
+the comparison off. Use `--baseline` to compare against something else.
+
+| Baseline | Result |
+| --- | --- |
+| absent | comparison skipped, with a note — the first generation in a fresh tree |
+| readable, with a positive integer count per source | counts compared |
+| anything else — unreadable, not JSON, missing or non-integer counts | the build stops |
+
+The last row is deliberate: a checkout in that state is exactly when a
+truncated list gets committed unnoticed, so it is treated as a problem rather
+than as nothing to compare. `--force` waives the count comparison and an
+unusable baseline. It never waives the structural checks.
 
 It merges three primary sources: the
 [総務省 list](https://www.soumu.go.jp/menu_seisaku/ictseisaku/housou_suishin/fm-list.html)

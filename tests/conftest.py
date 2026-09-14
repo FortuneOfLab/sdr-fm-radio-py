@@ -138,11 +138,21 @@ def no_user_config(tmp_path):
 
 
 @pytest.fixture(scope="session")
-def catalogue(tmp_path_factory):
-    """The bundled catalogue with no user layer applied."""
+def _catalogue_data(tmp_path_factory):
+    """The bundled catalogue, loaded once for the whole session."""
     from fm_radio import stations as st
     absent = tmp_path_factory.mktemp("catalogue") / "absent-stations.toml"
     return st.load_stations(user_path=absent)
+
+
+@pytest.fixture
+def catalogue(_catalogue_data):
+    """The bundled catalogue with no user layer applied.
+
+    A fresh list each time so a test that sorts or filters in place cannot
+    reach the next one.  Station is frozen, so the entries can be shared.
+    """
+    return list(_catalogue_data)
 
 
 @pytest.fixture

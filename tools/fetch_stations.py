@@ -95,6 +95,11 @@ BAND_MAX_MHZ = 95.0
 #: the generator has to reject collisions on exactly that key.
 FREQ_DECIMALS = 3
 
+#: The per-source transmitter counts the drift check compares.  A baseline
+#: without a usable value for each of these cannot be compared against, and
+#: is treated as a problem rather than as "nothing to compare".
+COUNTED_SOURCES = ("commercial", "nhk")
+
 #: How far each source's transmitter count may move from the committed
 #: snapshot before the build stops and asks for ``--force``.  Real edits to
 #: these lists are a handful of transmitters at a time; a markup change that
@@ -447,16 +452,18 @@ def _check_structure(payload: dict) -> list[str]:
 
 
 def _check_drift(payload: dict, previous: dict | None) -> list[str]:
-    """Compare against the committed snapshot. Waivable with --force."""
+    """Compare against the baseline snapshot. Waivable with --force.
+
+    ``previous`` has been through :func:`_read_baseline`, so every count in
+    :data:`COUNTED_SOURCES` is known to be a positive integer.
+    """
     if not previous:
         return []
-    old_counts = previous.get("counts") or {}
+    old_counts = previous["counts"]
     problems = []
-    for label in ("commercial", "nhk"):
-        old = old_counts.get(label)
+    for label in COUNTED_SOURCES:
+        old = old_counts[label]
         new = payload["counts"][label]
-        if not isinstance(old, int) or old <= 0:
-            continue
         drift = abs(new - old) / old
         if drift > MAX_COUNT_DRIFT:
             problems.append(
@@ -469,20 +476,35 @@ def _read_baseline(path: Path) -> tuple[dict | None, str | None]:
     """Return (baseline payload, problem) for the snapshot at *path*.
 
     An absent baseline is the first-ever generation and simply skips the
-    drift checks.  One that exists but cannot be read is different: something
-    is wrong with the checkout, and silently generating without a comparison
-    is how a truncated list gets committed.
+    drift checks.  Anything else that stops the comparison from happening —
+    unreadable, not JSON, or counts that cannot be compared against — is a
+    problem: a checkout in that state is exactly when a truncated list gets
+    committed unnoticed.  The file is opened directly rather than tested with
+    exists() first, so a permission error on the path is reported like any
+    other read failure instead of propagating.
     """
-    if not path.exists():
-        return None, None
     try:
         with path.open(encoding="utf-8") as handle:
             payload = json.load(handle)
-    except (OSError, ValueError) as exc:
+    except FileNotFoundError:
+        return None, None
+    except OSError as exc:
         return None, f"cannot read the baseline {path} ({exc})"
-    counts = payload.get("counts") if isinstance(payload, dict) else None
+    except ValueError as exc:
+        return None, f"the baseline {path} is not valid JSON ({exc})"
+
+    if not isinstance(payload, dict):
+        return None, (f"the baseline {path} is a {type(payload).__name__}, "
+                      f"not a JSON object")
+    counts = payload.get("counts")
     if not isinstance(counts, dict):
-        return None, f"the baseline {path} has no usable 'counts'"
+        return None, f"the baseline {path} has no 'counts' object"
+    for label in COUNTED_SOURCES:
+        value = counts.get(label)
+        # bool is an int, and a count of zero or less cannot be a ratio.
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            return None, (f"the baseline {path} has no usable "
+                          f"counts['{label}'] (found {value!r})")
     return payload, None
 
 

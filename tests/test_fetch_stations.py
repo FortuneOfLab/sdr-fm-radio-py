@@ -385,20 +385,124 @@ def test_an_absent_baseline_skips_the_drift_check(tool, tmp_path, monkeypatch,
     assert "no baseline" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("content", ["not json", '{"counts": null}', "[]"])
+#: Baselines that exist but cannot be compared against.  Each one used to be
+#: accepted silently, which turned the drift check off exactly when something
+#: was already wrong with the checkout.
+UNUSABLE_BASELINES = [
+    "not json",
+    "[]",
+    '"a string"',
+    '{"counts": null}',
+    "{}",
+    '{"counts": {}}',
+    '{"counts": {"commercial": 451}}',                  # nhk missing
+    '{"counts": {"nhk": 532}}',                         # commercial missing
+    '{"counts": {"commercial": 0, "nhk": 0}}',          # cannot be a ratio
+    '{"counts": {"commercial": -451, "nhk": -532}}',
+    '{"counts": {"commercial": "451", "nhk": "532"}}',  # strings, not counts
+    '{"counts": {"commercial": true, "nhk": true}}',    # bool is an int
+    '{"counts": {"commercial": 451.0, "nhk": 532.0}}',  # floats, not counts
+    '{"counts": {"commercial": null, "nhk": null}}',
+]
+
+
+@pytest.mark.parametrize("content", UNUSABLE_BASELINES)
 def test_an_unusable_baseline_stops_the_build(tool, tmp_path, monkeypatch,
                                               content):
     baseline = tmp_path / "baseline.json"
     baseline.write_text(content, encoding="utf-8")
     output = tmp_path / "stations.json"
+    output.write_text("original", encoding="utf-8")
     monkeypatch.setattr(tool, "build_payload",
                         lambda *a, **k: good_payload(tool))
 
     assert run_main(tool, monkeypatch, output, "--baseline", str(baseline)) == 1
-    assert not output.exists()
+    assert output.read_text(encoding="utf-8") == "original"
     # ... and --force is the documented way past it.
     assert run_main(tool, monkeypatch, output,
                     "--baseline", str(baseline), "--force") == 0
+
+
+@pytest.mark.parametrize("content", UNUSABLE_BASELINES)
+def test_an_unusable_baseline_is_reported_as_a_problem(tool, tmp_path, content):
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text(content, encoding="utf-8")
+    payload, problem = tool._read_baseline(baseline)
+    assert payload is None
+    assert problem and str(baseline) in problem
+
+
+def test_a_usable_baseline_is_accepted(tool, tmp_path):
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text(json.dumps({"counts": {"commercial": 451, "nhk": 532}}),
+                        encoding="utf-8")
+    payload, problem = tool._read_baseline(baseline)
+    assert problem is None
+    assert payload["counts"]["commercial"] == 451
+
+
+def test_an_absent_baseline_is_not_a_problem(tool, tmp_path):
+    payload, problem = tool._read_baseline(tmp_path / "nothing-here.json")
+    assert payload is None and problem is None
+
+
+def test_an_unreadable_baseline_path_is_reported_not_raised(tool, tmp_path,
+                                                            monkeypatch):
+    """Opening the baseline can fail with more than FileNotFoundError.
+
+    Only the baseline path is made to fail: the output file and everything
+    else keep the real implementation.
+    """
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text(json.dumps({"counts": {"commercial": 451, "nhk": 532}}),
+                        encoding="utf-8")
+    original = Path.open
+
+    def explode(self, *args, **kwargs):
+        if self == baseline:
+            raise PermissionError(13, "permission denied")
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", explode)
+
+    payload, problem = tool._read_baseline(baseline)
+    assert payload is None
+    assert problem and "cannot read the baseline" in problem
+
+    output = tmp_path / "stations.json"
+    output.write_text("original", encoding="utf-8")
+    monkeypatch.setattr(tool, "build_payload",
+                        lambda *a, **k: good_payload(tool))
+    assert run_main(tool, monkeypatch, output, "--baseline", str(baseline)) == 1
+    assert output.read_text(encoding="utf-8") == "original"
+    # --force gets past an unreadable baseline, as it does past drift.
+    assert run_main(tool, monkeypatch, output,
+                    "--baseline", str(baseline), "--force") == 0
+
+
+def test_force_never_waives_a_structural_problem(tool, tmp_path, monkeypatch):
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text("not json", encoding="utf-8")
+    output = tmp_path / "stations.json"
+    output.write_text("original", encoding="utf-8")
+
+    broken = good_payload(tool)
+    broken["stations"][0]["area"] = "架空エリア"
+    monkeypatch.setattr(tool, "build_payload", lambda *a, **k: broken)
+
+    assert run_main(tool, monkeypatch, output,
+                    "--baseline", str(baseline), "--force") == 1
+    assert output.read_text(encoding="utf-8") == "original"
+
+
+def test_the_generator_and_the_receiver_round_frequencies_alike(tool):
+    """The duplicate check only works if both sides agree on the key."""
+    from fm_radio import stations as st
+
+    assert tool.FREQ_DECIMALS == st.FREQ_DECIMALS
+    for value in (80.0, 80.0004, 80.0006, 76.1, 94.9):
+        assert (round(value, tool.FREQ_DECIMALS)
+                == st.Station(name="x", freq_mhz=value, site="s").key[0])
 
 
 def test_a_fetch_failure_leaves_the_file_alone(tool, tmp_path, monkeypatch):
