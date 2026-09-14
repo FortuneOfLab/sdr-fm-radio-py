@@ -73,6 +73,14 @@ hand. Regenerate it when the upstream lists change:
 python tools/fetch_stations.py
 ```
 
+The generated list is validated before anything is written — structure,
+required fields, area coverage, duplicate transmitters, brand resolution, and
+how far the per-source counts moved from the committed snapshot. A failing
+check exits non-zero and leaves the existing file untouched, so an upstream
+markup change cannot quietly replace the catalogue with a shorter one. Pass
+`--force` to accept a large but expected change in the counts; the structural
+checks always apply.
+
 It merges three primary sources: the
 [総務省 list](https://www.soumu.go.jp/menu_seisaku/ictseisaku/housou_suishin/fm-list.html)
 of commercial FM and wide-FM transmitters, the JSON behind
@@ -102,10 +110,34 @@ match_site = "八王子"
 hidden = true
 ```
 
-`favorite = true` puts a station in the preset list that `list` shows and the
-numeric tune command indexes into. As soon as you mark any favourite, the
-shipped preset list is replaced by yours. Reading this file needs Python 3.11
-or newer (`tomllib`); on older versions the bundled list still loads.
+**Presets.** `favorite` decides what `list` shows and what the numeric tune
+command indexes into:
+
+| In `stations.toml` | Preset list |
+| --- | --- |
+| nothing | the shipped ten |
+| `favorite = false` on some | the shipped ten, minus those |
+| `favorite = false` on all ten | empty |
+| `favorite = true` anywhere | only what you marked |
+
+**Merge order.** Every `[[override]]` is matched against the *bundled* entry,
+so renaming a station never changes which other rules apply to it. Non-hidden
+edits apply in file order, so the last one to set a field wins. A matching
+`hidden = true` drops the entry wherever it appears in the file: hiding always
+beats editing. `[[station]]` entries are appended last and replace any entry
+with the same frequency and transmitter site — including one an override just
+hid, so hide-then-re-add works.
+
+**Frequencies** are rounded to 1 kHz everywhere, including in
+`match_freq_mhz`, and two entries are the same transmitter when that rounded
+frequency and the site match exactly. `80.0` and `80.0004` are the same
+transmitter; `80.0` and `80.004` are not.
+
+Reading this file needs Python 3.11 or newer (`tomllib`); on older versions
+the bundled list still loads. Anything the receiver could not understand —
+invalid TOML, a rule that matches nothing, a frequency that is not a number —
+is reported on stderr at startup and skipped, rather than stopping the
+receiver.
 
 ## Code Structure
 

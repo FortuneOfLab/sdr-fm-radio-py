@@ -28,6 +28,7 @@
 from __future__ import annotations
 
 import queue
+import sys
 import time
 import threading
 import logging
@@ -153,8 +154,12 @@ class FMReceiverController:
         self.light: bool = light
         self.quit_event: threading.Event = threading.Event()
         # Nationwide catalogue (bundled snapshot + the user's stations.toml)
-        # and the short preset list the CLI tunes by number.
-        self.catalogue: list[Station] = load_stations(stations_path)
+        # and the short preset list the CLI tunes by number.  Loading
+        # problems are printed as well as logged: logging is off unless
+        # --log was passed, and a station file that was silently ignored is
+        # exactly the kind of thing the user needs to hear about.
+        self.catalogue: list[Station] = load_stations(
+            stations_path, warn=self._warn_station_config)
         self.presets: list[Station] = favorites(self.catalogue)
         if not self.catalogue:
             self.logger.warning(
@@ -196,6 +201,11 @@ class FMReceiverController:
         except (SDRDeviceError, AudioOutputError) as e:
             self.logger.error(f"Failed to initialize FM Receiver Controller: {e}", exc_info=True)
             raise
+
+    @staticmethod
+    def _warn_station_config(message: str) -> None:
+        """Put a station-list problem in front of the user, log or no log."""
+        print(f"Station list: {message}", file=sys.stderr)
 
     # ------------------------------------------------------------------
     # Facade API — public interface for CLI and external consumers
