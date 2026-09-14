@@ -90,6 +90,11 @@ AREAS = ("北海道", "東北", "関東", "信越", "北陸",
 BAND_MIN_MHZ = 76.0
 BAND_MAX_MHZ = 95.0
 
+#: Must match fm_radio.stations.FREQ_DECIMALS: the receiver identifies a
+#: transmitter by its frequency rounded to this many places plus its site, so
+#: the generator has to reject collisions on exactly that key.
+FREQ_DECIMALS = 3
+
 #: How far each source's transmitter count may move from the committed
 #: snapshot before the build stops and asks for ``--force``.  Real edits to
 #: these lists are a handful of transmitters at a time; a markup change that
@@ -405,20 +410,30 @@ def _check_structure(payload: dict) -> list[str]:
         if record.get("kind") not in ("fm", "widefm", "nhk"):
             problems.append(f"{label}: unknown kind {record.get('kind')!r}")
 
-        key = (round(float(freq or 0), 3), record.get("site"), record.get("name"))
-        if key in seen:
-            problems.append(f"{label}: duplicate of {seen[key]}")
-        else:
-            seen[key] = label
+        # The receiver identifies a transmitter by (rounded frequency, site)
+        # and a user entry on that key replaces whatever is there, so two
+        # records sharing it - even under different names - would collapse.
+        if isinstance(freq, float) and math.isfinite(freq):
+            key = (round(freq, FREQ_DECIMALS), record.get("site"))
+            if key in seen:
+                problems.append(f"{label}: same frequency and site as "
+                                f"{seen[key]}")
+            else:
+                seen[key] = label
 
-    missing_areas = [a for a in AREAS
-                     if not any(r.get("area") == a for r in records)]
-    if missing_areas:
-        problems.append("no transmitters in " + ", ".join(missing_areas))
-
+    # Both upstream lists cover all ten areas, so a gap in either one means
+    # a block went missing - which an overall area check cannot see, because
+    # the other source still covers that area.
     for source in ("soumu", "nhk"):
-        if not any(r.get("source") == source for r in records):
+        from_source = [r for r in records if r.get("source") == source]
+        if not from_source:
             problems.append(f"no transmitters from {source}")
+            continue
+        missing = [a for a in AREAS
+                   if not any(r.get("area") == a for r in from_source)]
+        if missing:
+            problems.append(f"{source} has no transmitters in "
+                            + ", ".join(missing))
 
     unresolved = payload.get("_unresolved_brands") or []
     if unresolved:
@@ -450,12 +465,25 @@ def _check_drift(payload: dict, previous: dict | None) -> list[str]:
     return problems
 
 
-def _read_previous(path: Path) -> dict | None:
+def _read_baseline(path: Path) -> tuple[dict | None, str | None]:
+    """Return (baseline payload, problem) for the snapshot at *path*.
+
+    An absent baseline is the first-ever generation and simply skips the
+    drift checks.  One that exists but cannot be read is different: something
+    is wrong with the checkout, and silently generating without a comparison
+    is how a truncated list gets committed.
+    """
+    if not path.exists():
+        return None, None
     try:
         with path.open(encoding="utf-8") as handle:
-            return json.load(handle)
-    except (OSError, ValueError):
-        return None
+            payload = json.load(handle)
+    except (OSError, ValueError) as exc:
+        return None, f"cannot read the baseline {path} ({exc})"
+    counts = payload.get("counts") if isinstance(payload, dict) else None
+    if not isinstance(counts, dict):
+        return None, f"the baseline {path} has no usable 'counts'"
+    return payload, None
 
 
 def write_snapshot(payload: dict, path: Path) -> None:
@@ -473,6 +501,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("-o", "--output", type=Path, default=OUT_PATH,
                         help="output path (default: %(default)s)")
+    parser.add_argument("--baseline", type=Path, default=OUT_PATH,
+                        help="snapshot the transmitter counts are compared "
+                             "against (default: %(default)s). Keep the "
+                             "default when writing elsewhere with -o, so the "
+                             "comparison still happens.")
     parser.add_argument("--force", action="store_true",
                         help="write even when the transmitter counts moved "
                              "further than expected (structural checks still "
@@ -491,7 +524,16 @@ def main() -> int:
         return 1
 
     problems = _check_structure(payload)
-    drift = _check_drift(payload, _read_previous(args.output))
+
+    # Compare against the committed snapshot rather than against whatever is
+    # at --output: writing a review copy elsewhere must not disable the check.
+    baseline, baseline_problem = _read_baseline(args.baseline)
+    drift = _check_drift(payload, baseline)
+    if baseline_problem:
+        drift.append(baseline_problem)
+    elif baseline is None:
+        print("note: no baseline at %s; transmitter counts not compared"
+              % args.baseline, file=sys.stderr)
     if drift and not args.force:
         problems += drift + ["re-run with --force if this change is expected"]
 

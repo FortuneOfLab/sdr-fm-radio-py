@@ -11,14 +11,19 @@ import logging
 
 import pytest
 
+from fm_radio import stations
 from fm_radio.controller import FMReceiverController
 
 
 @pytest.fixture
-def controller(request):
-    """A controller on fake hardware, cleaned up afterwards."""
-    stations_path = getattr(request, "param", None)
-    instance = FMReceiverController(light=True, stations_path=stations_path)
+def controller(no_user_config):
+    """A controller on fake hardware, cleaned up afterwards.
+
+    Pointed at a stations.toml that does not exist, so the test never reads
+    the developer's own favourites.
+    """
+    instance = FMReceiverController(light=True,
+                                    stations_path=str(no_user_config))
     try:
         yield instance
     finally:
@@ -26,10 +31,11 @@ def controller(request):
         instance.audio_output.cleanup()
 
 
-def test_catalogue_is_loaded_and_presets_are_the_shipped_ten(controller):
+def test_catalogue_is_loaded_and_presets_are_the_shipped_ten(
+        controller, legacy_preset_mhz):
     assert len(controller.get_catalogue()) > 900
-    assert [freq / 1e6 for _, freq in controller.get_stations_list()] == [
-        78.0, 79.5, 80.0, 81.3, 82.5, 84.7, 89.7, 90.5, 91.6, 93.0]
+    assert ([freq / 1e6 for _, freq in controller.get_stations_list()]
+            == legacy_preset_mhz)
 
 
 def test_current_station_names_the_default_frequency(controller):
@@ -63,3 +69,17 @@ def test_broken_stations_file_is_reported_with_logging_disabled(
     assert str(path) in message
     # The receiver still came up with the bundled catalogue.
     assert len(instance.get_catalogue()) > 900
+
+
+def test_the_fixture_does_not_read_the_real_user_config(monkeypatch, tmp_path,
+                                                        controller,
+                                                        legacy_preset_mhz):
+    """The controller fixture passes an explicit absent path, so a developer
+    with their own favourites still sees the shipped presets here."""
+    theirs = tmp_path / "real-stations.toml"
+    theirs.write_text("[[station]]\nname='自宅'\nfreq_mhz=79.2\nfavorite=true\n",
+                      encoding="utf-8")
+    monkeypatch.setattr(stations, "user_config_path", lambda: theirs)
+
+    assert ([freq / 1e6 for _, freq in controller.get_stations_list()]
+            == legacy_preset_mhz)

@@ -187,16 +187,22 @@ def test_a_missing_manual_mapping_target_is_reported(tool, capsys):
 # ----------------------------------------------------------------------
 
 def good_payload(tool):
-    """A payload that passes every structural check."""
+    """A payload that passes every structural check.
+
+    Both sources cover every area, as the real ones do: the area check is
+    per source, because a gap in one is invisible in the union.
+    """
+    stations = []
+    for i, area in enumerate(tool.AREAS):
+        stations.append({"name": f"民放{i}", "legal_name": "",
+                         "freq_mhz": 80.0 + i * 0.1, "site": f"minpo{i}",
+                         "area": area, "kind": "fm", "source": "soumu"})
+        stations.append({"name": f"NHK-FM {i}", "legal_name": "",
+                         "freq_mhz": 85.0 + i * 0.1, "site": f"nhk{i}",
+                         "area": area, "kind": "nhk", "source": "nhk"})
     return {
-        "counts": {"total": 10, "commercial": 5, "nhk": 5, "broadcasters": 2},
-        "stations": [
-            {"name": f"局{i}", "legal_name": "", "freq_mhz": 80.0 + i * 0.1,
-             "site": f"site{i}", "area": area,
-             "kind": "fm" if i % 2 else "nhk",
-             "source": "soumu" if i % 2 else "nhk"}
-            for i, area in enumerate(tool.AREAS)
-        ],
+        "counts": {"total": 20, "commercial": 10, "nhk": 10, "broadcasters": 20},
+        "stations": stations,
         "_unresolved_brands": [],
     }
 
@@ -214,7 +220,18 @@ def test_empty_output_is_rejected(tool):
 def test_a_missing_area_is_rejected(tool):
     payload = good_payload(tool)
     payload["stations"] = payload["stations"][:-1]
-    assert any("no transmitters in" in p for p in tool._check_structure(payload))
+    assert any("nhk has no transmitters in" in p
+               for p in tool._check_structure(payload))
+
+
+def test_one_source_missing_an_area_is_rejected(tool):
+    """The union still covers every area, so only a per-source check sees it."""
+    payload = good_payload(tool)
+    payload["stations"] = [r for r in payload["stations"]
+                           if not (r["source"] == "soumu"
+                                   and r["area"] == tool.AREAS[3])]
+    problems = tool._check_structure(payload)
+    assert any("soumu has no transmitters in" in p for p in problems)
 
 
 def test_a_missing_source_is_rejected(tool):
@@ -244,12 +261,32 @@ def test_an_impossible_frequency_is_rejected(tool, freq):
 def test_a_duplicate_transmitter_is_rejected(tool):
     payload = good_payload(tool)
     payload["stations"].append(dict(payload["stations"][0]))
-    assert any("duplicate" in p for p in tool._check_structure(payload))
+    assert any("same frequency and site" in p
+               for p in tool._check_structure(payload))
+
+
+def test_the_same_transmitter_under_two_names_is_rejected(tool):
+    """The receiver keys on (frequency, site); the name is not part of it."""
+    payload = good_payload(tool)
+    clash = dict(payload["stations"][0])
+    clash["name"] = "別名"
+    payload["stations"].append(clash)
+    assert any("same frequency and site" in p
+               for p in tool._check_structure(payload))
+
+
+def test_frequencies_that_collide_after_rounding_are_rejected(tool):
+    payload = good_payload(tool)
+    clash = dict(payload["stations"][0])
+    clash["freq_mhz"] += 0.0001
+    payload["stations"].append(clash)
+    assert any("same frequency and site" in p
+               for p in tool._check_structure(payload))
 
 
 def test_drift_is_allowed_within_the_limit(tool):
     payload = good_payload(tool)
-    previous = {"counts": {"commercial": 5, "nhk": 5}}
+    previous = {"counts": {"commercial": 10, "nhk": 10}}
     assert tool._check_drift(payload, previous) == []
 
 
@@ -258,7 +295,7 @@ def test_a_collapsed_source_count_is_caught(tool):
     previous = {"counts": {"commercial": 451, "nhk": 532}}
     problems = tool._check_drift(payload, previous)
     assert len(problems) == 2
-    assert "commercial transmitters went 451 -> 5" in problems[0]
+    assert "commercial transmitters went 451 -> 10" in problems[0]
 
 
 def test_drift_needs_no_previous_snapshot(tool):
@@ -269,6 +306,16 @@ def test_drift_needs_no_previous_snapshot(tool):
 # Writing
 # ----------------------------------------------------------------------
 
+def run_main(tool, monkeypatch, output, *extra):
+    """Invoke main() with a baseline that does not exist unless asked for."""
+    argv = ["fetch_stations", "-o", str(output)]
+    if not any(a == "--baseline" for a in extra):
+        argv += ["--baseline", str(output.parent / "no-baseline.json")]
+    monkeypatch.setattr(sys, "argv", argv + list(extra))
+    monkeypatch.setattr(tool, "fetch", lambda url: b"{}")
+    return tool.main()
+
+
 def test_failing_checks_leave_the_existing_file_alone(tool, tmp_path, monkeypatch):
     output = tmp_path / "stations.json"
     output.write_text('{"stations": ["existing"]}', encoding="utf-8")
@@ -277,10 +324,8 @@ def test_failing_checks_leave_the_existing_file_alone(tool, tmp_path, monkeypatc
         mic_page().replace('class="housou"', 'class="bangumi"'),
         NHK_JSON, RADIKO_XML)
     monkeypatch.setattr(tool, "build_payload", lambda *a, **k: broken)
-    monkeypatch.setattr(tool, "fetch", lambda url: b"{}")
-    monkeypatch.setattr(sys, "argv", ["fetch_stations", "-o", str(output)])
 
-    assert tool.main() == 1
+    assert run_main(tool, monkeypatch, output) == 1
     assert json.loads(output.read_text(encoding="utf-8")) == {
         "stations": ["existing"]}
 
@@ -290,34 +335,70 @@ def test_a_valid_payload_is_written_without_internal_keys(tool, tmp_path,
     output = tmp_path / "stations.json"
     monkeypatch.setattr(tool, "build_payload",
                         lambda *a, **k: good_payload(tool))
-    monkeypatch.setattr(tool, "fetch", lambda url: b"{}")
-    monkeypatch.setattr(sys, "argv", ["fetch_stations", "-o", str(output)])
 
-    assert tool.main() == 0
+    assert run_main(tool, monkeypatch, output) == 0
     written = json.loads(output.read_text(encoding="utf-8"))
-    assert len(written["stations"]) == 10
+    assert len(written["stations"]) == 2 * len(tool.AREAS)
     assert not [k for k in written if k.startswith("_")]
 
 
 def test_force_waives_drift_but_not_structure(tool, tmp_path, monkeypatch):
     output = tmp_path / "stations.json"
-    output.write_text(json.dumps({"counts": {"commercial": 451, "nhk": 532},
-                                  "stations": []}), encoding="utf-8")
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text(json.dumps({"counts": {"commercial": 451, "nhk": 532},
+                                    "stations": []}), encoding="utf-8")
     monkeypatch.setattr(tool, "build_payload",
                         lambda *a, **k: good_payload(tool))
-    monkeypatch.setattr(tool, "fetch", lambda url: b"{}")
 
-    monkeypatch.setattr(sys, "argv", ["fetch_stations", "-o", str(output)])
-    assert tool.main() == 1                     # drift alone stops it
-
-    monkeypatch.setattr(sys, "argv",
-                        ["fetch_stations", "-o", str(output), "--force"])
-    assert tool.main() == 0
+    assert run_main(tool, monkeypatch, output,
+                    "--baseline", str(baseline)) == 1       # drift stops it
+    assert run_main(tool, monkeypatch, output,
+                    "--baseline", str(baseline), "--force") == 0
 
     broken = good_payload(tool)
     broken["stations"][0]["freq_mhz"] = float("nan")
     monkeypatch.setattr(tool, "build_payload", lambda *a, **k: broken)
-    assert tool.main() == 1                     # --force does not waive this
+    assert run_main(tool, monkeypatch, output,
+                    "--baseline", str(baseline), "--force") == 1
+
+
+def test_a_new_output_path_is_still_compared_against_the_baseline(
+        tool, tmp_path, monkeypatch):
+    """Writing a review copy elsewhere must not switch the check off."""
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text(json.dumps({"counts": {"commercial": 451, "nhk": 532},
+                                    "stations": []}), encoding="utf-8")
+    fresh = tmp_path / "somewhere-new.json"
+    monkeypatch.setattr(tool, "build_payload",
+                        lambda *a, **k: good_payload(tool))
+
+    assert run_main(tool, monkeypatch, fresh, "--baseline", str(baseline)) == 1
+    assert not fresh.exists()
+
+
+def test_an_absent_baseline_skips_the_drift_check(tool, tmp_path, monkeypatch,
+                                                  capsys):
+    output = tmp_path / "stations.json"
+    monkeypatch.setattr(tool, "build_payload",
+                        lambda *a, **k: good_payload(tool))
+    assert run_main(tool, monkeypatch, output) == 0
+    assert "no baseline" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("content", ["not json", '{"counts": null}', "[]"])
+def test_an_unusable_baseline_stops_the_build(tool, tmp_path, monkeypatch,
+                                              content):
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text(content, encoding="utf-8")
+    output = tmp_path / "stations.json"
+    monkeypatch.setattr(tool, "build_payload",
+                        lambda *a, **k: good_payload(tool))
+
+    assert run_main(tool, monkeypatch, output, "--baseline", str(baseline)) == 1
+    assert not output.exists()
+    # ... and --force is the documented way past it.
+    assert run_main(tool, monkeypatch, output,
+                    "--baseline", str(baseline), "--force") == 0
 
 
 def test_a_fetch_failure_leaves_the_file_alone(tool, tmp_path, monkeypatch):
@@ -330,4 +411,5 @@ def test_a_fetch_failure_leaves_the_file_alone(tool, tmp_path, monkeypatch):
     monkeypatch.setattr(tool, "fetch", explode)
     monkeypatch.setattr(sys, "argv", ["fetch_stations", "-o", str(output)])
     assert tool.main() == 1
+    monkeypatch.undo()
     assert output.read_text(encoding="utf-8") == "original"

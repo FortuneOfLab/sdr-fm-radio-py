@@ -15,20 +15,10 @@ import pytest
 from fm_radio import stations as st
 from fm_radio.stations import Station
 
-from test_stations import LEGACY_PRESET_MHZ, needs_tomllib, write_toml
-
-
-@pytest.fixture(scope="module")
-def catalogue() -> list[Station]:
-    return st.load_stations(user_path="/nonexistent/stations.toml")
-
-
-def collect(tmp_path, body: str, **kwargs):
-    """Load with *body* as stations.toml, returning (stations, warnings)."""
-    warnings: list[str] = []
-    loaded = st.load_stations(user_path=write_toml(tmp_path, body),
-                              warn=warnings.append, **kwargs)
-    return loaded, warnings
+#: See test_stations.py: defined per module so that no test module has to
+#: import another one.
+needs_tomllib = pytest.mark.skipif(
+    st.tomllib is None, reason="tomllib requires Python 3.11+")
 
 
 # ----------------------------------------------------------------------
@@ -39,15 +29,15 @@ def collect(tmp_path, body: str, **kwargs):
 @pytest.mark.parametrize("body", ["override = 1", "station = 1",
                                   'override = "x"', "station = [1, 2]"])
 def test_wrong_type_for_a_table_array_is_reported_not_raised(
-        body, tmp_path, catalogue):
-    loaded, warnings = collect(tmp_path, body + "\n")
+        body, load_config, catalogue):
+    loaded, warnings = load_config(body + "\n")
     assert len(loaded) == len(catalogue)
     assert warnings
 
 
 @needs_tomllib
-def test_a_bad_entry_does_not_discard_the_good_ones(tmp_path):
-    loaded, warnings = collect(tmp_path, """
+def test_a_bad_entry_does_not_discard_the_good_ones(load_config):
+    loaded, warnings = load_config("""
 [[station]]
 name = "良"
 freq_mhz = 79.2
@@ -61,8 +51,8 @@ name = "周波数なし"
 
 
 @needs_tomllib
-def test_a_non_table_element_is_skipped_but_the_array_still_applies(tmp_path):
-    loaded, warnings = collect(tmp_path, """
+def test_a_non_table_element_is_skipped_but_the_array_still_applies(load_config):
+    loaded, warnings = load_config("""
 station = [ 1, { name = "良", freq_mhz = 79.2 } ]
 """)
     assert [s for s in loaded if s.name == "良"]
@@ -71,22 +61,23 @@ station = [ 1, { name = "良", freq_mhz = 79.2 } ]
 
 @pytest.mark.parametrize("body", ["[]", '{"stations": null}',
                                   '{"stations": 5}', '"nonsense"'])
-def test_unexpected_bundled_json_shape_is_reported_not_raised(body, tmp_path):
+def test_unexpected_bundled_json_shape_is_reported_not_raised(
+        body, tmp_path, no_user_config):
     data = tmp_path / "stations.json"
     data.write_text(body, encoding="utf-8")
     warnings: list[str] = []
-    loaded = st.load_stations(user_path=tmp_path / "absent.toml",
+    loaded = st.load_stations(user_path=no_user_config,
                               data_path=data, warn=warnings.append)
     assert loaded == []
     assert warnings
 
 
-def test_non_dict_bundled_entries_are_skipped(tmp_path):
+def test_non_dict_bundled_entries_are_skipped(tmp_path, no_user_config):
     data = tmp_path / "stations.json"
     data.write_text(json.dumps({"stations": [
         "not a station", None, {"name": "良", "freq_mhz": 80.0, "area": "関東"},
     ]}), encoding="utf-8")
-    loaded = st.load_stations(user_path=tmp_path / "absent.toml", data_path=data)
+    loaded = st.load_stations(user_path=no_user_config, data_path=data)
     assert [s.name for s in loaded] == ["良"]
 
 
@@ -96,9 +87,9 @@ def test_non_dict_bundled_entries_are_skipped(tmp_path):
 
 @needs_tomllib
 @pytest.mark.parametrize("value", ["nan", "inf", "-inf"])
-def test_non_finite_match_freq_matches_nothing(value, tmp_path, catalogue):
+def test_non_finite_match_freq_matches_nothing(value, load_config, catalogue):
     """abs(x - nan) > tol is false, so a NaN rule used to select everything."""
-    loaded, warnings = collect(tmp_path, f"""
+    loaded, warnings = load_config(f"""
 [[override]]
 match_freq_mhz = {value}
 hidden = true
@@ -109,8 +100,8 @@ hidden = true
 
 @needs_tomllib
 @pytest.mark.parametrize("value", ["nan", "inf", "-inf"])
-def test_non_finite_station_frequency_is_skipped(value, tmp_path, catalogue):
-    loaded, warnings = collect(tmp_path, f"""
+def test_non_finite_station_frequency_is_skipped(value, load_config, catalogue):
+    loaded, warnings = load_config(f"""
 [[station]]
 name = "無限"
 freq_mhz = {value}
@@ -121,8 +112,8 @@ freq_mhz = {value}
 
 
 @needs_tomllib
-def test_non_finite_override_frequency_leaves_the_station_alone(tmp_path):
-    loaded, warnings = collect(tmp_path, """
+def test_non_finite_override_frequency_leaves_the_station_alone(load_config):
+    loaded, warnings = load_config("""
 [[override]]
 match_name = "TOKYO FM"
 match_site = "東京"
@@ -157,32 +148,33 @@ def test_normalize_freq_rounds_to_the_catalogue_grid():
 # ----------------------------------------------------------------------
 
 @needs_tomllib
-def test_favorite_false_removes_one_shipped_preset(tmp_path):
-    loaded, _ = collect(tmp_path, """
+def test_favorite_false_removes_one_shipped_preset(load_config,
+                                                   legacy_preset_mhz):
+    loaded, _ = load_config("""
 [[override]]
 match_freq_mhz = 80.0
 match_site = "東京"
 favorite = false
 """)
     assert [s.freq_mhz for s in st.favorites(loaded)] == [
-        f for f in LEGACY_PRESET_MHZ if f != 80.0]
+        f for f in legacy_preset_mhz if f != 80.0]
 
 
 @needs_tomllib
-def test_all_presets_can_be_switched_off(tmp_path):
+def test_all_presets_can_be_switched_off(load_config):
     body = "".join(f"""
 [[override]]
 match_freq_mhz = {freq}
 match_site = "{site}"
 favorite = false
 """ for freq, site in st.DEFAULT_FAVORITES)
-    loaded, _ = collect(tmp_path, body)
+    loaded, _ = load_config(body)
     assert st.favorites(loaded) == []
 
 
 @needs_tomllib
-def test_one_true_replaces_the_shipped_presets(tmp_path):
-    loaded, _ = collect(tmp_path, """
+def test_one_true_replaces_the_shipped_presets(load_config):
+    loaded, _ = load_config("""
 [[override]]
 match_name = "FM COCOLO"
 favorite = true
@@ -196,15 +188,16 @@ favorite = false
 
 
 @needs_tomllib
-def test_hidden_only_keeps_the_remaining_shipped_presets(tmp_path):
-    loaded, _ = collect(tmp_path, """
+def test_hidden_only_keeps_the_remaining_shipped_presets(load_config,
+                                                         legacy_preset_mhz):
+    loaded, _ = load_config("""
 [[override]]
 match_freq_mhz = 80.0
 match_site = "東京"
 hidden = true
 """)
     assert [s.freq_mhz for s in st.favorites(loaded)] == [
-        f for f in LEGACY_PRESET_MHZ if f != 80.0]
+        f for f in legacy_preset_mhz if f != 80.0]
 
 
 def test_favorite_is_always_a_bool_after_loading(catalogue):
@@ -242,15 +235,15 @@ name = "改名後"
 
 @needs_tomllib
 @pytest.mark.parametrize("body", [RENAME_THEN_HIDE, HIDE_THEN_RENAME])
-def test_hidden_wins_whatever_the_rule_order(body, tmp_path):
-    loaded, _ = collect(tmp_path, body)
+def test_hidden_wins_whatever_the_rule_order(body, load_config):
+    loaded, _ = load_config(body)
     assert not [s for s in loaded if s.key == (80.0, "東京")]
 
 
 @needs_tomllib
-def test_rules_match_the_bundled_entry_not_the_edited_one(tmp_path):
+def test_rules_match_the_bundled_entry_not_the_edited_one(load_config):
     """Renaming must not change which later rules apply."""
-    loaded, _ = collect(tmp_path, """
+    loaded, _ = load_config("""
 [[override]]
 match_name = "TOKYO FM"
 match_site = "東京"
@@ -266,8 +259,8 @@ area = "テスト"
 
 
 @needs_tomllib
-def test_later_edits_win_over_earlier_ones(tmp_path):
-    loaded, _ = collect(tmp_path, """
+def test_later_edits_win_over_earlier_ones(load_config):
+    loaded, _ = load_config("""
 [[override]]
 match_freq_mhz = 80.0
 match_site = "東京"
@@ -283,8 +276,8 @@ name = "二番目"
 
 
 @needs_tomllib
-def test_a_hidden_key_can_be_re_added(tmp_path):
-    loaded, _ = collect(tmp_path, """
+def test_a_hidden_key_can_be_re_added(load_config):
+    loaded, _ = load_config("""
 [[override]]
 match_freq_mhz = 80.0
 match_site = "東京"
@@ -303,9 +296,9 @@ site = "東京"
 # ----------------------------------------------------------------------
 
 @needs_tomllib
-def test_override_frequency_match_is_exact_on_the_catalogue_grid(tmp_path):
+def test_override_frequency_match_is_exact_on_the_catalogue_grid(load_config):
     """80.004 is not 80.0: identity and matching use the same rounding."""
-    loaded, _ = collect(tmp_path, """
+    loaded, _ = load_config("""
 [[override]]
 match_freq_mhz = 80.004
 match_site = "東京"
@@ -315,8 +308,8 @@ hidden = true
 
 
 @needs_tomllib
-def test_override_frequency_match_tolerates_sub_khz_rounding(tmp_path):
-    loaded, _ = collect(tmp_path, """
+def test_override_frequency_match_tolerates_sub_khz_rounding(load_config):
+    loaded, _ = load_config("""
 [[override]]
 match_freq_mhz = 80.0004
 match_site = "東京"
@@ -326,8 +319,8 @@ hidden = true
 
 
 @needs_tomllib
-def test_a_user_entry_on_the_same_grid_point_replaces_the_bundled_one(tmp_path):
-    loaded, _ = collect(tmp_path, """
+def test_a_user_entry_on_the_same_grid_point_replaces_the_bundled_one(load_config):
+    loaded, _ = load_config("""
 [[station]]
 name = "端数"
 freq_mhz = 80.0004
@@ -341,8 +334,8 @@ site = "東京"
 # ----------------------------------------------------------------------
 
 @needs_tomllib
-def test_in_area_ignores_case(tmp_path):
-    loaded, _ = collect(tmp_path, """
+def test_in_area_ignores_case(load_config):
+    loaded, _ = load_config("""
 [[station]]
 name = "自宅"
 freq_mhz = 79.2
@@ -357,10 +350,10 @@ area = "Home"
 # ----------------------------------------------------------------------
 
 @needs_tomllib
-def test_warn_callback_fires_while_logging_is_disabled(tmp_path):
+def test_warn_callback_fires_while_logging_is_disabled(load_config):
     logging.disable(logging.CRITICAL)
     try:
-        _, warnings = collect(tmp_path, "[[station]\nname = broken")
+        _, warnings = load_config("[[station]\nname = broken")
     finally:
         logging.disable(logging.NOTSET)
     assert warnings and "TOML" in warnings[0]

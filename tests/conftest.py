@@ -105,3 +105,68 @@ def sdr_receiver():
     recv = SDRReceiver()
     yield recv
     recv.stop()
+
+
+# ----------------------------------------------------------------------
+# Station catalogue fixtures
+#
+# Shared through fixtures rather than through imports between test modules:
+# a test module is not importable under every pytest import mode, and the
+# catalogue tests must never read the developer's own stations.toml.
+# ----------------------------------------------------------------------
+
+#: The presets the receiver shipped with before the catalogue existed.  The
+#: names moved from legal names to brand names, but these ten frequencies are
+#: what `list` and numeric tuning must keep producing.
+LEGACY_PRESET_MHZ = [78.0, 79.5, 80.0, 81.3, 82.5, 84.7, 89.7, 90.5, 91.6, 93.0]
+
+
+@pytest.fixture
+def legacy_preset_mhz() -> list[float]:
+    return list(LEGACY_PRESET_MHZ)
+
+
+@pytest.fixture
+def no_user_config(tmp_path):
+    """A stations.toml path that does not exist, inside this test's tmp dir.
+
+    Every catalogue test has to pass one of these: with no explicit path the
+    loader reads the real user configuration, and a developer with their own
+    favourites would see unrelated failures.
+    """
+    return tmp_path / "absent-stations.toml"
+
+
+@pytest.fixture(scope="session")
+def catalogue(tmp_path_factory):
+    """The bundled catalogue with no user layer applied."""
+    from fm_radio import stations as st
+    absent = tmp_path_factory.mktemp("catalogue") / "absent-stations.toml"
+    return st.load_stations(user_path=absent)
+
+
+@pytest.fixture
+def write_toml(tmp_path):
+    """Write *body* as a stations.toml and return its path."""
+    def _write(body: str):
+        path = tmp_path / "stations.toml"
+        path.write_text(body, encoding="utf-8")
+        return path
+    return _write
+
+
+@pytest.fixture
+def load_config(write_toml):
+    """Load the catalogue with *body* as the user's stations.toml.
+
+    Returns (stations, warnings), so a test can assert both on the merged
+    catalogue and on what the user would have been told about their file.
+    """
+    from fm_radio import stations as st
+
+    def _load(body: str, **kwargs):
+        warnings: list[str] = []
+        stations = st.load_stations(user_path=write_toml(body),
+                                    warn=warnings.append, **kwargs)
+        return stations, warnings
+    return _load

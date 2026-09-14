@@ -74,12 +74,20 @@ python tools/fetch_stations.py
 ```
 
 The generated list is validated before anything is written — structure,
-required fields, area coverage, duplicate transmitters, brand resolution, and
-how far the per-source counts moved from the committed snapshot. A failing
-check exits non-zero and leaves the existing file untouched, so an upstream
-markup change cannot quietly replace the catalogue with a shorter one. Pass
-`--force` to accept a large but expected change in the counts; the structural
-checks always apply.
+required fields, band limits, per-source area coverage, duplicate
+transmitters, brand resolution, and how far each source's transmitter count
+moved. A failing check exits non-zero and leaves the existing file untouched,
+so an upstream markup change cannot quietly replace the catalogue with a
+shorter one.
+
+The counts are compared against `fm_radio/data/stations.json`, not against
+wherever `-o` points, so writing a copy elsewhere for review does not switch
+the comparison off. Use `--baseline` to compare against something else. If the
+baseline does not exist the comparison is skipped and says so — that is the
+first generation in a fresh tree. If it exists but cannot be read, the build
+stops: a checkout in that state is exactly when a truncated list gets
+committed unnoticed. `--force` waives the count comparison and nothing else;
+the structural checks always apply.
 
 It merges three primary sources: the
 [総務省 list](https://www.soumu.go.jp/menu_seisaku/ictseisaku/housou_suishin/fm-list.html)
@@ -137,7 +145,12 @@ Reading this file needs Python 3.11 or newer (`tomllib`); on older versions
 the bundled list still loads. Anything the receiver could not understand —
 invalid TOML, a rule that matches nothing, a frequency that is not a number —
 is reported on stderr at startup and skipped, rather than stopping the
-receiver.
+receiver. That includes a rule that matched no station at all, which is
+usually a typo or a transmitter the upstream list renamed.
+
+`hidden` and `favorite` must be written as `true` or `false`. A quoted
+`"false"` is a string, not a boolean, and is reported and ignored rather than
+taken at face value — as a non-empty string it would otherwise mean `true`.
 
 ## Code Structure
 

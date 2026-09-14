@@ -132,7 +132,9 @@ def normalize_freq(value: object) -> float | None:
         return None
     try:
         freq = float(value)             # type: ignore[arg-type]
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError: TOML integers are unbounded, so a 400-digit literal
+        # parses fine and only fails on the conversion to float.
         return None
     if not math.isfinite(freq):
         return None
@@ -309,6 +311,21 @@ def _read_user_toml(path: Path, report: Reporter) -> dict:
     return payload
 
 
+def _as_bool(value: object, where: str, report: Reporter) -> bool | None:
+    """Return *value* if it is a real bool, else None after reporting it.
+
+    ``hidden = "false"`` is a non-empty string, which is truthy: taken at face
+    value it hides every station the rule matches, which is the opposite of
+    what was written.  Frequencies deliberately do accept strings; these two
+    flags do not.
+    """
+    if isinstance(value, bool):
+        return value
+    report(f"stations.toml: {where} must be true or false, found "
+           f"{value!r}; ignoring that setting")
+    return None
+
+
 def _station_from_toml(entry: dict, report: Reporter) -> Station | None:
     freq_mhz = normalize_freq(entry.get("freq_mhz"))
     if freq_mhz is None:
@@ -320,7 +337,10 @@ def _station_from_toml(entry: dict, report: Reporter) -> Station | None:
                f"({BAND_MIN_MHZ}-{BAND_MAX_MHZ} MHz); keeping it anyway")
     name = entry.get("name")
     name = str(name) if name else f"{freq_mhz:.1f} MHz"
-    favorite = entry.get("favorite")
+    favorite = None
+    if "favorite" in entry:
+        favorite = _as_bool(entry["favorite"],
+                            f"[[station]] {name!r} favorite", report)
     return Station(
         name=name,
         freq_mhz=freq_mhz,
@@ -329,8 +349,15 @@ def _station_from_toml(entry: dict, report: Reporter) -> Station | None:
         kind=str(entry.get("kind", "user")),
         legal_name=str(entry.get("legal_name", "")),
         source="user",
-        favorite=None if favorite is None else bool(favorite),
+        favorite=favorite,
     )
+
+
+def _can_match(rule: dict) -> bool:
+    """True if *rule* could match something, i.e. it is worth counting."""
+    if "match_freq_mhz" in rule and normalize_freq(rule["match_freq_mhz"]) is None:
+        return False
+    return any(k in rule for k in ("match_name", "match_site", "match_freq_mhz"))
 
 
 def _override_matches(station: Station, rule: dict) -> bool:
@@ -361,20 +388,41 @@ def _override_matches(station: Station, rule: dict) -> bool:
     return checked
 
 
-def _check_override(rule: dict, index: int, report: Reporter) -> None:
-    """Report a rule that cannot do what it looks like it is asking for."""
-    if "match_freq_mhz" in rule and normalize_freq(rule["match_freq_mhz"]) is None:
+def _clean_rule(rule: dict, index: int, report: Reporter) -> dict:
+    """Return *rule* with unusable settings dropped, reporting each once.
+
+    Done up front rather than per station: the same rule is tested against
+    every entry in the catalogue, and a problem with the rule is a property
+    of the rule, not of the 983 stations it was compared against.
+    """
+    cleaned = dict(rule)
+
+    for field in ("hidden", "favorite"):
+        if field in cleaned and _as_bool(
+                cleaned[field], f"[[override]] #{index} {field}", report) is None:
+            del cleaned[field]
+
+    if "freq_mhz" in cleaned and normalize_freq(cleaned["freq_mhz"]) is None:
         report(f"stations.toml: [[override]] #{index} has a non-finite "
-               f"match_freq_mhz ({rule['match_freq_mhz']!r}); it matches nothing")
-    elif not any(k in rule for k in ("match_name", "match_site", "match_freq_mhz")):
+               f"freq_mhz ({cleaned['freq_mhz']!r}); the frequency is left alone")
+        del cleaned["freq_mhz"]
+
+    if "match_freq_mhz" in cleaned and normalize_freq(cleaned["match_freq_mhz"]) is None:
+        report(f"stations.toml: [[override]] #{index} has a non-finite "
+               f"match_freq_mhz ({cleaned['match_freq_mhz']!r}); it matches nothing")
+    elif not any(k in cleaned for k in
+                 ("match_name", "match_site", "match_freq_mhz")):
         report(f"stations.toml: [[override]] #{index} has no match_name / "
                f"match_site / match_freq_mhz; it matches nothing")
-    if "freq_mhz" in rule and normalize_freq(rule["freq_mhz"]) is None:
-        report(f"stations.toml: [[override]] #{index} has a non-finite "
-               f"freq_mhz ({rule['freq_mhz']!r}); the frequency is left alone")
+    return cleaned
 
 
 def _apply_override(station: Station, rule: dict) -> Station:
+    """Return *station* with the edits in *rule* applied.
+
+    ``rule`` has been through :func:`_clean_rule`, so any setting still
+    present here is of a usable type.
+    """
     changes: dict[str, object] = {}
     for field in ("name", "site", "area", "kind", "legal_name"):
         if field in rule:
@@ -384,29 +432,46 @@ def _apply_override(station: Station, rule: dict) -> Station:
         if freq_mhz is not None:
             changes["freq_mhz"] = freq_mhz
     if "favorite" in rule:
-        changes["favorite"] = bool(rule["favorite"])
+        changes["favorite"] = rule["favorite"]
     return replace(station, **changes) if changes else station
 
 
 def _merge_user_layer(stations: list[Station], config: dict,
                       report: Reporter) -> list[Station]:
     """Apply ``[[override]]`` rules, then append ``[[station]]`` entries."""
-    rules = _dict_items(config.get("override"), "override", report)
-    for index, rule in enumerate(rules, start=1):
-        _check_override(rule, index, report)
+    rules = [_clean_rule(rule, index, report) for index, rule
+             in enumerate(_dict_items(config.get("override"), "override", report),
+                          start=1)]
 
     if rules:
+        match_counts = [0] * len(rules)
         merged: list[Station] = []
         for station in stations:
             # Match every rule against the bundled entry, so renaming a
             # station cannot change which later rules apply to it.
-            matching = [r for r in rules if _override_matches(station, r)]
-            if any(r.get("hidden") for r in matching):
-                continue                        # hiding wins over editing
+            matching = []
+            hidden = False
+            for index, rule in enumerate(rules):
+                if not _override_matches(station, rule):
+                    continue
+                match_counts[index] += 1
+                if rule.get("hidden"):
+                    hidden = True              # hiding wins over editing
+                else:
+                    matching.append(rule)
+            if hidden:
+                continue
             for rule in matching:
                 station = _apply_override(station, rule)
             merged.append(station)
         stations = merged
+
+        # A rule that matches nothing is almost always a typo, or a station
+        # the upstream list renamed; either way its effect is simply missing.
+        for index, count in enumerate(match_counts, start=1):
+            if count == 0 and _can_match(rules[index - 1]):
+                report(f"stations.toml: [[override]] #{index} matched no "
+                       f"station; check the name, site or frequency")
 
     for entry in _dict_items(config.get("station"), "station", report):
         added = _station_from_toml(entry, report)
@@ -457,7 +522,15 @@ def load_stations(user_path: Path | str | None = None,
     stations = _load_bundled(Path(data_path) if data_path else DATA_PATH, report)
 
     path = Path(user_path) if user_path is not None else user_config_path()
-    if path.exists():
+    try:
+        present = path.exists()
+    except OSError as exc:
+        # A permission error or an unreachable network path must not be the
+        # thing that stops the receiver from starting.
+        report(f"Could not check for {path}: {exc}; "
+               f"using the bundled station list only")
+        present = False
+    if present:
         config = _read_user_toml(path, report)
         if config:
             before = len(stations)

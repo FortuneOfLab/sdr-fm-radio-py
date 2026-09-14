@@ -11,24 +11,9 @@ from fm_radio import stations as st
 from fm_radio.stations import Station
 
 
-# The presets the receiver shipped with before the catalogue existed.
-# The names moved from legal names to brand names, but these ten
-# frequencies are what `list` and numeric tuning must keep producing.
-LEGACY_PRESET_MHZ = [78.0, 79.5, 80.0, 81.3, 82.5, 84.7, 89.7, 90.5, 91.6, 93.0]
-
-
-@pytest.fixture(scope="module")
-def catalogue() -> list[Station]:
-    """The bundled catalogue, with no user layer applied."""
-    return st.load_stations(user_path="/nonexistent/stations.toml")
-
-
-def write_toml(tmp_path, body: str):
-    path = tmp_path / "stations.toml"
-    path.write_text(body, encoding="utf-8")
-    return path
-
-
+#: Skip marker for the user layer, which needs tomllib.  Defined per module
+#: rather than shared through an import: importing one test module from
+#: another breaks under pytest's importlib import mode.
 # ----------------------------------------------------------------------
 # Bundled snapshot
 # ----------------------------------------------------------------------
@@ -84,9 +69,10 @@ def test_relay_transmitters_are_included(catalogue):
 # Presets
 # ----------------------------------------------------------------------
 
-def test_default_presets_match_the_shipped_station_list(catalogue):
+def test_default_presets_match_the_shipped_station_list(catalogue,
+                                                       legacy_preset_mhz):
     preset_freqs = [s.freq_mhz for s in st.favorites(catalogue)]
-    assert preset_freqs == LEGACY_PRESET_MHZ
+    assert preset_freqs == legacy_preset_mhz
 
 
 def test_presets_are_named(catalogue):
@@ -144,14 +130,13 @@ needs_tomllib = pytest.mark.skipif(
     st.tomllib is None, reason="tomllib requires Python 3.11+")
 
 
-def test_missing_user_file_is_not_an_error(tmp_path):
-    loaded = st.load_stations(user_path=tmp_path / "absent.toml")
-    assert loaded
+def test_missing_user_file_is_not_an_error(no_user_config):
+    assert st.load_stations(user_path=no_user_config)
 
 
 @needs_tomllib
-def test_user_station_is_added_and_wins_the_frequency(tmp_path):
-    path = write_toml(tmp_path, """
+def test_user_station_is_added_and_wins_the_frequency(write_toml):
+    path = write_toml("""
 [[station]]
 name = "レインボータウンFM"
 freq_mhz = 79.2
@@ -168,8 +153,8 @@ favorite = true
 
 
 @needs_tomllib
-def test_user_station_replaces_a_colliding_bundled_entry(tmp_path):
-    path = write_toml(tmp_path, """
+def test_user_station_replaces_a_colliding_bundled_entry(write_toml):
+    path = write_toml("""
 [[station]]
 name = "自宅の80.0"
 freq_mhz = 80.0
@@ -182,8 +167,8 @@ site = "東京"
 
 
 @needs_tomllib
-def test_override_hides_a_transmitter(tmp_path):
-    path = write_toml(tmp_path, """
+def test_override_hides_a_transmitter(write_toml):
+    path = write_toml("""
 [[override]]
 match_freq_mhz = 80.0
 match_site = "東京"
@@ -194,8 +179,8 @@ hidden = true
 
 
 @needs_tomllib
-def test_override_corrects_a_frequency(tmp_path):
-    path = write_toml(tmp_path, """
+def test_override_corrects_a_frequency(write_toml):
+    path = write_toml("""
 [[override]]
 match_name = "TOKYO FM"
 match_site = "八王子"
@@ -207,8 +192,8 @@ freq_mhz = 80.6
 
 
 @needs_tomllib
-def test_override_matches_on_the_legal_name(tmp_path):
-    path = write_toml(tmp_path, """
+def test_override_matches_on_the_legal_name(write_toml):
+    path = write_toml("""
 [[override]]
 match_name = "エフエム東京"
 match_site = "東京"
@@ -219,9 +204,9 @@ name = "TFM"
 
 
 @needs_tomllib
-def test_override_without_a_match_key_changes_nothing(tmp_path, catalogue):
+def test_override_without_a_match_key_changes_nothing(write_toml, catalogue):
     """A rule that selects everything would silently rewrite the catalogue."""
-    path = write_toml(tmp_path, """
+    path = write_toml("""
 [[override]]
 hidden = true
 """)
@@ -229,8 +214,8 @@ hidden = true
 
 
 @needs_tomllib
-def test_override_can_mark_a_favorite(tmp_path):
-    path = write_toml(tmp_path, """
+def test_override_can_mark_a_favorite(write_toml):
+    path = write_toml("""
 [[override]]
 match_name = "FM COCOLO"
 favorite = true
@@ -240,14 +225,14 @@ favorite = true
 
 
 @needs_tomllib
-def test_broken_toml_falls_back_to_the_bundled_list(tmp_path, catalogue, caplog):
-    path = write_toml(tmp_path, "[[station]\nname = broken")
+def test_broken_toml_falls_back_to_the_bundled_list(write_toml, catalogue):
+    path = write_toml("[[station]\nname = broken")
     assert len(st.load_stations(user_path=path)) == len(catalogue)
 
 
 @needs_tomllib
-def test_station_without_frequency_is_skipped(tmp_path, catalogue):
-    path = write_toml(tmp_path, """
+def test_station_without_frequency_is_skipped(write_toml, catalogue):
+    path = write_toml("""
 [[station]]
 name = "周波数なし"
 """)
@@ -256,19 +241,20 @@ name = "周波数なし"
     assert not [s for s in loaded if s.name == "周波数なし"]
 
 
-def test_malformed_bundled_entries_are_skipped(tmp_path):
+def test_malformed_bundled_entries_are_skipped(tmp_path, no_user_config):
     data = tmp_path / "stations.json"
     data.write_text(json.dumps({"stations": [
         {"name": "良", "freq_mhz": 80.0, "area": "関東"},
         {"name": "周波数なし"},
         {"name": "文字列", "freq_mhz": "abc"},
     ]}), encoding="utf-8")
-    loaded = st.load_stations(user_path=tmp_path / "absent.toml", data_path=data)
+    loaded = st.load_stations(user_path=no_user_config, data_path=data)
     assert [s.name for s in loaded] == ["良"]
 
 
-def test_unreadable_bundled_file_yields_an_empty_catalogue(tmp_path):
-    assert st.load_stations(user_path=tmp_path / "absent.toml",
+def test_unreadable_bundled_file_yields_an_empty_catalogue(tmp_path,
+                                                           no_user_config):
+    assert st.load_stations(user_path=no_user_config,
                             data_path=tmp_path / "absent.json") == []
 
 
