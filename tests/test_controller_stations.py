@@ -61,6 +61,8 @@ def test_search_reaches_the_whole_catalogue(controller):
     assert controller.stations_in_area("関東")
 
 
+@pytest.mark.skipif(stations.tomllib is None,
+                    reason="tomllib requires Python 3.11+")
 def test_an_explicit_path_is_used_instead_of_the_user_config(
         build_controller, monkeypatch, tmp_path, legacy_preset_mhz):
     """The catalogue tests must not depend on the developer's own presets.
@@ -68,6 +70,11 @@ def test_an_explicit_path_is_used_instead_of_the_user_config(
     The redirect has to happen before the controller is built, and the first
     assertion has to prove the redirect would otherwise take effect — without
     it, this test passes whether or not stations_path is honoured.
+
+    Skipped without tomllib: the decoy configuration is a TOML file, so on
+    3.9/3.10 the loader correctly falls back to the bundled catalogue and
+    there is nothing for the redirect to prove.  The rest of this module does
+    not depend on the user layer and still runs there.
     """
     theirs = tmp_path / "real-stations.toml"
     theirs.write_text("""
