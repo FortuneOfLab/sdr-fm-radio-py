@@ -280,13 +280,21 @@ class FMReceiverController:
         return nearest(self.catalogue, self.get_frequency())
 
     def get_status(self) -> StatusSnapshot | None:
-        """Return the most recent receiver state, or None if none yet.
+        """Return the current receiver state, or None if there is not one.
 
         The snapshot is produced by the processing thread at roughly 20 Hz
         and is a plain immutable value: reading it neither blocks that thread
-        nor reaches into any of its objects.  None means no IQ block has been
-        processed yet — the SDR is still starting, or the receiver was only
-        just constructed.
+        nor reaches into any of its objects.
+
+        None has two causes, and a display that distinguishes "starting up"
+        from "just retuned" has to tell them apart by what it asked for
+        rather than by this return value:
+
+        * No IQ block has been processed yet — the SDR is still starting, or
+          the receiver was only just constructed.
+        * Everything published so far was captured under a previous tuning.
+          Retuning invalidates it immediately, and the next snapshot arrives
+          with the following publish, up to one interval later.
         """
         return self.telemetry.latest
 
