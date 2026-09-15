@@ -574,16 +574,47 @@ list / search）→ 3) 数値入力（局番号 / 周波数）の順。プレフ
 - スナップショット生成が例外を投げても警告ログのみで、音声処理は継続
   します。
 
-### 3.13 エントリポイント（__main__.py）
+### 3.13 GUI（gui/）
+
+PySide6 によるステータスウィンドウ。**任意依存**で、受信機自体は Qt なしで
+動作します。`gui/` の外から PySide6 を import している箇所はありません。
+
+- `gui/run()`: `--gui` の入口。PySide6 が無ければ導入方法を stderr に出して
+  終了コード 1 を返します。
+- `gui/main_window.py` の `ReceiverWindow`: 周波数・局名・プリセット、
+  ステレオ状態、パイロット SNR、L/R レベル、ゲイン（Auto + スライダ）、
+  録音、ステータスバー（ヘルス・ブロック時間・キュー・ドロップ・稼働時間）。
+
+表示は `controller.get_status()` を 50 ms（公開レートと同じ 20 Hz）で
+ポーリングするだけで、受信機の内部オブジェクトには触れません。操作は
+すべて controller の facade を経由します。ウィンドウは受信機の状態を
+自分で保持しないため、リフレッシュとユーザ操作が競合しません。ただし
+次の 2 つは例外で、個別に扱っています。
+
+- **ゲインスライダ**: 自動ゲインは毎秒数回値を動かすためスライダも追従
+  させますが、ドラッグ中（`isSliderDown()`）は動かしません。
+- **Auto チェックボックス / 録音ボタン**: 受信機の状態に追従させる際、
+  チェックボックスは `toggled` に接続しているため `blockSignals` で
+  signal の往復を止めます。録音ボタンは `clicked` に接続しており
+  `setChecked()` では発火しないため、その処理は不要です。
+
+失敗（選局・録音）はステータスバーに `NOTICE_SECONDS`（5 秒）表示します。
+ヘルス行は 50 ms ごとに書き換わるため、これがないと読む前に消えます。
+
+GUI モードでは `controller.start_background()` がスレッドだけを起動し、
+メインループは Qt が持ちます。ウィンドウを閉じると `quit_event` を立て、
+`__main__` が `cleanup()` します。
+
+### 3.14 エントリポイント（__main__.py）
 
 `python -m fm_radio` / `fm_receiver.py` の起点。コマンドライン引数
-（`--light` / `--log`（別名 `--verbose` / `-v`）/ `--debug` /
-`--log-file`）を解釈し、ログ設定を
+（`--light` / `--gui` / `--stations` / `--log`（別名 `--verbose` / `-v`）/
+`--debug` / `--log-file`）を解釈し、ログ設定を
 行い（有効時）、`FMReceiverController` を生成して `start()` を呼びます。
 ログ有効時は GC モニタ（Gen2 コレクションのポーズ時間を記録）も登録し、
 音声ドロップ調査に用います。
 
-### 3.14 ログ設定（logging_config.py）
+### 3.15 ログ設定（logging_config.py）
 
 `setup_logging()` がフォーマットとハンドラ（コンソール、任意でファイル）
 を構成します。ログはオプトインで、無効時は `logging.disable(CRITICAL)`
@@ -814,6 +845,9 @@ python fm_receiver.py
 
 # 軽量モード
 python fm_receiver.py --light
+
+# GUI（PySide6 が必要。未導入なら導入方法を表示して終了）
+python fm_receiver.py --gui
 
 # 局リストを差し替え
 python fm_receiver.py --stations path/to/stations.toml

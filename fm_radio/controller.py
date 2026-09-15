@@ -656,41 +656,54 @@ class FMReceiverController:
         finally:
             self.logger.info("Processing thread stopped")
 
+    def start_background(self) -> None:
+        """Start the SDR and processing threads and return.
+
+        Everything :meth:`start` does except run a user interface, so a front
+        end with its own event loop can take that part over.  The caller owns
+        :meth:`cleanup` from here on.
+        """
+        self.logger.info("Starting FM Receiver Controller")
+
+        # Pre-compile Numba / FFT paths before the SDR delivers samples so
+        # the first block does not stall the realtime path while JIT
+        # compilation runs.
+        self._prewarm_jit()
+
+        sdr_thread = threading.Thread(target=self.sdr_receiver.start, daemon=True)
+        sdr_thread.start()
+        self.threads.append(sdr_thread)
+
+        proc_thread = threading.Thread(target=self.processing_thread, daemon=True)
+        proc_thread.start()
+        self.threads.append(proc_thread)
+
+        self.logger.info("FM Receiver started successfully")
+
+    def _announce(self) -> None:
+        """Print the banner the command line starts with."""
+        if self.light:
+            print("FM Receiver (Light) started.")
+            print(f"SDR sample_rate: {self.sdr_receiver.sample_rate:.0f} Hz, Audio: {self.audio_output.output_rate} Hz")
+        else:
+            print(f"SDR sample_rate: {self.sdr_receiver.sample_rate:.0f} Hz, Composite: {self.fm_demodulator.composite_rate:.0f} Hz, Audio: {self.audio_output.output_rate} Hz")
+            station = self.current_station()
+            print(f"Default station: "
+                  f"{self.sdr_receiver.get_center_frequency()/1e6:.1f} MHz"
+                  + (f" ({station.name})" if station else ""))
+            print("Stereo demodulation enabled.")
+            print("Commands: q, list, <freq>, stereo on/off, record start/stop, iqrec start/stop, agc on/off, gain <value>, etc.")
+        print("Auto gain control: ON")
+
     def start(self) -> None:
-        """Start all threads and begin the main loop."""
+        """Start the receiver and run the command line until it quits."""
         try:
-            self.logger.info("Starting FM Receiver Controller")
-
-            # Pre-compile Numba / FFT paths before the SDR delivers
-            # samples so the first block does not stall the realtime
-            # path while JIT compilation runs.
-            self._prewarm_jit()
-
-            sdr_thread = threading.Thread(target=self.sdr_receiver.start, daemon=True)
-            sdr_thread.start()
-            self.threads.append(sdr_thread)
-
-            proc_thread = threading.Thread(target=self.processing_thread, daemon=True)
-            proc_thread.start()
-            self.threads.append(proc_thread)
-
-            if self.light:
-                print("FM Receiver (Light) started.")
-                print(f"SDR sample_rate: {self.sdr_receiver.sample_rate:.0f} Hz, Audio: {self.audio_output.output_rate} Hz")
-            else:
-                print(f"SDR sample_rate: {self.sdr_receiver.sample_rate:.0f} Hz, Composite: {self.fm_demodulator.composite_rate:.0f} Hz, Audio: {self.audio_output.output_rate} Hz")
-                station = self.current_station()
-                print(f"Default station: "
-                      f"{self.sdr_receiver.get_center_frequency()/1e6:.1f} MHz"
-                      + (f" ({station.name})" if station else ""))
-                print("Stereo demodulation enabled.")
-                print("Commands: q, list, <freq>, stereo on/off, record start/stop, iqrec start/stop, agc on/off, gain <value>, etc.")
-            print("Auto gain control: ON")
+            self.start_background()
+            self._announce()
 
             # Start CLI thread after startup messages to avoid interleaving
             self.cmd_interface.start()
-
-            self.logger.info("FM Receiver started successfully, entering main loop")
+            self.logger.info("Entering main loop")
 
             try:
                 while not self.quit_event.is_set():

@@ -116,10 +116,13 @@ def main() -> None:
     log_level: int = logging.INFO
     log_file: str | None = None
     stations_path: str | None = None
+    use_gui: bool = False
 
     for i, arg in enumerate(sys.argv[1:], 1):
         if arg == '--light':
             light_mode = True
+        elif arg == '--gui':
+            use_gui = True
         elif arg == '--stations' and i + 1 < len(sys.argv):
             stations_path = sys.argv[i + 1]
         elif arg in ('--log', '--verbose', '-v'):
@@ -147,6 +150,16 @@ def main() -> None:
     try:
         controller = FMReceiverController(light=light_mode,
                                           stations_path=stations_path)
+        if use_gui:
+            # The window owns the main loop, so the receiver is started in
+            # the background and shut down when the window closes.
+            from fm_radio import gui
+            controller.start_background()
+            try:
+                exit_code = gui.run(controller)
+            finally:
+                controller.cleanup()
+            sys.exit(exit_code)
         controller.start()
     except Exception as e:
         if enable_logging:
