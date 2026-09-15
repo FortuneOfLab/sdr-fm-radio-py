@@ -62,6 +62,11 @@ _PROFILE_SUMMARY_INTERVAL_SEC: float = 60.0
 # Least time between warnings about a snapshot that will not build.  A
 # failure that persists is one problem, not one problem per block.
 _TELEMETRY_WARN_INTERVAL_SEC: float = 60.0
+# How long cleanup waits for a thread to notice it should stop.  The
+# processing thread blocks on the SDR queue for at most a second, so this
+# only has to outlast that; a thread that is still going after it is not
+# going to be waited for indefinitely.
+_THREAD_JOIN_TIMEOUT_SEC: float = 3.0
 
 
 class _BlockProfiler:
@@ -718,10 +723,21 @@ class FMReceiverController:
             self.cleanup()
 
     def cleanup(self) -> None:
-        """Cleanup all resources."""
+        """Stop the receiver and release what it was using.
+
+        Sets ``quit_event`` first and waits for the threads it started: the
+        processing thread hands blocks to the audio output, and closing that
+        underneath it would be using a stream that has already gone.  Safe to
+        call twice, and safe to call on a receiver that never fully started.
+        """
         try:
             self.logger.info("Cleaning up FM Receiver Controller")
+            # Whoever is shutting us down may not have asked the threads to
+            # stop - a window that failed to open, for one - and everything
+            # below is something they are still using.
+            self.quit_event.set()
             self.sdr_receiver.stop()
+            self._join_threads()
             self.audio_output.cleanup()
             self.auto_gain.stop()
             self.logger.info("FM Receiver cleanup completed")
@@ -729,3 +745,15 @@ class FMReceiverController:
         except Exception as e:
             self.logger.error(f"Error during cleanup: {e}", exc_info=True)
             print("Error during cleanup - see log for details.")
+
+    def _join_threads(self) -> None:
+        """Wait for the started threads, warning about any that will not stop."""
+        for thread in self.threads:
+            if thread is threading.current_thread():
+                continue
+            thread.join(timeout=_THREAD_JOIN_TIMEOUT_SEC)
+            if thread.is_alive():
+                self.logger.warning(
+                    "%s did not stop within %.0f s; carrying on with cleanup",
+                    thread.name, _THREAD_JOIN_TIMEOUT_SEC)
+        self.threads = [t for t in self.threads if t.is_alive()]

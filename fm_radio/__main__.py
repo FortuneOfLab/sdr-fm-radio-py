@@ -161,6 +161,9 @@ def main() -> None:
                 controller.start_background()
                 exit_code = gui.run(controller)
             finally:
+                # The window sets quit_event when it closes, but it may
+                # never have opened; cleanup() sets it either way and waits
+                # for the threads before closing what they are using.
                 controller.cleanup()
             sys.exit(exit_code)
         controller.start()
