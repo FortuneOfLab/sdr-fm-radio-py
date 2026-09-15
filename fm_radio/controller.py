@@ -44,6 +44,7 @@ from fm_radio.exceptions import SDRDeviceError, AudioOutputError
 from fm_radio.stations import (
     Station, load_stations, favorites, search, in_area, nearest,
 )
+from fm_radio.telemetry import StatusSnapshot, TelemetryPublisher, peak_dbfs
 from fm_radio.constants import (
     SDR_SAMPLE_RATE, SDR_SAMPLE_RATE_LIGHT, SDR_CENTER_FREQ_DEFAULT,
     AUDIO_OUTPUT_RATE, AUDIO_FRAMES_PER_BUFFER,
@@ -58,6 +59,9 @@ _BLOCK_BUDGET_SEC: float = 0.016
 _SLOW_BLOCK_THRESHOLD_SEC: float = 0.020
 # Periodic summary interval (real time, seconds).
 _PROFILE_SUMMARY_INTERVAL_SEC: float = 60.0
+# Least time between warnings about a snapshot that will not build.  A
+# failure that persists is one problem, not one problem per block.
+_TELEMETRY_WARN_INTERVAL_SEC: float = 60.0
 
 
 class _BlockProfiler:
@@ -82,6 +86,26 @@ class _BlockProfiler:
         # Cumulative
         self._tot_blocks = 0
         self._tot_slow_blocks = 0
+
+    @property
+    def window_avg_ms(self) -> float:
+        """Mean block time since the last summary, in milliseconds."""
+        return self._win_sum_dt * 1000.0 / max(self._win_blocks, 1)
+
+    @property
+    def window_max_ms(self) -> float:
+        """Longest block since the last summary, in milliseconds."""
+        return self._win_max_dt * 1000.0
+
+    @property
+    def slow_blocks(self) -> int:
+        """Blocks over the slow-block threshold since the receiver started."""
+        return self._tot_slow_blocks
+
+    @property
+    def uptime_sec(self) -> float:
+        """Seconds since the processing thread started."""
+        return time.perf_counter() - self._t0_session
 
     def record(
         self, dt_sec: float, q_depth: int,
@@ -194,6 +218,22 @@ class FMReceiverController:
             )
             # Auto gain controller (replaces hardware AGC)
             self.auto_gain: AutoGainController = AutoGainController(self.sdr_receiver)
+            # Latest-value slot the processing thread publishes state to;
+            # see fm_radio.telemetry for why it is rate-limited rather than
+            # written every block.
+            # The generation a snapshot is judged against comes from the
+            # tuner, so a block captured before a retune can never be
+            # published as the state of what the receiver moved to.
+            self.telemetry: TelemetryPublisher = TelemetryPublisher(
+                current_generation=lambda: self.sdr_receiver.tuning_generation)
+            # Naming the tuned station means scanning the catalogue, which
+            # only has a different answer when the frequency changes.  The
+            # cache is written and read on the processing thread only.
+            self._station_name_cache: tuple[float, str] = (float("nan"), "")
+            # Rate limiting for the warning about a snapshot that will not
+            # build; both are touched only from the processing thread.
+            self._telemetry_failures: int = 0
+            self._telemetry_last_warn: float | None = None
             # Start command line interface
             self.cmd_interface: CommandLineInterface = CommandLineInterface(self)
             self.threads: list[threading.Thread] = []
@@ -238,6 +278,30 @@ class FMReceiverController:
     def current_station(self) -> Station | None:
         """Return the catalogue entry the tuner is currently sitting on."""
         return nearest(self.catalogue, self.get_frequency())
+
+    def get_status(self) -> StatusSnapshot | None:
+        """Return the current receiver state, or None if there is not one.
+
+        The snapshot is produced by the processing thread at roughly 20 Hz
+        and is a plain immutable value: reading it neither blocks that thread
+        nor reaches into any of its objects.
+
+        None means there is no current snapshot. That covers three
+        situations, which this return value does not distinguish between:
+
+        * Nothing has been published yet — the SDR is still starting, or the
+          receiver was only just constructed.
+        * Everything published so far was captured under a previous tuning,
+          which retuning invalidates immediately.
+        * Every attempt to build one has failed. A failure backs off by a
+          publish interval and is reported in the log, so this is the one
+          case that lasts.
+
+        It clears on the next successful publish: normally within one publish
+        interval of the receiver having audio to describe, 50 ms by default,
+        but not on any guaranteed schedule.
+        """
+        return self.telemetry.latest
 
     def tune(self, freq_hz: float) -> None:
         """Tune to a new frequency.
@@ -349,6 +413,113 @@ class FMReceiverController:
     # Internal methods
     # ------------------------------------------------------------------
 
+    def _publish_status(self, iq_samples: np.ndarray, left: np.ndarray,
+                        right: np.ndarray, profiler: "_BlockProfiler",
+                        block_dt_sec: float, q_depth: int, now: float,
+                        generation: int) -> None:
+        """Build and publish a snapshot, absorbing anything that goes wrong."""
+        try:
+            self.telemetry.publish(
+                self._build_snapshot(iq_samples, left, right, profiler,
+                                     block_dt_sec, q_depth, now),
+                generation,
+            )
+        except Exception as e:
+            # Telemetry is for looking at, never a reason to interrupt the
+            # audio it is describing.  Back off on the same schedule as a
+            # successful publish: a snapshot that cannot be built now will
+            # not build on the next block either, and retrying every block
+            # would turn one broken snapshot into a failure per block.
+            self.telemetry.defer(now)
+            self._report_telemetry_failure(e, now)
+        else:
+            # A snapshot got through, so the quiet period the last fault
+            # earned is over: whatever fails next is a new fault and has to
+            # be reported rather than hidden behind the old one.
+            self._telemetry_last_warn = None
+
+    def _report_telemetry_failure(self, exc: Exception, now: float) -> None:
+        """Log a snapshot failure, at most once per warning interval."""
+        self._telemetry_failures += 1
+        last = self._telemetry_last_warn
+        if last is not None and now - last < _TELEMETRY_WARN_INTERVAL_SEC:
+            return
+        self._telemetry_last_warn = now
+        self.logger.warning(
+            "Telemetry snapshot failed (%d since start): %s",
+            self._telemetry_failures, exc, exc_info=True)
+
+    def _station_name_for(self, freq_hz: float) -> str:
+        """Name the station at *freq_hz*, reusing the last lookup.
+
+        nearest() walks the whole catalogue - ~270 us over 983 transmitters,
+        which is most of what a snapshot would otherwise cost - and the
+        answer only changes when the tuner moves.
+        """
+        cached_freq, cached_name = self._station_name_cache
+        if freq_hz == cached_freq:
+            return cached_name
+        station = nearest(self.catalogue, freq_hz)
+        name = station.name if station else ""
+        self._station_name_cache = (freq_hz, name)
+        return name
+
+    def _build_snapshot(self, iq_samples: np.ndarray, left: np.ndarray,
+                        right: np.ndarray, profiler: "_BlockProfiler",
+                        block_dt_sec: float, q_depth: int,
+                        now: float) -> StatusSnapshot:
+        """Capture the receiver's state for whatever is watching it.
+
+        Called from the processing thread, only on a block where the
+        publisher is due.  The three measurements taken here — IQ peak and
+        the two audio levels — are the only work this adds to the realtime
+        path; everything else is reading a value the receiver already keeps.
+        """
+        demod = self.fm_demodulator
+        audio = self.audio_output
+        sdr = self.sdr_receiver
+        freq_hz = float(sdr.get_center_frequency())
+        station_name = self._station_name_for(freq_hz)
+
+        iq_peak = float(np.max(np.abs(iq_samples))) if iq_samples.size else 0.0
+
+        return StatusSnapshot(
+            freq_hz=freq_hz,
+            station=station_name,
+            gain_db=float(sdr.get_gain()),
+            auto_gain=self.auto_gain.enabled,
+            iq_peak=iq_peak,
+
+            # Read directly rather than through getattr defaults: both
+            # demodulators define these, and a default would turn a renamed
+            # attribute into a snapshot that quietly reports zero.
+            stereo=bool(demod.stereo),
+            blend_factor=float(demod.blend_factor),
+            pilot_snr_db=demod.pilot_snr_ema,
+            pilot_jitter_db=float(demod.pilot_jitter_ema),
+            side_nr_enabled=bool(demod.side_nr_enabled),
+
+            level_left_dbfs=peak_dbfs(left),
+            level_right_dbfs=peak_dbfs(right),
+
+            block_ms=block_dt_sec * 1000.0,
+            block_ms_avg=profiler.window_avg_ms,
+            block_ms_max=profiler.window_max_ms,
+            block_budget_ms=_BLOCK_BUDGET_SEC * 1000.0,
+            sdr_queue=q_depth,
+            sdr_queue_max=sdr.data_queue.maxsize,
+            slow_blocks=profiler.slow_blocks,
+            iq_drops=sdr.dropped_blocks,
+            audio_drops=audio.dropped_blocks,
+            audio_underruns=audio.underruns,
+
+            recording_audio=audio.recording,
+            recording_iq=sdr.iq_recording,
+
+            uptime_sec=profiler.uptime_sec,
+            timestamp=now,
+        )
+
     def _flush_data_queue(self) -> None:
         """Clear any unprocessed samples from the SDR data queue."""
         while not self.sdr_receiver.data_queue.empty():
@@ -405,7 +576,11 @@ class FMReceiverController:
         try:
             while not self.quit_event.is_set():
                 try:
-                    iq_samples = self.sdr_receiver.data_queue.get(timeout=1)
+                    # The generation comes with the block rather than being
+                    # read here: a retune between the two would tag samples
+                    # from the old station as belonging to the new one.
+                    generation, iq_samples = self.sdr_receiver.data_queue.get(
+                        timeout=1)
                 except queue.Empty:
                     continue
                 except Exception as e:
@@ -416,6 +591,7 @@ class FMReceiverController:
                 q_depth_after_get = self.sdr_receiver.data_queue.qsize()
                 t_block_start = time.perf_counter()
                 t_agc = t_proc = t_demod = t_enq = t_rec = t_block_start
+                block_ok = False
 
                 try:
                     # Auto gain adjustment (before demodulation)
@@ -445,14 +621,16 @@ class FMReceiverController:
                         stereo[1::2] = right
                         self.audio_output.record(stereo)
                     t_rec = time.perf_counter()
+                    block_ok = True
                 except Exception as e:
                     self.logger.error(f"Error in processing thread: {e}", exc_info=True)
                     # Continue processing even if one block fails
                     continue
                 finally:
                     t_end = time.perf_counter()
+                    block_dt = t_end - t_block_start
                     profiler.record(
-                        t_end - t_block_start,
+                        block_dt,
                         q_depth_after_get,
                         stage_times=(
                             t_agc - t_block_start,
@@ -462,6 +640,17 @@ class FMReceiverController:
                             t_rec - t_enq,
                         ),
                     )
+                    # Only a block that made it all the way through has
+                    # audio of its own to report; a failed one would be
+                    # published carrying the previous block's levels against
+                    # this block's timestamp.  Publishing is also
+                    # rate-limited, so most blocks pay one comparison here
+                    # and nothing else.
+                    if block_ok and self.telemetry.due(t_end):
+                        self._publish_status(
+                            iq_samples, left, right, profiler, block_dt,
+                            q_depth_after_get, t_end, generation,
+                        )
         except Exception as e:
             self.logger.critical(f"Fatal error in processing thread: {e}", exc_info=True)
         finally:

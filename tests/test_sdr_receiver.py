@@ -187,3 +187,51 @@ def test_stop_shuts_down_worker(sdr_receiver):
     recv = sdr_receiver
     recv.stop()
     assert not recv._iq_record_worker.is_alive()
+
+
+# ----------------------------------------------------------------------
+# Tuning generation
+# ----------------------------------------------------------------------
+
+def test_a_block_is_stamped_with_the_current_tuning(sdr_receiver):
+    generation = sdr_receiver.tuning_generation
+    sdr_receiver.callback(np.zeros(8, dtype=np.complex128), None)
+
+    stamped, _ = sdr_receiver.data_queue.get_nowait()
+    assert stamped == generation
+
+
+def test_retuning_advances_the_generation(sdr_receiver):
+    first = sdr_receiver.tuning_generation
+    sdr_receiver.set_center_frequency(81.3e6)
+    assert sdr_receiver.tuning_generation != first
+
+
+def test_a_retune_during_the_conversion_does_not_restamp_the_block(
+        sdr_receiver, stalling_samples):
+    """The generation is read on entry, not after the copy.
+
+    pyrtlsdr hands over complex128, so np.asarray copies; a retune landing
+    inside that copy used to stamp the old station's samples with the new
+    tuning, which put them past the flush tune() had just done.
+    """
+    samples = stalling_samples(np.zeros(8, dtype=np.complex128))
+    before = sdr_receiver.tuning_generation
+
+    thread = threading.Thread(target=sdr_receiver.callback,
+                              args=(samples, None), daemon=True)
+    thread.start()
+    try:
+        assert samples.converting.wait(5), "the conversion never started"
+        sdr_receiver.set_center_frequency(81.3e6)
+        samples.retuned.set()
+    finally:
+        thread.join(timeout=5)
+
+    assert not thread.is_alive()
+    assert samples.retuned_in_time, (
+        "the retune did not complete while the samples were being converted, "
+        "so this run never built the ordering it is meant to test")
+    assert sdr_receiver.tuning_generation != before, "the retune did not land"
+    stamped, _ = sdr_receiver.data_queue.get_nowait()
+    assert stamped == before, "the pre-retune block was stamped as current"

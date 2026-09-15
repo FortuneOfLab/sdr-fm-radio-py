@@ -106,6 +106,12 @@ class AudioOutput(AudioOutputInterface):
         self._flush_event: threading.Event = threading.Event()
         self._record_worker_stop: threading.Event = threading.Event()
         self._record_drop_count: int = 0
+        # Output-side health, read by telemetry.  Both are plain counters
+        # bumped from the thread that noticed the problem: the processing
+        # thread for a dropped block, the PortAudio callback for an
+        # underrun.  Only ever incremented and read, so no lock is needed.
+        self._enqueue_drop_count: int = 0
+        self._underrun_count: int = 0
         # State for 4-GiB WAV rotation (set in start_recording, used
         # by the worker).  At 48 kHz / 16-bit / 2 ch this only matters
         # for ~6+ hour recordings, but the underlying wave.writeframes
@@ -176,9 +182,14 @@ class AudioOutput(AudioOutputInterface):
                     filled += need
 
             if filled < requested_samples:
+                # Padding with silence at all is an underrun: a partly filled
+                # callback is an audible gap just the same, and counting only
+                # the completely empty ones hides the onset of the problem.
                 out[filled:requested_samples] = 0.0
-                if filled == 0:
-                    self.logger.debug("Audio buffer underrun")
+                self._underrun_count += 1
+                self.logger.debug(
+                    "Audio buffer underrun (%d of %d frames)",
+                    requested_samples - filled, requested_samples)
 
             return (out.tobytes(), pyaudio.paContinue)
         except Exception as e:
@@ -193,9 +204,29 @@ class AudioOutput(AudioOutputInterface):
             right32 = np.asarray(right, dtype=np.float32, copy=False)
             self.audio_buffer_queue.put((left32, right32), timeout=AUDIO_ENQUEUE_TIMEOUT)
         except queue.Full:
+            self._enqueue_drop_count += 1
             self.logger.debug("Audio buffer queue full, dropping audio data")
         except Exception as e:
             self.logger.error(f"Error enqueueing audio: {e}", exc_info=True)
+
+    @property
+    def dropped_blocks(self) -> int:
+        """Audio blocks discarded because the output queue was full."""
+        return self._enqueue_drop_count
+
+    @property
+    def underruns(self) -> int:
+        """Callbacks that had to pad the output with silence.
+
+        Counts a partly filled callback as well as a completely empty one:
+        both are a gap in the audio.
+        """
+        return self._underrun_count
+
+    @property
+    def record_drops(self) -> int:
+        """Chunks dropped by the recording queue in this session."""
+        return self._record_drop_count
 
     def start_recording(self, filename: str, channels: int = 2,
                         metadata: dict | None = None) -> None:
