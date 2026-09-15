@@ -14,7 +14,11 @@ import pytest
 
 from fm_radio.telemetry import SILENCE_DBFS, StatusSnapshot
 
-pytest.importorskip("PySide6", reason="the GUI is optional")
+# QtWidgets, not just PySide6: the package imports fine on a machine
+# without the system EGL/GL libraries it links against, and only fails when
+# a Qt module is loaded.  Skipping there keeps the rest of the suite usable;
+# CI installs those libraries so these actually run.
+pytest.importorskip("PySide6.QtWidgets", reason="the GUI is optional")
 
 from PySide6.QtCore import Qt                                  # noqa: E402
 from PySide6.QtWidgets import QApplication                     # noqa: E402
