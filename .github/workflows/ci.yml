@@ -21,6 +21,15 @@ jobs:
           cache: pip
           cache-dependency-path: requirements-dev.txt
 
+      # PySide6's QtWidgets links against the system EGL/GL libraries even
+      # when it renders offscreen, and the runner image does not carry them.
+      # Without this the GUI tests cannot even be imported on Linux.
+      - name: Install Qt's system libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends             libegl1 libgl1 libxkbcommon0 libdbus-1-3
+
       # Hardware-facing dependencies (pyaudio, pyrtlsdr) are intentionally
       # NOT installed: the test suite injects fakes for them in
       # tests/conftest.py so no sound device or SDR driver is needed.

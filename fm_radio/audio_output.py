@@ -112,6 +112,14 @@ class AudioOutput(AudioOutputInterface):
         # underrun.  Only ever incremented and read, so no lock is needed.
         self._enqueue_drop_count: int = 0
         self._underrun_count: int = 0
+        # Set by cleanup().  A bounded join cannot promise that the thread
+        # feeding us has stopped, so the stream defends itself rather than
+        # trusting that nobody is left to call in.
+        self._closed: threading.Event = threading.Event()
+        # Makes "is it still open?" and "here is a block" a single step with
+        # respect to cleanup, which would otherwise be free to close the
+        # stream between the two.
+        self._close_lock: threading.Lock = threading.Lock()
         # State for 4-GiB WAV rotation (set in start_recording, used
         # by the worker).  At 48 kHz / 16-bit / 2 ch this only matters
         # for ~6+ hour recordings, but the underlying wave.writeframes
@@ -198,7 +206,29 @@ class AudioOutput(AudioOutputInterface):
             silence = np.zeros(frame_count * AUDIO_CHANNELS, dtype=np.float32)
             return (silence.tobytes(), pyaudio.paContinue)
 
+    @property
+    def closed(self) -> bool:
+        """True once :meth:`cleanup` has run; the stream is gone after that."""
+        return self._closed.is_set()
+
     def enqueue_audio(self, left: np.ndarray, right: np.ndarray) -> None:
+        """Hand a block to the output, unless it has been closed.
+
+        The check and the hand-off are one step: cleanup() takes the same
+        lock before it sets the flag, so it cannot close the stream between
+        them and leave a block queued against one that has gone.  The lock
+        is uncontended on the realtime path and held only for a put with a
+        10 ms ceiling.
+        """
+        with self._close_lock:
+            if self._closed.is_set():
+                # A block that arrived after shutdown has nowhere to go, and
+                # the stream behind this queue has already been closed.
+                return
+            self._enqueue_locked(left, right)
+
+    def _enqueue_locked(self, left: np.ndarray, right: np.ndarray) -> None:
+        """Body of :meth:`enqueue_audio`; caller holds ``_close_lock``."""
         try:
             left32 = np.asarray(left, dtype=np.float32, copy=False)
             right32 = np.asarray(right, dtype=np.float32, copy=False)
@@ -519,7 +549,17 @@ class AudioOutput(AudioOutputInterface):
                 )
 
     def cleanup(self) -> None:
-        """Stop audio stream and terminate PyAudio instance."""
+        """Stop the audio stream and terminate PyAudio.
+
+        Refuses further audio first: whoever was feeding this may still be
+        running, and everything below is about to go away.  Safe to call
+        more than once.
+        """
+        # Under the lock: a block already on its way in finishes being
+        # queued before the flag goes up, and one that has not started sees
+        # the flag rather than the stream disappearing under it.
+        with self._close_lock:
+            self._closed.set()
         try:
             # Stop recording if active
             if self.recording:
