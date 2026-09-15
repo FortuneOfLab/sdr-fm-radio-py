@@ -286,15 +286,20 @@ class FMReceiverController:
         and is a plain immutable value: reading it neither blocks that thread
         nor reaches into any of its objects.
 
-        None has two causes, and a display that distinguishes "starting up"
-        from "just retuned" has to tell them apart by what it asked for
-        rather than by this return value:
+        None means there is no current snapshot. That covers three
+        situations, which this return value does not distinguish between:
 
-        * No IQ block has been processed yet — the SDR is still starting, or
-          the receiver was only just constructed.
-        * Everything published so far was captured under a previous tuning.
-          Retuning invalidates it immediately, and the next snapshot arrives
-          with the following publish, up to one interval later.
+        * Nothing has been published yet — the SDR is still starting, or the
+          receiver was only just constructed.
+        * Everything published so far was captured under a previous tuning,
+          which retuning invalidates immediately.
+        * Every attempt to build one has failed. A failure backs off by a
+          publish interval and is reported in the log, so this is the one
+          case that lasts.
+
+        It clears on the next successful publish: normally within one publish
+        interval of the receiver having audio to describe, 50 ms by default,
+        but not on any guaranteed schedule.
         """
         return self.telemetry.latest
 
