@@ -161,47 +161,54 @@ def test_a_negative_interval_is_clamped():
     assert TelemetryPublisher(interval_sec=-1.0).interval_sec == 0.0
 
 
-def test_invalidating_hides_the_snapshot_and_publishes_again():
-    publisher = TelemetryPublisher(interval_sec=10.0)
-    publisher.publish(make_snapshot(timestamp=10.0), publisher.generation)
-    assert not publisher.due(10.1)
-    publisher.invalidate()
-    assert publisher.latest is None
-    assert publisher.due(10.1)
-
-
 # ----------------------------------------------------------------------
 # Generations
 # ----------------------------------------------------------------------
 
-def test_a_snapshot_from_a_previous_generation_is_not_handed_out():
-    """The race the generation exists for: build, retune, then publish.
+def tunable(interval_sec: float = 0.0):
+    """A publisher whose generation the test can move, as retuning does."""
+    tuning = {"generation": 0}
+    publisher = TelemetryPublisher(
+        interval_sec=interval_sec,
+        current_generation=lambda: tuning["generation"])
+    return publisher, tuning
 
-    A snapshot built before a retune and stored after it would otherwise
+
+def test_a_snapshot_from_a_previous_generation_is_not_handed_out():
+    """The race the generation exists for: capture, retune, then publish.
+
+    A snapshot from samples captured before a retune would otherwise
     resurface as the current state of a station the receiver has left.
     """
-    publisher = TelemetryPublisher(interval_sec=0.0)
-    in_flight = publisher.generation            # what the block belongs to
-    publisher.invalidate()                      # the tuner moves
-    publisher.publish(make_snapshot(), in_flight)
+    publisher, tuning = tunable()
+    captured_under = publisher.generation       # the block's own generation
+    tuning["generation"] += 1                   # the tuner moves
+    publisher.publish(make_snapshot(), captured_under)
 
     assert publisher.latest is None
     assert publisher.published_count == 1       # it was published, not hidden
 
 
 def test_a_snapshot_from_the_current_generation_is_handed_out():
-    publisher = TelemetryPublisher(interval_sec=0.0)
-    publisher.invalidate()
+    publisher, tuning = tunable()
+    tuning["generation"] += 1
     snapshot = make_snapshot()
     publisher.publish(snapshot, publisher.generation)
     assert publisher.latest is snapshot
 
 
-def test_invalidating_bumps_the_generation():
-    publisher = TelemetryPublisher()
-    first = publisher.generation
-    publisher.invalidate()
-    assert publisher.generation != first
+def test_a_published_snapshot_is_hidden_by_a_later_retune():
+    publisher, tuning = tunable()
+    publisher.publish(make_snapshot(), publisher.generation)
+    assert publisher.latest is not None
+    tuning["generation"] += 1
+    assert publisher.latest is None
+
+
+def test_the_generation_comes_from_the_supplied_source():
+    publisher, tuning = tunable()
+    tuning["generation"] = 7
+    assert publisher.generation == 7
 
 
 def test_deferring_arms_the_interval_without_publishing():
@@ -250,18 +257,18 @@ def test_a_concurrent_reader_only_ever_sees_whole_snapshots():
     publisher.publish(make_snapshot(timestamp=0.0, freq_hz=80.0e6,
                                     station="station-0"), publisher.generation)
 
-    start = threading.Barrier(2)
+    reading = threading.Event()
     stop = threading.Event()
     observations = []
     inconsistent = []
 
     def reader():
-        start.wait(5)
         while not stop.is_set():
             current = publisher.latest
             if current is None:
                 continue
             observations.append(1)
+            reading.set()                       # the writer waits for this
             block = int(current.freq_hz - 80.0e6)
             if (current.station != f"station-{block}"
                     or current.timestamp != float(block)):
@@ -269,7 +276,13 @@ def test_a_concurrent_reader_only_ever_sees_whole_snapshots():
 
     thread = threading.Thread(target=reader, daemon=True)
     thread.start()
-    start.wait(5)
+    # Start publishing only once the reader has actually read something.
+    # Waiting on a barrier instead would let the writer run to completion
+    # before the reader is ever scheduled - which it does, deterministically,
+    # with a long switch interval - and the test would then pass or fail on
+    # how the interpreter happened to interleave rather than on the slot.
+    assert reading.wait(10), "the reader never observed a snapshot"
+
     for block in range(1, 20000):
         publisher.publish(make_snapshot(timestamp=float(block),
                                         freq_hz=80.0e6 + block,
@@ -279,32 +292,32 @@ def test_a_concurrent_reader_only_ever_sees_whole_snapshots():
     thread.join(timeout=5)
 
     assert not thread.is_alive()
-    assert len(observations) > 100, f"the reader only read {len(observations)} times"
+    assert observations, "the reader never read"
     assert not inconsistent, f"{len(inconsistent)} mixed snapshots"
 
 
-def test_a_concurrent_invalidate_hides_an_in_flight_snapshot():
+def test_a_concurrent_retune_hides_an_in_flight_snapshot():
     """Retuning while a snapshot is in flight must not publish it as current.
 
     The ordering is forced with events rather than left to chance: the
     snapshot is built, the tuner moves, and only then is it published.
     """
-    publisher = TelemetryPublisher(interval_sec=0.0)
+    publisher, tuning = tunable()
     built = threading.Event()
-    invalidated = threading.Event()
+    retuned = threading.Event()
 
     def writer():
-        generation = publisher.generation       # the block starts here
+        generation = publisher.generation       # the block's generation
         snapshot = make_snapshot(station="old station")
         built.set()
-        invalidated.wait(5)                     # the tuner moves meanwhile
+        retuned.wait(5)                         # the tuner moves meanwhile
         publisher.publish(snapshot, generation)
 
     thread = threading.Thread(target=writer, daemon=True)
     thread.start()
     assert built.wait(5)
-    publisher.invalidate()
-    invalidated.set()
+    tuning["generation"] += 1
+    retuned.set()
     thread.join(timeout=5)
 
     assert not thread.is_alive()

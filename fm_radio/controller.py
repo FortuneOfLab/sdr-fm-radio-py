@@ -221,7 +221,11 @@ class FMReceiverController:
             # Latest-value slot the processing thread publishes state to;
             # see fm_radio.telemetry for why it is rate-limited rather than
             # written every block.
-            self.telemetry: TelemetryPublisher = TelemetryPublisher()
+            # The generation a snapshot is judged against comes from the
+            # tuner, so a block captured before a retune can never be
+            # published as the state of what the receiver moved to.
+            self.telemetry: TelemetryPublisher = TelemetryPublisher(
+                current_generation=lambda: self.sdr_receiver.tuning_generation)
             # Naming the tuned station means scanning the catalogue, which
             # only has a different answer when the frequency changes.  The
             # cache is written and read on the processing thread only.
@@ -298,10 +302,6 @@ class FMReceiverController:
         self.sdr_receiver.set_center_frequency(freq_hz)
         self._flush_data_queue()
         self.fm_demodulator.reset()
-        # Everything published so far describes the old station.  Bumping
-        # the generation also covers the snapshot a block still in flight is
-        # about to publish, which a plain "forget the current one" would not.
-        self.telemetry.invalidate()
         self.auto_gain.reset_counters()
         if self.audio_output.recording:
             self.audio_output.stop_recording()
@@ -419,6 +419,11 @@ class FMReceiverController:
             # would turn one broken snapshot into a failure per block.
             self.telemetry.defer(now)
             self._report_telemetry_failure(e, now)
+        else:
+            # A snapshot got through, so the quiet period the last fault
+            # earned is over: whatever fails next is a new fault and has to
+            # be reported rather than hidden behind the old one.
+            self._telemetry_last_warn = None
 
     def _report_telemetry_failure(self, exc: Exception, now: float) -> None:
         """Log a snapshot failure, at most once per warning interval."""
@@ -558,7 +563,11 @@ class FMReceiverController:
         try:
             while not self.quit_event.is_set():
                 try:
-                    iq_samples = self.sdr_receiver.data_queue.get(timeout=1)
+                    # The generation comes with the block rather than being
+                    # read here: a retune between the two would tag samples
+                    # from the old station as belonging to the new one.
+                    generation, iq_samples = self.sdr_receiver.data_queue.get(
+                        timeout=1)
                 except queue.Empty:
                     continue
                 except Exception as e:
@@ -567,12 +576,6 @@ class FMReceiverController:
 
                 # Snapshot queue depth at the moment we pulled this block.
                 q_depth_after_get = self.sdr_receiver.data_queue.qsize()
-                # ... and the state this block belongs to.  If the tuner
-                # moves while we demodulate it, what we produce describes the
-                # station we have just left, and publishing it under the new
-                # generation would put the old station's pilot and blend
-                # against the new frequency.
-                generation = self.telemetry.generation
                 t_block_start = time.perf_counter()
                 t_agc = t_proc = t_demod = t_enq = t_rec = t_block_start
                 block_ok = False

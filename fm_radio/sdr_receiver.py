@@ -68,7 +68,16 @@ class SDRReceiver(SDRReceiverInterface):
         self.sample_rate: float = sample_rate
         self.center_freq: float = center_freq
         self.block_size: int = block_size
-        self.data_queue: queue.Queue[np.ndarray] = queue.Queue(maxsize=SDR_QUEUE_MAXSIZE)
+        # Each entry is (tuning generation, IQ block).  The generation is
+        # what makes it possible to tell, later in the pipeline, which
+        # tuning a block was captured under: by the time the processing
+        # thread gets to one, the receiver may already have retuned.
+        self.data_queue: queue.Queue[tuple[int, np.ndarray]] = queue.Queue(
+            maxsize=SDR_QUEUE_MAXSIZE)
+        # Bumped by set_center_frequency, read by the SDR callback and by
+        # anything that wants to know whether a block is still current.
+        self._tuning_generation: int = 0
+        self._tuning_lock: threading.Lock = threading.Lock()
         self.iq_recording: bool = False
         self.iq_record_wave: wave.Wave_write | None = None
         # ``iq_record_lock`` guards self.iq_record_wave (file open/close vs
@@ -134,11 +143,27 @@ class SDRReceiver(SDRReceiverInterface):
         except OSError as e:
             self.logger.warning(f"Failed to disable direct_sampling (may not be supported): {e}")
 
+    @property
+    def tuning_generation(self) -> int:
+        """Counter identifying the current tuning.
+
+        Every IQ block carries the value this had when it was captured, so
+        a block from before a retune can be recognised as such however long
+        it sat in the queue.
+        """
+        return self._tuning_generation
+
     def set_center_frequency(self, freq: float) -> None:
         """Change the center frequency."""
         try:
             self.center_freq = freq
             self.sdr.center_freq = freq
+            # Bumped after the hardware change, never before: a block
+            # captured on the new frequency but enqueued before this point
+            # is then treated as belonging to the old tuning, which loses a
+            # snapshot rather than showing one against the wrong station.
+            with self._tuning_lock:
+                self._tuning_generation += 1
             self.logger.info(f"Center frequency set to {freq/1e6:.1f} MHz")
         except OSError as e:
             self.logger.error(f"Failed to set center frequency to {freq/1e6:.1f} MHz: {e}")
@@ -192,7 +217,7 @@ class SDRReceiver(SDRReceiverInterface):
         try:
             # Convert to numpy array allowing a copy if necessary (NumPy 2.x compatibility).
             iq = np.asarray(iq_samples, dtype=np.complex64)
-            self.data_queue.put(iq, block=False)
+            self.data_queue.put((self._tuning_generation, iq), block=False)
 
             # Hand the same array to the IQ-recording worker if active.
             # The pair (flag check, put_nowait) is atomic under

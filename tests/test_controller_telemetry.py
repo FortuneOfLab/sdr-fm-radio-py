@@ -39,11 +39,18 @@ def receiver(no_user_config):
         instance.audio_output.cleanup()
 
 
+def enqueue(controller, block, generation: int | None = None) -> None:
+    """Put one IQ block on the queue, stamped as the SDR would stamp it."""
+    if generation is None:
+        generation = controller.sdr_receiver.tuning_generation
+    controller.sdr_receiver.data_queue.put((generation, block))
+
+
 def run_blocks(controller, count: int, timeout: float = 10.0) -> None:
     """Feed *count* IQ blocks through the real processing loop."""
     block = iq_block(controller)
     for _ in range(count):
-        controller.sdr_receiver.data_queue.put(block)
+        enqueue(controller, block)
 
     # A previous call left the loop stopped; it has to be told to run again.
     controller.quit_event.clear()
@@ -187,11 +194,29 @@ def test_a_persistent_failure_is_not_retried_every_block(receiver, monkeypatch):
     assert len(attempts) == 1, f"{len(attempts)} attempts over 10 blocks"
 
 
+def capture_telemetry_warnings(receiver, monkeypatch) -> list:
+    """Record only the telemetry warning.
+
+    The processing thread shares this logger with the block profiler, which
+    warns about any block over 20 ms - something a cold first block does on
+    its own. Counting every warning made this test depend on that.
+    """
+    warnings = []
+    original = receiver.logger.warning
+
+    def capture(message, *args, **kwargs):
+        if isinstance(message, str) and message.startswith(
+                "Telemetry snapshot failed"):
+            warnings.append((message, args))
+        return original(message, *args, **kwargs)
+
+    monkeypatch.setattr(receiver.logger, "warning", capture)
+    return warnings
+
+
 def test_a_persistent_failure_warns_once_not_once_per_block(receiver,
                                                             monkeypatch):
-    warnings = []
-    monkeypatch.setattr(receiver.logger, "warning",
-                        lambda *a, **k: warnings.append(a))
+    warnings = capture_telemetry_warnings(receiver, monkeypatch)
     monkeypatch.setattr(receiver, "_build_snapshot",
                         lambda *a, **k: (_ for _ in ()).throw(
                             RuntimeError("snapshot boom")))
@@ -200,6 +225,31 @@ def test_a_persistent_failure_warns_once_not_once_per_block(receiver,
 
     assert receiver._telemetry_failures == 10   # every block did try
     assert len(warnings) == 1, f"{len(warnings)} warnings for one fault"
+
+
+def test_a_fault_after_a_recovery_is_warned_about(receiver, monkeypatch):
+    """The quiet period belongs to the fault that earned it, not to the clock."""
+    warnings = capture_telemetry_warnings(receiver, monkeypatch)
+    state = {"failing": True}
+    original = receiver._build_snapshot
+
+    def sometimes(*args, **kwargs):
+        if state["failing"]:
+            raise RuntimeError("snapshot boom")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(receiver, "_build_snapshot", sometimes)
+    receiver.telemetry.interval_sec = 0.0
+
+    run_blocks(receiver, 2)                     # fault
+    assert len(warnings) == 1
+    state["failing"] = False
+    run_blocks(receiver, 2)                     # recovery
+    assert receiver.get_status() is not None
+    state["failing"] = True
+    run_blocks(receiver, 2)                     # a new fault
+
+    assert len(warnings) == 2, "the second fault was hidden by the first"
 
 
 def test_publishing_recovers_once_the_failure_clears(receiver, monkeypatch):
@@ -274,6 +324,41 @@ def test_a_block_that_is_not_due_builds_nothing(receiver, monkeypatch):
     assert len(builds) == 1, f"{len(builds)} snapshots built for 30 blocks"
 
 
+def test_a_block_captured_before_a_retune_is_never_published(receiver):
+    """The generation travels with the samples, not with the clock.
+
+    Reading it after taking the block off the queue left a window: a retune
+    landing in that window tagged the old station's samples as belonging to
+    the new one, and the snapshot went out with the new frequency against
+    the old station's IQ peak.
+    """
+    receiver.tune(80.0e6)
+    stale_generation = receiver.sdr_receiver.tuning_generation
+
+    # tune() flushes the queue, so the block that matters is the one still in
+    # flight in the SDR when the frequency changed: it lands after the flush,
+    # carrying the tuning it was captured under.
+    receiver.tune(81.3e6)
+    enqueue(receiver, iq_block(receiver), stale_generation)
+
+    receiver.telemetry.interval_sec = 0.0
+    run_blocks(receiver, 0)                     # drain what is queued
+
+    assert receiver.telemetry.published_count == 1
+    assert receiver.get_status() is None, "the pre-retune block was published"
+
+
+def test_a_block_captured_after_a_retune_is_published(receiver):
+    receiver.tune(80.0e6)
+    receiver.tune(81.3e6)
+    receiver.telemetry.interval_sec = 0.0
+    run_blocks(receiver, 2)
+
+    status = receiver.get_status()
+    assert status is not None
+    assert status.station == "J-WAVE"
+
+
 def test_a_retune_while_a_block_is_in_flight_hides_its_snapshot(receiver):
     """The ordering is forced with events rather than left to chance.
 
@@ -293,7 +378,7 @@ def test_a_retune_while_a_block_is_in_flight_hides_its_snapshot(receiver):
 
     receiver.tune(80.0e6)
     receiver._build_snapshot = stalled
-    receiver.sdr_receiver.data_queue.put(iq_block(receiver))
+    enqueue(receiver, iq_block(receiver))
     receiver.quit_event.clear()
     thread = threading.Thread(target=receiver.processing_thread, daemon=True)
     thread.start()
@@ -341,6 +426,8 @@ def test_the_station_lookup_is_not_repeated_per_snapshot(receiver, monkeypatch):
 
 
 def test_retuning_refreshes_the_cached_station_name(receiver):
+    # Retuning no longer re-arms the deadline, so publish on every block.
+    receiver.telemetry.interval_sec = 0.0
     receiver.tune(80.0e6)
     run_blocks(receiver, 2)
     assert receiver.get_status().station == "TOKYO FM"

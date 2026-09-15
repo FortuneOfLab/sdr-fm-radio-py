@@ -35,11 +35,14 @@ logging on and read the log afterwards.
 is deliberately one-way: readers never reach into the receiver, and the
 receiver never waits on a reader.
 
-Snapshots carry the *generation* of the receiver state they describe.
-Tuning bumps that generation, and a snapshot from an older one is never
-handed out — without it, a snapshot built just before a retune and stored
-just after it would resurface as the current state of a station the receiver
-has already left.
+Snapshots carry the *generation* of the receiver state they describe, and a
+snapshot from an older generation is never handed out.  The generation is
+stamped on each IQ block when the SDR captures it and travels with it
+through the queue, so it says which tuning the samples came from rather than
+which tuning was current when somebody got round to looking: without that, a
+block captured before a retune, or a snapshot built before one and stored
+after, would resurface as the current state of a station the receiver has
+already left.
 
 The clock.  ``due()``, ``publish()`` and ``defer()`` all work in
 ``time.perf_counter()`` seconds, and the caller is expected to pass
@@ -62,9 +65,8 @@ from __future__ import annotations
 
 import math
 import time
-import threading
 from dataclasses import dataclass, fields
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -174,49 +176,33 @@ class TelemetryPublisher:
     half-assembled one, and the writer is never delayed by a reader.
 
     That property is about the single rebind, not about a sequence of
-    operations: :meth:`invalidate` is called from whichever thread retunes
-    the receiver, so publishing and invalidating do race.  The generation tag
-    is what makes that race harmless — a publish that lands after an
-    invalidate stores an older generation and is simply never handed out.
+    operations, and retuning happens on whichever thread asked for it.  The
+    generation tag is what makes that race harmless: a publish that lands
+    after a retune stores the generation its samples came from, which no
+    longer matches the current one, so it is simply never handed out.
 
     Snapshots are dropped rather than queued.  What a display wants is the
     current state, and a backlog of stale ones would only grow when the
     reader is already behind.
     """
 
-    def __init__(self, interval_sec: float = DEFAULT_PUBLISH_INTERVAL_SEC) -> None:
+    def __init__(self, interval_sec: float = DEFAULT_PUBLISH_INTERVAL_SEC,
+                 current_generation: Callable[[], int] | None = None) -> None:
         self.interval_sec: float = max(0.0, float(interval_sec))
         # (generation, snapshot); rebound as one object, never mutated.
         self._latest: tuple[int, StatusSnapshot] | None = None
-        self._generation: int = 0
-        # Only serialises invalidate() against itself - two threads retuning
-        # at once.  The processing thread only ever reads the generation.
-        self._generation_lock = threading.Lock()
+        # Where "which state is current" comes from.  The receiver passes
+        # the tuner's generation; the default suits a publisher under test,
+        # where nothing ever changes underneath.
+        self._current_generation: Callable[[], int] = (
+            current_generation if current_generation is not None else (lambda: 0))
         self._next_due: float = 0.0
         self._published: int = 0
 
     @property
     def generation(self) -> int:
-        """The generation a snapshot built now would belong to.
-
-        The processing thread reads this when it takes an IQ block off the
-        queue and passes it back to :meth:`publish`, so that a retune part
-        way through a block invalidates what that block produced.
-        """
-        return self._generation
-
-    def invalidate(self) -> None:
-        """Declare everything published so far to describe a previous state.
-
-        Called when the receiver starts doing something else — retuning is
-        the case that matters — from whatever thread made that happen.
-        """
-        with self._generation_lock:
-            self._generation += 1
-        # Publish promptly for the new generation rather than waiting out an
-        # interval armed by the old one.  Racing with publish() here costs at
-        # most one snapshot either way.
-        self._next_due = 0.0
+        """The generation snapshots are currently being judged against."""
+        return self._current_generation()
 
     def due(self, now: float | None = None) -> bool:
         """True if a snapshot should be published at *now*.
@@ -230,8 +216,9 @@ class TelemetryPublisher:
     def publish(self, snapshot: StatusSnapshot, generation: int) -> None:
         """Store *snapshot* as the state of *generation* and arm the interval.
 
-        *generation* is the value :attr:`generation` had when the work behind
-        the snapshot began — not when it finished.
+        *generation* is the one stamped on the IQ block the snapshot was
+        built from — where the samples came from, not what happened to be
+        current when the snapshot finished.
         """
         self._latest = (generation, snapshot)
         self._published += 1
@@ -257,7 +244,7 @@ class TelemetryPublisher:
         if entry is None:
             return None
         generation, snapshot = entry
-        return snapshot if generation == self._generation else None
+        return snapshot if generation == self._current_generation() else None
 
     @property
     def published_count(self) -> int:
