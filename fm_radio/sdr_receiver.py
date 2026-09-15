@@ -214,10 +214,16 @@ class SDRReceiver(SDRReceiverInterface):
             iq_samples: Received IQ samples.
             sdr_obj: SDR object (unused).
         """
+        # Which tuning these samples came from, recorded before anything is
+        # done with them.  The conversion below copies - pyrtlsdr hands over
+        # complex128 - and a retune during that copy would otherwise stamp
+        # the old station's samples with the new tuning, putting them past
+        # the queue flush that tune() had just done.
+        generation = self._tuning_generation
         try:
             # Convert to numpy array allowing a copy if necessary (NumPy 2.x compatibility).
             iq = np.asarray(iq_samples, dtype=np.complex64)
-            self.data_queue.put((self._tuning_generation, iq), block=False)
+            self.data_queue.put((generation, iq), block=False)
 
             # Hand the same array to the IQ-recording worker if active.
             # The pair (flag check, put_nowait) is atomic under

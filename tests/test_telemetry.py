@@ -258,6 +258,7 @@ def test_a_concurrent_reader_only_ever_sees_whole_snapshots():
                                     station="station-0"), publisher.generation)
 
     reading = threading.Event()
+    saw_an_update = threading.Event()
     stop = threading.Event()
     observations = []
     inconsistent = []
@@ -273,6 +274,8 @@ def test_a_concurrent_reader_only_ever_sees_whole_snapshots():
             if (current.station != f"station-{block}"
                     or current.timestamp != float(block)):
                 inconsistent.append(current)
+            if block > 0:
+                saw_an_update.set()             # ... and for this
 
     thread = threading.Thread(target=reader, daemon=True)
     thread.start()
@@ -288,11 +291,18 @@ def test_a_concurrent_reader_only_ever_sees_whole_snapshots():
                                         freq_hz=80.0e6 + block,
                                         station=f"station-{block}"),
                           publisher.generation)
+        # Reading the initial snapshot 400,000 times says nothing about
+        # reading one the writer produced.  Hand the reader the interpreter
+        # until it has seen an update; wait() releases the GIL, which a busy
+        # loop at a one-second switch interval would not.
+        if not saw_an_update.is_set() and block % 500 == 0:
+            saw_an_update.wait(0.05)
     stop.set()
     thread.join(timeout=5)
 
     assert not thread.is_alive()
     assert observations, "the reader never read"
+    assert saw_an_update.is_set(), "the reader only ever saw the first snapshot"
     assert not inconsistent, f"{len(inconsistent)} mixed snapshots"
 
 

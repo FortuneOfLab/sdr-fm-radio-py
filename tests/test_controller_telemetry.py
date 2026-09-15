@@ -435,3 +435,45 @@ def test_retuning_refreshes_the_cached_station_name(receiver):
     receiver.tune(81.3e6)
     run_blocks(receiver, 2)
     assert receiver.get_status().station == "J-WAVE"
+
+
+def test_a_retune_during_the_sdr_callback_does_not_publish_the_old_station(
+        receiver, monkeypatch):
+    """End to end through the real callback, not the test helper.
+
+    The helper stamps the generation by hand, so it cannot see the callback
+    stamping the wrong one. Here the retune lands inside the conversion the
+    callback does, which is where the samples get their generation.
+    """
+    import fm_radio.sdr_receiver as sdr_module
+
+    receiver.tune(80.0e6)
+    receiver.telemetry.interval_sec = 0.0
+    converting = threading.Event()
+    retuned = threading.Event()
+    original = np.asarray
+
+    def stalled(values, *args, **kwargs):
+        if not converting.is_set():
+            converting.set()
+            retuned.wait(5)             # the tuner moves during the copy
+        return original(values, *args, **kwargs)
+
+    monkeypatch.setattr(sdr_module.np, "asarray", stalled)
+    samples = iq_block(receiver).astype(np.complex128)
+    thread = threading.Thread(target=receiver.sdr_receiver.callback,
+                              args=(samples, None), daemon=True)
+    thread.start()
+    try:
+        assert converting.wait(5), "the callback never started converting"
+        receiver.tune(81.3e6)           # flushes, then this block lands
+        retuned.set()
+    finally:
+        thread.join(timeout=5)
+
+    monkeypatch.undo()
+    assert receiver.sdr_receiver.data_queue.qsize() == 1
+    run_blocks(receiver, 0)             # process what the callback queued
+
+    assert receiver.telemetry.published_count == 1
+    assert receiver.get_status() is None, "the pre-retune block was published"
