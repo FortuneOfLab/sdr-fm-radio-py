@@ -511,3 +511,78 @@ def test_run_passes_the_controller_to_the_window(monkeypatch):
     controller = object()
     assert gui.run(controller) == 0
     assert seen == [controller]
+
+
+# ----------------------------------------------------------------------
+# Every way of moving the slider
+# ----------------------------------------------------------------------
+
+def test_the_wheel_and_the_keyboard_set_the_gain_too(window):
+    """isSliderDown() is false for these, so a release never arrives."""
+    view, controller = window()
+    view._auto_gain.setChecked(False)
+    controller.calls.clear()
+
+    view._gain_slider.triggerAction(
+        view._gain_slider.SliderAction.SliderPageStepAdd)
+
+    applied = [c for c in controller.calls if c[0] == "set_gain"]
+    assert applied, "a page step never reached the receiver"
+    assert applied[-1][1] == view._gain_slider.value() / 10.0
+
+
+def test_a_drag_sends_one_gain_change_not_one_per_pixel(window):
+    view, controller = window()
+    view._auto_gain.setChecked(False)
+    controller.calls.clear()
+
+    view._gain_slider.setSliderDown(True)
+    for value in (100, 150, 200, 250):
+        view._gain_slider.setValue(value)
+    assert not [c for c in controller.calls if c[0] == "set_gain"]
+
+    # setSliderDown(False) is what ends a drag; Qt emits sliderReleased
+    # itself, so emitting it here too would count the release twice.
+    view._gain_slider.setSliderDown(False)
+    assert [c for c in controller.calls if c[0] == "set_gain"] == [
+        ("set_gain", 25.0)]
+
+
+def test_following_the_receiver_still_does_not_echo_the_gain_back(window):
+    """valueChanged is live now, so the refresh has to keep blocking it."""
+    view, controller = window()
+    view._auto_gain.setChecked(False)
+    controller.calls.clear()
+
+    controller.status = snapshot(gain_db=44.5, auto_gain=False)
+    view.refresh()
+
+    assert view._gain_slider.value() == 445
+    assert not [c for c in controller.calls if c[0] == "set_gain"]
+
+
+# ----------------------------------------------------------------------
+# Naming the recording can fail before the receiver is asked anything
+# ----------------------------------------------------------------------
+
+@pytest.mark.parametrize("button,call", [
+    ("_record_audio", "start_recording"),
+    ("_record_iq", "start_iq_recording"),
+])
+def test_a_recordings_folder_that_cannot_be_made_is_reported(
+        window, monkeypatch, button, call):
+    """build_recording_path creates recordings/ and raises OSError, not
+    RecordingError, before the controller is reached."""
+    from fm_radio.gui import main_window
+
+    def refuse(freq_mhz, iq=False):
+        raise PermissionError(13, "permission denied")
+
+    monkeypatch.setattr(main_window, "build_recording_path", refuse)
+    view, controller = window()
+
+    getattr(view, button).click()       # must not raise out of the slot
+
+    assert not getattr(view, button).isChecked()
+    assert "failed" in view._health.text()
+    assert not [c for c in controller.calls if c[0] == call]

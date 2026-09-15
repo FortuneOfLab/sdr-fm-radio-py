@@ -154,8 +154,11 @@ def main() -> None:
             # The window owns the main loop, so the receiver is started in
             # the background and shut down when the window closes.
             from fm_radio import gui
-            controller.start_background()
             try:
+                # start_background() is inside the try: it starts the SDR
+                # thread before the processing thread, so a failure between
+                # the two leaves threads running that only cleanup() stops.
+                controller.start_background()
                 exit_code = gui.run(controller)
             finally:
                 controller.cleanup()

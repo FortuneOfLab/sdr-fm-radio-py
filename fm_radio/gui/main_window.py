@@ -188,6 +188,11 @@ class ReceiverWindow(QMainWindow):
 
         self._gain_slider = QSlider(Qt.Orientation.Horizontal, box)
         self._gain_slider.setRange(0, int(_GAIN_MAX_DB * _GAIN_SCALE))
+        # valueChanged catches the wheel, the arrow keys and a click on the
+        # groove; sliderReleased catches the end of a drag, which
+        # valueChanged deliberately ignores so that one gesture does not
+        # send a gain change per pixel.
+        self._gain_slider.valueChanged.connect(self._gain_moved)
         self._gain_slider.sliderReleased.connect(self._gain_chosen)
         row.addWidget(self._gain_slider, 1)
 
@@ -252,19 +257,37 @@ class ReceiverWindow(QMainWindow):
         self.controller.set_agc_mode(checked)
         self._gain_slider.setEnabled(not checked)
 
+    def _gain_moved(self, value: int) -> None:
+        """Apply a move that is not part of a drag.
+
+        The refresh blocks this signal while it follows the receiver, so
+        anything arriving here came from the user.
+        """
+        if self._gain_slider.isSliderDown():
+            return                      # _gain_chosen applies it on release
+        self._apply_gain(value)
+
     def _gain_chosen(self) -> None:
+        """Apply the value a drag finished on."""
+        self._apply_gain(self._gain_slider.value())
+
+    def _apply_gain(self, value: int) -> None:
         if self._auto_gain.isChecked():
             return
-        self.controller.set_gain(self._gain_slider.value() / _GAIN_SCALE)
+        self.controller.set_gain(value / _GAIN_SCALE)
 
     def _audio_recording_toggled(self, checked: bool) -> None:
         if not checked:
             self.controller.stop_recording()
         else:
-            path = build_recording_path(self.controller.get_frequency() / 1e6)
             try:
+                # Inside the try: naming the file creates recordings/, which
+                # fails with an OSError of its own before the receiver has
+                # been asked for anything.
+                path = build_recording_path(
+                    self.controller.get_frequency() / 1e6)
                 self.controller.start_recording(path)
-            except RecordingError as exc:
+            except (RecordingError, OSError) as exc:
                 logger.error("Could not start recording: %s", exc)
                 self._set_notice(f"recording failed: {exc}")
                 self._record_audio.setChecked(False)
@@ -276,11 +299,11 @@ class ReceiverWindow(QMainWindow):
         if not checked:
             self.controller.stop_iq_recording()
         else:
-            path = build_recording_path(self.controller.get_frequency() / 1e6,
-                                        iq=True)
             try:
+                path = build_recording_path(
+                    self.controller.get_frequency() / 1e6, iq=True)
                 self.controller.start_iq_recording(path)
-            except RecordingError as exc:
+            except (RecordingError, OSError) as exc:
                 logger.error("Could not start IQ recording: %s", exc)
                 self._set_notice(f"IQ recording failed: {exc}")
                 self._record_iq.setChecked(False)
