@@ -10,6 +10,7 @@ must never touch real hardware even on a developer machine that has it.
 from __future__ import annotations
 
 import sys
+import threading
 import types
 
 import numpy as np
@@ -83,6 +84,36 @@ _install_fake_rtlsdr()
 # ----------------------------------------------------------------------
 # Common fixtures
 # ----------------------------------------------------------------------
+
+@pytest.fixture
+def stalling_samples():
+    """Factory for IQ samples that pause while NumPy is converting them.
+
+    The pause lives in the object's own ``__array__`` rather than in a
+    patched ``np.asarray``, so only this block is held up and nothing else
+    the code converts meanwhile is affected.
+
+    The returned object carries two events - ``converting``, set when the
+    conversion starts, and ``retuned``, which the test sets to release it -
+    and records in ``retuned_in_time`` whether that release actually
+    arrived.  A test that could not build the ordering it needs has to fail
+    for that reason rather than quietly go on to check something else.
+    """
+    class _StallingSamples:
+        def __init__(self, data, timeout: float = 5.0) -> None:
+            self._data = data
+            self._timeout = timeout
+            self.converting = threading.Event()
+            self.retuned = threading.Event()
+            self.retuned_in_time = False
+
+        def __array__(self, dtype=None, copy=None):
+            self.converting.set()
+            self.retuned_in_time = self.retuned.wait(self._timeout)
+            return np.asarray(self._data, dtype=dtype)
+
+    return _StallingSamples
+
 
 @pytest.fixture
 def rng() -> np.random.Generator:
