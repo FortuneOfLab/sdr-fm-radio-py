@@ -78,6 +78,14 @@ class SDRReceiver(SDRReceiverInterface):
         # anything that wants to know whether a block is still current.
         self._tuning_generation: int = 0
         self._tuning_lock: threading.Lock = threading.Lock()
+        # Set by stop() before it closes the device, so a write that has
+        # not started yet gives up instead of waiting for the lock below.
+        self._closed: threading.Event = threading.Event()
+        # Held for the length of each device write, and by stop() while it
+        # closes.  A write can be in progress on the gain worker's thread
+        # when shutdown begins - the USB call takes 40-200 ms - and the
+        # flag alone cannot stop one that is already past it.
+        self._device_lock: threading.Lock = threading.Lock()
         self.iq_recording: bool = False
         self.iq_record_wave: wave.Wave_write | None = None
         # ``iq_record_lock`` guards self.iq_record_wave (file open/close vs
@@ -155,9 +163,16 @@ class SDRReceiver(SDRReceiverInterface):
 
     def set_center_frequency(self, freq: float) -> None:
         """Change the center frequency."""
+        if self._closed.is_set():
+            self.logger.debug("Ignoring tune to %.1f MHz: the SDR is closed",
+                              freq / 1e6)
+            return
         try:
-            self.center_freq = freq
-            self.sdr.center_freq = freq
+            with self._device_lock:
+                if self._closed.is_set():
+                    return              # closed while we waited for the lock
+                self.center_freq = freq
+                self.sdr.center_freq = freq
             # Bumped after the hardware change, never before: a block
             # captured on the new frequency but enqueued before this point
             # is then treated as belonging to the old tuning, which loses a
@@ -173,10 +188,25 @@ class SDRReceiver(SDRReceiverInterface):
         """Retrieve the current center frequency."""
         return self.sdr.center_freq
 
+    @property
+    def closed(self) -> bool:
+        """True once :meth:`stop` has closed the device."""
+        return self._closed.is_set()
+
     def set_gain(self, gain: float) -> None:
-        """Set gain value (for manual mode)."""
+        """Set gain value (for manual mode).
+
+        Does nothing once the device is closed: the gain worker runs on its
+        own thread and may still have a write queued when shutdown begins.
+        """
+        if self._closed.is_set():
+            self.logger.debug("Ignoring gain %.1f dB: the SDR is closed", gain)
+            return
         try:
-            self.sdr.set_gain(gain)
+            with self._device_lock:
+                if self._closed.is_set():
+                    return              # closed while we waited for the lock
+                self.sdr.set_gain(gain)
             self.logger.info(f"Gain set to {gain:.1f} dB")
         except OSError as e:
             self.logger.error(f"Failed to set gain to {gain:.1f} dB: {e}")
@@ -195,7 +225,10 @@ class SDRReceiver(SDRReceiverInterface):
         """
         try:
             self.manual_gain = manual
-            self.sdr.set_manual_gain_enabled(manual)
+            with self._device_lock:
+                if self._closed.is_set():
+                    return
+                self.sdr.set_manual_gain_enabled(manual)
             mode = "manual" if manual else "AGC"
             self.logger.info(f"Gain mode set to {mode}")
         except OSError as e:
@@ -538,7 +571,13 @@ class SDRReceiver(SDRReceiverInterface):
             raise SDRDeviceError(f"Failed to start SDR async read: {e}") from e
 
     def stop(self) -> None:
-        """Stop asynchronous sample retrieval and close SDR."""
+        """Stop asynchronous sample retrieval and close the SDR.
+
+        Marks the device closed before touching it, so a write already on
+        its way from another thread is dropped rather than landing on a
+        handle that is about to go.
+        """
+        self._closed.set()
         self.stop_iq_recording()
 
         # Shut down the IQ record worker.
@@ -550,14 +589,18 @@ class SDRReceiver(SDRReceiverInterface):
         if self._iq_record_worker.is_alive():
             self._iq_record_worker.join(timeout=1.0)
 
-        try:
-            self.logger.info("Stopping SDR async read")
-            self.sdr.cancel_read_async()
-        except OSError as e:
-            self.logger.warning(f"Error canceling async read: {e}")
+        # Under the lock: a write already in progress finishes first, and
+        # one that has not started sees _closed and gives up rather than
+        # landing on a handle that is about to go.
+        with self._device_lock:
+            try:
+                self.logger.info("Stopping SDR async read")
+                self.sdr.cancel_read_async()
+            except OSError as e:
+                self.logger.warning(f"Error canceling async read: {e}")
 
-        try:
-            self.sdr.close()
-            self.logger.info("SDR closed successfully")
-        except OSError as e:
-            self.logger.error(f"Error closing SDR: {e}")
+            try:
+                self.sdr.close()
+                self.logger.info("SDR closed successfully")
+            except OSError as e:
+                self.logger.error(f"Error closing SDR: {e}")

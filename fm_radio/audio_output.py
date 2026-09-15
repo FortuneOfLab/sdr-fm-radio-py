@@ -112,6 +112,10 @@ class AudioOutput(AudioOutputInterface):
         # underrun.  Only ever incremented and read, so no lock is needed.
         self._enqueue_drop_count: int = 0
         self._underrun_count: int = 0
+        # Set by cleanup().  A bounded join cannot promise that the thread
+        # feeding us has stopped, so the stream defends itself rather than
+        # trusting that nobody is left to call in.
+        self._closed: threading.Event = threading.Event()
         # State for 4-GiB WAV rotation (set in start_recording, used
         # by the worker).  At 48 kHz / 16-bit / 2 ch this only matters
         # for ~6+ hour recordings, but the underlying wave.writeframes
@@ -198,7 +202,16 @@ class AudioOutput(AudioOutputInterface):
             silence = np.zeros(frame_count * AUDIO_CHANNELS, dtype=np.float32)
             return (silence.tobytes(), pyaudio.paContinue)
 
+    @property
+    def closed(self) -> bool:
+        """True once :meth:`cleanup` has run; the stream is gone after that."""
+        return self._closed.is_set()
+
     def enqueue_audio(self, left: np.ndarray, right: np.ndarray) -> None:
+        if self._closed.is_set():
+            # A block that arrived after shutdown has nowhere to go, and the
+            # stream behind this queue has already been closed.
+            return
         try:
             left32 = np.asarray(left, dtype=np.float32, copy=False)
             right32 = np.asarray(right, dtype=np.float32, copy=False)
@@ -519,7 +532,13 @@ class AudioOutput(AudioOutputInterface):
                 )
 
     def cleanup(self) -> None:
-        """Stop audio stream and terminate PyAudio instance."""
+        """Stop the audio stream and terminate PyAudio.
+
+        Refuses further audio first: whoever was feeding this may still be
+        running, and everything below is about to go away.  Safe to call
+        more than once.
+        """
+        self._closed.set()
         try:
             # Stop recording if active
             if self.recording:

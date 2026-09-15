@@ -736,10 +736,14 @@ class FMReceiverController:
             # stop - a window that failed to open, for one - and everything
             # below is something they are still using.
             self.quit_event.set()
+            # The gain worker writes to the SDR from its own thread, so it
+            # goes before the device it writes to.  Each resource also
+            # refuses use once closed, because a bounded join cannot promise
+            # that every thread has finished.
+            self.auto_gain.stop()
             self.sdr_receiver.stop()
             self._join_threads()
             self.audio_output.cleanup()
-            self.auto_gain.stop()
             self.logger.info("FM Receiver cleanup completed")
             print("Exiting FM Receiver.")
         except Exception as e:
