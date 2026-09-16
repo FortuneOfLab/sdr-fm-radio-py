@@ -123,6 +123,7 @@ def test_a_write_in_flight_finishes_before_the_device_closes(receiver,
     close waits behind the same lock.
     """
     device = receiver.sdr_receiver.sdr
+    handle = receiver.sdr_receiver.handle
     closed = threading.Event()
     writing = threading.Event()
     after_close = []
@@ -138,14 +139,17 @@ def test_a_write_in_flight_finishes_before_the_device_closes(receiver,
             after_close.append(gain)
         return original_set_gain(gain)
 
-    original_close = device.close
+    # _real_close, not device.close: the handle keeps the original and
+    # calls it directly, so device.close is not on the path that frees
+    # anything.  Watching that one would be watching nothing.
+    original_close = handle._real_close
 
     def marked_close():
         closed.set()
         return original_close()
 
     monkeypatch.setattr(device, "set_gain", slow_write)
-    monkeypatch.setattr(device, "close", marked_close)
+    monkeypatch.setattr(handle, "_real_close", marked_close)
 
     receiver.auto_gain._submit_async_gain(30.0)
     assert writing.wait(5), "the gain worker never started writing"
@@ -218,16 +222,21 @@ def test_a_wedged_write_does_not_hold_cleanup_open(receiver, monkeypatch):
     than pulling the handle out from under a call that is still inside it.
     """
     device = receiver.sdr_receiver.sdr
+    handle = receiver.sdr_receiver.handle
     writing = threading.Event()
     release = threading.Event()
     closes: list[str] = []
+    real_close = handle._real_close
 
     def wedged_write(gain):
         writing.set()
         release.wait(30)                    # never set until the test is done
 
     monkeypatch.setattr(device, "set_gain", wedged_write)
-    monkeypatch.setattr(device, "close", lambda: closes.append("close"))
+    # The handle calls _real_close directly; device.close is not on the
+    # path that frees anything.
+    monkeypatch.setattr(handle, "_real_close",
+                        lambda: (closes.append("close"), real_close()))
     monkeypatch.setattr("fm_radio.device_handle.DEVICE_LOCK_TIMEOUT_SEC", 0.5)
 
     receiver.auto_gain._submit_async_gain(30.0)
@@ -1189,6 +1198,76 @@ def test_a_close_cannot_slip_in_while_the_c_call_is_being_made(receiver,
     assert not thread.is_alive()
     assert "cancel after close" not in device.calls, (
         f"handed librtlsdr a pointer that had been freed: {device.calls}")
+
+
+def test_a_close_from_a_failed_read_waits_for_a_cancel_in_flight(receiver,
+                                                                 monkeypatch):
+    """The one interleaving only handle_lock covers.
+
+    A read that fails closes the device from the reader thread
+    (rtlsdr.py:601-603), and that close does not wait for the read to end -
+    the read has ended, that is why pyrtlsdr is closing.  So the guard
+    that holds every other close back is not in play here.  Meanwhile a
+    cancel from another thread has satisfied itself that the handle is
+    alive and is inside librtlsdr with the pointer.  handle_lock is what
+    keeps the close out until that call returns.
+    """
+    sdr = receiver.sdr_receiver
+    handle = sdr.handle
+    device = sdr.sdr
+
+    at_the_call = threading.Event()
+    cancel_done = threading.Event()
+    real_raw = device_handle.RAW_CANCEL_ASYNC
+
+    def stalled_raw(dev_p):
+        at_the_call.set()
+        cancel_done.wait(1.0)       # bounded: with the lock held it expires
+        return real_raw(dev_p)
+
+    monkeypatch.setattr("fm_radio.device_handle.RAW_CANCEL_ASYNC", stalled_raw)
+
+    reading = threading.Event()
+    fail_now = threading.Event()
+
+    def failing_read(cb, num_samples=None):
+        device.calls.append("read")
+        device.async_status = RTLSDR_RUNNING
+        device.reading.set()
+        reading.set()
+        fail_now.wait(10)
+        device.reading.clear()
+        device.async_status = RTLSDR_INACTIVE
+        device.calls.append("read failed")
+        device.close()              # rtlsdr.py:601-603, on this thread
+        raise OSError("LIBUSB_ERROR_IO: could not read")
+
+    monkeypatch.setattr(device, "read_samples_async", failing_read)
+
+    def read_and_swallow():
+        try:
+            sdr.start()
+        except SDRDeviceError:
+            pass                    # the point is the close, not the raise
+
+    reader = threading.Thread(target=read_and_swallow, name="SDRThread",
+                              daemon=True)
+    reader.start()
+    assert reading.wait(5), "the read never started"
+
+    canceller = threading.Thread(target=handle.stop_sampling, daemon=True)
+    canceller.start()
+    assert at_the_call.wait(5), "the cancel never reached librtlsdr"
+
+    fail_now.set()                  # the read fails and asks to close
+    reader.join(timeout=15)
+    canceller.join(timeout=15)
+
+    assert not reader.is_alive() and not canceller.is_alive()
+    assert "cancel after close" not in device.calls, (
+        f"freed the handle while librtlsdr had the pointer: {device.calls}")
+    assert device.calls.count("close") == 1, device.calls
+    assert not device.device_opened
 
 
 def test_a_driver_side_close_is_not_closed_again(receiver, monkeypatch):
