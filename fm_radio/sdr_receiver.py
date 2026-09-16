@@ -702,17 +702,18 @@ class SDRReceiver(SDRReceiverInterface):
             if self.handle.closed.is_set():
                 return
             if not sampling_stopped:
-                # Closing would free the handle the read is still going
-                # through.  Same bargain as a write that will not return:
-                # the device stays open and the process releases it.
-                self.logger.error(
-                    "The async read is still running; leaving the SDR open "
-                    "rather than freeing the handle it is reading through. "
-                    "The handle is released when the process exits.")
-                return
+                # Closing now would free the handle the read is still
+                # going through, so the handle will not do it - but it
+                # keeps the request, and the read ending is one of the
+                # moments it looks again.  Asking anyway is what makes
+                # that happen; giving up here is how the device used to be
+                # left open for good when a read ended a moment too late.
+                self.logger.warning(
+                    "The async read is still running; the close waits for "
+                    "it rather than freeing the handle it is reading "
+                    "through.")
             # Bounded by the handle, which keeps the close for later if a
-            # write will not return.  Sampling has already been cancelled,
-            # so nothing is still being pulled off the device meanwhile.
+            # write or the read will not let go.
             self.handle.close()
 
     def _stop_iq_record_worker(self) -> None:
