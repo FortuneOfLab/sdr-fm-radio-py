@@ -57,23 +57,31 @@ class FakeLibRtlSdr:
     """The C layer: rtlsdr_cancel_async and nothing else.
 
     Copies librtlsdr's own logic - two field writes, no USB traffic, and
-    -2 when there is no read to cancel.  Crucially it never closes the
-    device: that is the wrapper's doing, and keeping the two apart is what
-    lets a test tell which route the receiver took.
+    -2 for every state but RUNNING, including CANCELING (the branch that
+    would forgive that one is compiled out of librtlsdr).  Crucially it
+    never closes the device: that is the wrapper's doing, and keeping the
+    two apart is what lets a test tell which route the receiver took.
     """
 
     @staticmethod
     def rtlsdr_cancel_async(dev_p):
         if dev_p is None:
             return -1
+        if not dev_p.device_opened:
+            # rtlsdr_close has freed the struct; the real thing reads
+            # whatever is now at that address.  Recorded rather than
+            # simulated, so a test can see it happened at all.
+            dev_p.calls.append("cancel after close")
+            return -1
         if dev_p.async_status == RTLSDR_RUNNING:
             dev_p.calls.append("cancel")
             dev_p.async_status = RTLSDR_CANCELING
             dev_p.cancelled.set()
             return 0
-        if dev_p.async_status != RTLSDR_INACTIVE:
-            dev_p.async_status = RTLSDR_INACTIVE
-            return 0
+        # librtlsdr only honours RUNNING -> CANCELING.  The branch that
+        # would forgive any other state is compiled out (#if 0), so a
+        # second ask while the first is still unwinding gets -2 as well,
+        # and the state is left alone.
         dev_p.calls.append("cancel (no read running)")
         return -2
 
