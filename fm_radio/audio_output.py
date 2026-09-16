@@ -51,6 +51,11 @@ from fm_radio.constants import (
 
 # Sentinel placed in the recording queue to wake the worker for shutdown.
 _RECORD_WORKER_SHUTDOWN = object()
+
+# Least time between underrun lines.  A stream nobody is feeding underruns
+# on every callback, and the interesting part is that it is happening at
+# all, not each of the fifty a second.
+_UNDERRUN_LOG_INTERVAL_SEC: float = 5.0
 # Sentinel placed in the recording queue to mark the end of a session.
 # When the worker reaches it, every preceding chunk has been written;
 # stop_recording() can then safely close the wave file.
@@ -112,6 +117,12 @@ class AudioOutput(AudioOutputInterface):
         # underrun.  Only ever incremented and read, so no lock is needed.
         self._enqueue_drop_count: int = 0
         self._underrun_count: int = 0
+        # When nothing is feeding the output any more - the SDR unplugged,
+        # say - every callback underruns, and one debug line each is fifty
+        # a second for as long as the process lives.  The count is what
+        # matters; the lines are a sample of it.
+        self._underrun_last_logged: float = 0.0
+        self._underrun_logged_at: int = 0
         # Set by cleanup().  A bounded join cannot promise that the thread
         # feeding us has stopped, so the stream defends itself rather than
         # trusting that nobody is left to call in.
@@ -195,9 +206,16 @@ class AudioOutput(AudioOutputInterface):
                 # the completely empty ones hides the onset of the problem.
                 out[filled:requested_samples] = 0.0
                 self._underrun_count += 1
-                self.logger.debug(
-                    "Audio buffer underrun (%d of %d frames)",
-                    requested_samples - filled, requested_samples)
+                now = time.monotonic()
+                if (now - self._underrun_last_logged
+                        >= _UNDERRUN_LOG_INTERVAL_SEC):
+                    since = self._underrun_count - self._underrun_logged_at
+                    self._underrun_last_logged = now
+                    self._underrun_logged_at = self._underrun_count
+                    self.logger.debug(
+                        "Audio buffer underrun (%d of %d frames; %d since "
+                        "the last of these)",
+                        requested_samples - filled, requested_samples, since)
 
             return (out.tobytes(), pyaudio.paContinue)
         except Exception as e:

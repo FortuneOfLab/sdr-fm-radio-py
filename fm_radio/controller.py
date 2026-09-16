@@ -27,6 +27,7 @@
 
 from __future__ import annotations
 
+import os
 import queue
 import sys
 import time
@@ -182,6 +183,10 @@ class FMReceiverController:
         self.logger: logging.Logger = logging.getLogger('fm_receiver.FMReceiverController')
         self.light: bool = light
         self.quit_event: threading.Event = threading.Event()
+        # Why the receiver stopped, when it stopped on its own.  Read by
+        # whatever is showing the receiver to a person: the command line
+        # prints it on the way out, the window puts it on the health line.
+        self.device_failure: str | None = None
         # Nationwide catalogue (bundled snapshot + the user's stations.toml)
         # and the short preset list the CLI tunes by number.  Loading
         # problems are printed as well as logged: logging is off unless
@@ -675,7 +680,8 @@ class FMReceiverController:
         # compilation runs.
         self._prewarm_jit()
 
-        sdr_thread = threading.Thread(target=self.sdr_receiver.start, daemon=True)
+        sdr_thread = threading.Thread(target=self._run_sdr_thread,
+                                      name="SDRThread", daemon=True)
         sdr_thread.start()
         self.threads.append(sdr_thread)
 
@@ -684,6 +690,35 @@ class FMReceiverController:
         self.threads.append(proc_thread)
 
         self.logger.info("FM Receiver started successfully")
+
+    def _run_sdr_thread(self) -> None:
+        """Read from the SDR, and end the receiver if the device goes.
+
+        A bare thread target turns a device that has been unplugged into a
+        traceback on stderr and nothing else: the processing thread goes on
+        waiting for a queue nobody fills, the output underruns at fifty
+        callbacks a second, and a window shows the last reading it had.
+        Nothing is coming back from here, so the rest is told.
+        """
+        try:
+            self.sdr_receiver.start()
+        except SDRDeviceError as e:
+            self._device_is_gone(str(e))
+        except Exception as e:                  # pragma: no cover - guard
+            self.logger.critical(
+                "Unexpected failure in the SDR thread: %s", e, exc_info=True)
+            self._device_is_gone(str(e))
+
+    def _device_is_gone(self, why: str) -> None:
+        """Record why the samples stopped, and ask everything else to stop."""
+        self.logger.error("The SDR stopped delivering samples: %s", why)
+        self.device_failure = why
+        # Printed from here rather than left to cleanup: cleanup has a few
+        # bounded waits in it, and the person watching should be told what
+        # happened before they are made to wait for it.
+        print(f"\nSDR disconnected: {why}")
+        print("Stopping the receiver.")
+        self.quit_event.set()
 
     def _announce(self) -> None:
         """Print the banner the command line starts with."""
@@ -721,6 +756,35 @@ class FMReceiverController:
                 self.quit_event.set()
         finally:
             self.cleanup()
+            self._leave_past_the_blocked_reader()
+
+    def _leave_past_the_blocked_reader(self) -> None:
+        """Go without waiting for a command that is never coming.
+
+        The command thread spends its life inside input(), and there is no
+        portable way to wake one blocked on a console.  Letting the
+        interpreter finalise around it aborts the process with
+        "_enter_buffered_busy: could not acquire lock for <stdin>" - after
+        a clean shutdown, which makes the shutdown look like it failed.
+        A person who has just unplugged their radio should not be shown a
+        fatal error for it.
+
+        cleanup() has already run, so Python's own finalisation has
+        nothing left to do for us: the device is closed, the audio stream
+        is closed, and every recording has been flushed and closed.  The
+        status says whether the receiver was asked to stop or stopped
+        because the device went.
+        """
+        if not self.cmd_interface.is_alive():
+            return
+        sys.stdout.flush()
+        sys.stderr.flush()
+        for handler in logging.getLogger().handlers:
+            try:
+                handler.flush()
+            except Exception:           # pragma: no cover - best effort
+                pass
+        os._exit(1 if self.device_failure else 0)
 
     def cleanup(self) -> None:
         """Stop the receiver and release what it was using.

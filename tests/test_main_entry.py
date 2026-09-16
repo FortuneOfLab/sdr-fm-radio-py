@@ -28,6 +28,9 @@ class FakeController:
         # and a stand-in that cannot record it being set hides whether
         # anything ever asked them to stop.
         self.quit_event = threading.Event()
+        # Set by the real controller when the device goes; the entry point
+        # turns it into an exit status.
+        self.device_failure: str | None = None
 
     def _record(self, name: str) -> None:
         self.calls.append(name)
@@ -50,7 +53,8 @@ def entry_point(monkeypatch):
     built: list[FakeController] = []
     gui_calls: list[object] = []
 
-    def _run(argv, *, fail_at=None, gui_exit=0, gui_error=None):
+    def _run(argv, *, fail_at=None, gui_exit=0, gui_error=None,
+             device_failure=None):
         def build(**kwargs):
             controller = FakeController(fail_at=fail_at, **kwargs)
             built.append(controller)
@@ -58,6 +62,10 @@ def entry_point(monkeypatch):
 
         def run_gui(controller):
             gui_calls.append(controller)
+            if device_failure is not None:
+                # The window closed because the radio went, not because
+                # anybody asked it to.
+                controller.device_failure = device_failure
             if gui_error is not None:
                 raise gui_error
             return gui_exit
@@ -193,3 +201,16 @@ def test_cleanup_on_a_receiver_that_never_started(no_user_config):
                                       stations_path=str(no_user_config))
     controller.cleanup()                # no threads at all
     assert controller.quit_event.is_set()
+
+
+def test_a_device_that_went_shows_up_in_the_exit_status(entry_point):
+    """A window that closed because the radio vanished is not a clean exit.
+
+    A script that started this can tell that apart from a person closing
+    the window, the same way it can on the command line.
+    """
+    controller, _gui_calls, code = entry_point(
+        ["--light", "--gui"], device_failure="LIBUSB_ERROR_NOT_FOUND (-5)")
+
+    assert code == 1
+    assert controller.calls == ["start_background", "cleanup"]

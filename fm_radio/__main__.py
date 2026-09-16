@@ -165,6 +165,12 @@ def main() -> None:
                 # never have opened; cleanup() sets it either way and waits
                 # for the threads before closing what they are using.
                 controller.cleanup()
+            if controller.device_failure and exit_code == 0:
+                # The window closed normally, but only because the device
+                # went.  A script that started this should be able to tell
+                # that apart from a person closing the window, the same way
+                # it can on the command line.
+                exit_code = 1
             sys.exit(exit_code)
         controller.start()
     except Exception as e:

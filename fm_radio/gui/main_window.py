@@ -43,7 +43,8 @@ import time
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QGridLayout, QGroupBox, QHBoxLayout,
-    QLabel, QMainWindow, QProgressBar, QPushButton, QSlider, QStatusBar,
+    QLabel, QMainWindow, QProgressBar, QPushButton, QSizePolicy, QSlider,
+    QStatusBar,
     QVBoxLayout, QWidget,
 )
 
@@ -105,7 +106,13 @@ class ReceiverWindow(QMainWindow):
 
         self.setStatusBar(QStatusBar(self))
         self._health = QLabel("waiting for the first block")
-        self.statusBar().addWidget(self._health)
+        # A driver message can run to a couple of hundred characters, and a
+        # status label is allowed to ask the window to be that wide.  It is
+        # not: the window is the size the controls need, and a line that
+        # does not fit is elided rather than allowed to push the edge out.
+        self._health.setSizePolicy(QSizePolicy.Policy.Ignored,
+                                   QSizePolicy.Policy.Preferred)
+        self.statusBar().addWidget(self._health, 1)
 
         self._load_presets()
         self.refresh()
@@ -337,6 +344,10 @@ class ReceiverWindow(QMainWindow):
         snapshot, which happens at startup, just after tuning, and while
         snapshots cannot be built.
         """
+        failure = getattr(self.controller, "device_failure", None)
+        if failure is not None:
+            self._show_the_device_has_gone(failure)
+            return
         status = self.controller.get_status()
         if status is None:
             self._show_without_status()
@@ -348,6 +359,33 @@ class ReceiverWindow(QMainWindow):
         notice = self._current_notice()
         if notice is not None:
             self._health.setText(notice)
+
+    def _show_the_device_has_gone(self, why: str) -> None:
+        """Say why the receiver stopped, and stop pretending otherwise.
+
+        The window stays: closing it here would take the explanation with
+        it, and the person who just pulled a cable is the one who needs to
+        read it.  Nothing in it will reach the device again - the receiver
+        is already shutting down - so the controls go quiet and the timer
+        stops rather than redrawing the same dead reading fifty times a
+        second.  Closing the window runs the usual cleanup.
+
+        The readings go with the controls.  Leaving the last ones up -
+        STEREO, a pilot SNR, two meters near the top of their range - is
+        the window saying the radio is playing, about a radio that is not
+        there.
+        """
+        self._timer.stop()
+        self._show_without_status()
+        self._station.setText("no device")
+        self._health.setText("SDR disconnected - the receiver has stopped")
+        # The driver's own words, for whoever wants them.  Not on the
+        # status line, where they would be most of a paragraph.
+        self._health.setToolTip(why)
+        for widget in (self._down, self._up, self._presets,
+                       self._auto_gain, self._gain_slider,
+                       self._record_audio, self._record_iq):
+            widget.setEnabled(False)
 
     def _show_without_status(self) -> None:
         """Show what can be known without a snapshot: the tuner's own state."""
