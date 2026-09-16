@@ -37,6 +37,16 @@ import threading
 import numpy as np
 from rtlsdr import RtlSdr
 
+try:
+    # The C cancel, reached without pyrtlsdr's wrapper around it.  The
+    # wrapper closes the device and raises when the call fails, and the
+    # call fails whenever no read is running; see _ask_the_read_to_stop.
+    from rtlsdr.librtlsdr import librtlsdr as _librtlsdr
+
+    _RAW_CANCEL_ASYNC = _librtlsdr.rtlsdr_cancel_async
+except Exception:                       # pragma: no cover - layout differs
+    _RAW_CANCEL_ASYNC = None
+
 from fm_radio import recording_meta
 from fm_radio.interfaces import SDRReceiverInterface
 from fm_radio.exceptions import SDRDeviceError, RecordingError
@@ -743,6 +753,60 @@ class SDRReceiver(SDRReceiverInterface):
             finally:
                 self._device_lock.release()
 
+    def _ask_the_read_to_stop(self) -> None:
+        """One attempt at cancelling, with no way for it to close anything.
+
+        rtlsdr_cancel_async is called directly rather than through
+        pyrtlsdr.  The wrapper closes the device and raises when the C call
+        fails (rtlsdr.py:699-706), and the call fails whenever the read is
+        not running - which includes the moment between read_bytes_async
+        clearing the wrapper's own suppression flag (rtlsdr.py:599) and
+        librtlsdr marking the read as started.  A close from there lands
+        outside ``_device_lock``, on a handle a gain write is still using,
+        so nothing here may rest on a flag the reader is free to clear.
+
+        The C function writes two fields on the device struct and nothing
+        else: no USB traffic, nothing freed, safe beside a control
+        transfer.  A failure is simply a cancel that did nothing, and the
+        caller asks again.
+        """
+        dev_p = getattr(self.sdr, "dev_p", None)
+        if _RAW_CANCEL_ASYNC is not None and dev_p is not None:
+            result = _RAW_CANCEL_ASYNC(dev_p)
+            if result < 0:
+                self.logger.debug(
+                    "rtlsdr_cancel_async returned %d; the read is not "
+                    "running yet", result)
+            return
+        self._ask_through_the_wrapper()
+
+    def _ask_through_the_wrapper(self) -> None:
+        """Fallback for a pyrtlsdr whose C entry point we cannot reach.
+
+        The wrapper can close the device, so this holds ``_device_lock``:
+        a close from in here is then serialised with the writes it would
+        otherwise land on top of.  Bounded, so a write that will not return
+        cannot hold the cancel up for ever - and in that case the cancel is
+        skipped rather than risked, because closing under a live write is
+        worse than a read that keeps going.
+        """
+        if not self._device_lock.acquire(timeout=_DEVICE_LOCK_TIMEOUT_SEC):
+            self.logger.error(
+                "Cannot reach rtlsdr_cancel_async directly, and a device "
+                "write has not returned after %.1f s; not cancelling "
+                "through pyrtlsdr, which may close the device underneath "
+                "that write", _DEVICE_LOCK_TIMEOUT_SEC)
+            return
+        try:
+            self.sdr.cancel_read_async()
+        except OSError as e:
+            self.logger.warning("Error canceling async read: %s", e)
+            if not getattr(self.sdr, "device_opened", True):
+                # The wrapper closed it on the way out.
+                self._device_closed.set()
+        finally:
+            self._device_lock.release()
+
     def _stop_iq_record_worker(self) -> None:
         """Wake the IQ-recording worker and wait briefly for it to exit."""
         self._iq_record_worker_stop.set()
@@ -764,15 +828,14 @@ class SDRReceiver(SDRReceiverInterface):
         and the wrapper answers an error by closing the device and raising.
         That close would land outside ``_device_lock``, on top of a gain
         write still using the handle, which is the one thing the lock
-        exists to stop.  And ``read_bytes_async`` clears the wrapper's
-        ``read_async_canceling`` flag on its way in.
+        exists to stop.
 
-        So: nothing is cancelled unless a read is actually armed, the flag
-        is set before every attempt to disarm the close-and-raise path (it
-        also stops any further callbacks), and the ask is repeated until
-        the read has returned, because a cancel landing in the moment
-        between arming and librtlsdr marking the read as running does
-        nothing and the read starts regardless.
+        So: nothing is cancelled unless a read is actually armed, the ask
+        goes straight to the C function rather than through the wrapper
+        (see :meth:`_ask_the_read_to_stop`), and it is repeated until the
+        read has returned, because a cancel landing in the moment between
+        arming and librtlsdr marking the read as running does nothing at
+        all and the read starts regardless.
 
         Returns:
             True when no read is running any more - including when one was
@@ -809,14 +872,7 @@ class SDRReceiver(SDRReceiverInterface):
                     "not asking it again")
                 self._device_closed.set()
                 return True
-            try:
-                # Before every attempt: read_bytes_async clears it again
-                # each time it starts, and without it a failed cancel
-                # closes the device from outside the device lock.
-                self.sdr.read_async_canceling = True
-                self.sdr.cancel_read_async()
-            except OSError as e:
-                self.logger.warning(f"Error canceling async read: {e}")
+            self._ask_the_read_to_stop()
             if not self._sampling_active.is_set():
                 return True
             if time.monotonic() >= deadline:

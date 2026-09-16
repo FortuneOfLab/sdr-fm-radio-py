@@ -47,15 +47,47 @@ def _install_fake_pyaudio() -> None:
 # Fake rtlsdr
 # ----------------------------------------------------------------------
 
+# librtlsdr's async states, as rtlsdr_cancel_async sees them.
+RTLSDR_INACTIVE = 0
+RTLSDR_RUNNING = 1
+RTLSDR_CANCELING = 2
+
+
+class FakeLibRtlSdr:
+    """The C layer: rtlsdr_cancel_async and nothing else.
+
+    Copies librtlsdr's own logic - two field writes, no USB traffic, and
+    -2 when there is no read to cancel.  Crucially it never closes the
+    device: that is the wrapper's doing, and keeping the two apart is what
+    lets a test tell which route the receiver took.
+    """
+
+    @staticmethod
+    def rtlsdr_cancel_async(dev_p):
+        if dev_p is None:
+            return -1
+        if dev_p.async_status == RTLSDR_RUNNING:
+            dev_p.calls.append("cancel")
+            dev_p.async_status = RTLSDR_CANCELING
+            dev_p.cancelled.set()
+            return 0
+        if dev_p.async_status != RTLSDR_INACTIVE:
+            dev_p.async_status = RTLSDR_INACTIVE
+            return 0
+        dev_p.calls.append("cancel (no read running)")
+        return -2
+
+
 class FakeRtlSdr:
     """Stands in for rtlsdr.RtlSdr, including the parts that bite.
 
     The async read blocks until it is cancelled, as the real one does, and
-    the cancel copies pyrtlsdr's behaviour rather than the C library's: the
-    C call returns an error whenever no read is running, and the wrapper
-    answers that by closing the device and raising (rtlsdr.py:699-706).
-    Tests that never start a read therefore see the same trap the real
-    driver sets.
+    ``cancel_read_async`` copies pyrtlsdr's wrapper rather than the C
+    library: on a failed call it closes the device and raises
+    (rtlsdr.py:699-706).  It also clears ``read_async_canceling`` on the
+    way into a read (rtlsdr.py:599), which is what makes that flag
+    unusable as a safety measure.  Any use of the wrapper shows up in
+    ``calls`` as "wrapper cancel".
     """
 
     def __init__(self) -> None:
@@ -65,9 +97,12 @@ class FakeRtlSdr:
         self.gain_calls: list[float] = []
         self.device_opened = True
         self.read_async_canceling = False
+        self.async_status = RTLSDR_INACTIVE
         self.calls: list[str] = []
         self.reading: threading.Event = threading.Event()
         self.cancelled: threading.Event = threading.Event()
+        # librtlsdr's rtlsdr_dev_t *, which the C cancel takes.
+        self.dev_p = self
 
     def set_manual_gain_enabled(self, manual: bool) -> None: ...
 
@@ -78,24 +113,24 @@ class FakeRtlSdr:
         return 0.0
 
     def read_samples_async(self, cb, num_samples=None) -> None:
-        # read_bytes_async clears the wrapper's flag on its way in.
+        # read_bytes_async clears the wrapper's flag on its way in
+        # (rtlsdr.py:599), before librtlsdr knows a read exists.
         self.read_async_canceling = False
         self.calls.append("read")
         self.cancelled.clear()
         self.reading.set()
+        self.async_status = RTLSDR_RUNNING      # the C call takes over here
         try:
             self.cancelled.wait(30)
         finally:
+            self.async_status = RTLSDR_INACTIVE
             self.reading.clear()
 
     def cancel_read_async(self) -> None:
-        if self.reading.is_set():
-            self.calls.append("cancel")
-            self.read_async_canceling = True
-            self.cancelled.set()
-            return
-        # rtlsdr_cancel_async returned -2: no read is running.
-        if not self.read_async_canceling:
+        """pyrtlsdr's wrapper, close-and-raise included."""
+        self.calls.append("wrapper cancel")
+        result = FakeLibRtlSdr.rtlsdr_cancel_async(self.dev_p)
+        if result < 0 and not self.read_async_canceling:
             self.calls.append("cancel failed")
             self.close()
             raise OSError(
@@ -110,7 +145,13 @@ class FakeRtlSdr:
 def _install_fake_rtlsdr() -> None:
     mod = types.ModuleType("rtlsdr")
     mod.RtlSdr = FakeRtlSdr
+    # fm_radio reaches the C cancel through rtlsdr.librtlsdr.librtlsdr,
+    # so the fake has to be shaped the same way round.
+    lib_mod = types.ModuleType("rtlsdr.librtlsdr")
+    lib_mod.librtlsdr = FakeLibRtlSdr
+    mod.librtlsdr = lib_mod
     sys.modules["rtlsdr"] = mod
+    sys.modules["rtlsdr.librtlsdr"] = lib_mod
 
 
 _install_fake_pyaudio()
