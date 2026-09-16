@@ -240,18 +240,17 @@ class SDRReceiver(SDRReceiverInterface):
 
     def set_center_frequency(self, freq: float) -> None:
         """Change the center frequency."""
-        if self._closed.is_set():
-            self.logger.debug("Ignoring tune to %.1f MHz: the SDR is closed",
-                              freq / 1e6)
-            return
         try:
+            if self._closed.is_set() or self._device_closed.is_set():
+                self.logger.debug(
+                    "Ignoring tune to %.1f MHz: the SDR is closed", freq / 1e6)
+                return
             with self._device_lock:
-                if self._closed.is_set():
+                if self._closed.is_set() or self._device_closed.is_set():
                     return              # closed while we waited for the lock
                 self.center_freq = freq
                 self.sdr.center_freq = freq
                 self._last_freq_hz = float(freq)
-            self._retry_pending_close()
             # Bumped after the hardware change, never before: a block
             # captured on the new frequency but enqueued before this point
             # is then treated as belonging to the old tuning, which loses a
@@ -262,6 +261,12 @@ class SDRReceiver(SDRReceiverInterface):
         except OSError as e:
             self.logger.error(f"Failed to set center frequency to {freq/1e6:.1f} MHz: {e}")
             raise SDRDeviceError(f"Failed to set center frequency: {e}") from e
+        finally:
+            # Whatever happened above - a write, a refusal, a failure that
+            # closed the device from inside pyrtlsdr - the device lock is
+            # free again now, which may be the thing a deferred close was
+            # waiting for.
+            self._retry_pending_close()
 
     def get_center_frequency(self) -> float:
         """Return the centre frequency in Hz, or the last one read.
@@ -271,11 +276,12 @@ class SDRReceiver(SDRReceiverInterface):
         value instead.  Reading a closed handle is undefined behaviour in
         librtlsdr, and waiting behind a 40-200 ms write would cost blocks.
         """
-        if self._closed.is_set() or not self._device_lock.acquire(blocking=False):
+        if (self._closed.is_set() or self._device_closed.is_set()
+                or not self._device_lock.acquire(blocking=False)):
             return self._last_freq_hz
         try:
-            if self._closed.is_set():        # closed between the two checks
-                return self._last_freq_hz
+            if self._closed.is_set() or self._device_closed.is_set():
+                return self._last_freq_hz    # closed between the two checks
             self._last_freq_hz = float(self.sdr.center_freq)
             return self._last_freq_hz
         except OSError as e:
@@ -295,30 +301,33 @@ class SDRReceiver(SDRReceiverInterface):
         Does nothing once the device is closed: the gain worker runs on its
         own thread and may still have a write queued when shutdown begins.
         """
-        if self._closed.is_set():
-            self.logger.debug("Ignoring gain %.1f dB: the SDR is closed", gain)
-            return
         try:
+            if self._closed.is_set() or self._device_closed.is_set():
+                self.logger.debug(
+                    "Ignoring gain %.1f dB: the SDR is closed", gain)
+                return
             with self._device_lock:
-                if self._closed.is_set():
+                if self._closed.is_set() or self._device_closed.is_set():
                     return              # closed while we waited for the lock
                 self.sdr.set_gain(gain)
                 self._last_gain_db = float(gain)
-            self._retry_pending_close()
             self.logger.info(f"Gain set to {gain:.1f} dB")
         except OSError as e:
             self.logger.error(f"Failed to set gain to {gain:.1f} dB: {e}")
             raise SDRDeviceError(f"Failed to set gain: {e}") from e
+        finally:
+            self._retry_pending_close()
 
     def get_gain(self) -> float:
         """Return the gain in dB, or the last one read.
 
         Same bargain as :meth:`get_center_frequency`.
         """
-        if self._closed.is_set() or not self._device_lock.acquire(blocking=False):
+        if (self._closed.is_set() or self._device_closed.is_set()
+                or not self._device_lock.acquire(blocking=False)):
             return self._last_gain_db
         try:
-            if self._closed.is_set():
+            if self._closed.is_set() or self._device_closed.is_set():
                 return self._last_gain_db
             self._last_gain_db = float(self.sdr.get_gain())
             return self._last_gain_db
@@ -338,15 +347,16 @@ class SDRReceiver(SDRReceiverInterface):
         try:
             self.manual_gain = manual
             with self._device_lock:
-                if self._closed.is_set():
+                if self._closed.is_set() or self._device_closed.is_set():
                     return
                 self.sdr.set_manual_gain_enabled(manual)
-            self._retry_pending_close()
             mode = "manual" if manual else "AGC"
             self.logger.info(f"Gain mode set to {mode}")
         except OSError as e:
             self.logger.error(f"Failed to set gain mode: {e}")
             raise SDRDeviceError(f"Failed to set gain mode: {e}") from e
+        finally:
+            self._retry_pending_close()
 
     def callback(self, iq_samples: np.ndarray, sdr_obj: RtlSdr) -> None:
         """Callback to store received IQ samples in the data queue.
@@ -723,8 +733,12 @@ class SDRReceiver(SDRReceiverInterface):
                 self._device_closed.set()
             raise SDRDeviceError(f"Failed to start SDR async read: {e}") from e
         finally:
+            # In this order: a close deferred because the read would not
+            # end has been waiting for exactly this, and _close_the_handle
+            # reads both of these to decide whether to wait.
             self._sampling_active.clear()
             self._reading_thread = None
+            self._retry_pending_close()
 
     def stop(self) -> None:
         """Stop sampling and close the SDR.
@@ -825,14 +839,17 @@ class SDRReceiver(SDRReceiverInterface):
         """
         if self._device_closed.is_set():
             return
+        # Somebody has decided the device is going: this one, or pyrtlsdr
+        # from inside a call that failed.  Either way nothing new should
+        # reach it from here, whether or not the close itself lands this
+        # time - a handle that has been freed is worse than one that is
+        # merely on its way out.
+        self._closed.set()
         # A close from inside the read is a read that has already ended:
         # that is why pyrtlsdr is closing.  Waiting for it here would be
         # waiting for this thread.
         if (threading.current_thread() is not self._reading_thread
                 and self._sampling_active.is_set()):
-            # Something has decided the device is going.  Nothing new
-            # should reach it, whether or not the close lands this time.
-            self._closed.set()
             if not self._cancel_sampling():
                 self._defer_close("the async read has not returned")
                 return

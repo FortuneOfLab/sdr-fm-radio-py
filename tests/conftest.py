@@ -100,7 +100,7 @@ class FakeRtlSdr:
 
     def __init__(self) -> None:
         self.sample_rate = 1.024e6
-        self.center_freq = 80e6
+        self._center_freq = 80e6
         self.direct_sampling = 0
         self.gain_calls: list[float] = []
         self.device_opened = True
@@ -112,12 +112,30 @@ class FakeRtlSdr:
         # librtlsdr's rtlsdr_dev_t *, which the C cancel takes.
         self.dev_p = self
 
-    def set_manual_gain_enabled(self, manual: bool) -> None: ...
+    @property
+    def center_freq(self):
+        self._note_use("read center_freq")
+        return self._center_freq
+
+    @center_freq.setter
+    def center_freq(self, value) -> None:
+        self._note_use("write center_freq")
+        self._center_freq = value
+
+    def _note_use(self, what: str) -> None:
+        """Record any use of a handle that has been freed."""
+        if not self.device_opened:
+            self.calls.append(f"{what} after close")
+
+    def set_manual_gain_enabled(self, manual: bool) -> None:
+        self._note_use("set_manual_gain_enabled")
 
     def set_gain(self, gain: float) -> None:
+        self._note_use("set_gain")
         self.gain_calls.append(gain)
 
     def get_gain(self) -> float:
+        self._note_use("get_gain")
         return 0.0
 
     def read_samples_async(self, cb, num_samples=None) -> None:

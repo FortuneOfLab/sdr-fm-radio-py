@@ -1434,3 +1434,246 @@ def test_a_deferred_close_is_made_only_once(receiver, monkeypatch):
     receiver.cleanup()
 
     assert device.calls.count("close") == 1, device.calls
+
+
+# ----------------------------------------------------------------------
+# The receiver's own state, on every close path
+# ----------------------------------------------------------------------
+
+def test_a_close_before_any_read_still_closes_the_receiver(receiver,
+                                                           monkeypatch):
+    """A write can fail before the read has ever started.
+
+    pyrtlsdr closes the device from inside it, and the receiver has to
+    know: the handle is gone, so a later gain or frequency read must come
+    from the cache rather than from a device that is not there.
+    """
+    sdr = receiver.sdr_receiver
+    device = sdr.sdr
+
+    def failing_write(gain):
+        device.close()                  # rtlsdr.py:317
+        raise OSError("LIBUSB_ERROR_NO_DEVICE")
+
+    monkeypatch.setattr(device, "set_gain", failing_write)
+
+    with pytest.raises(SDRDeviceError):
+        sdr.set_gain(30.0)
+
+    assert not device.device_opened
+    assert sdr.closed, "the receiver still reports itself open"
+
+    device.calls.clear()
+    monkeypatch.setattr(device, "set_gain", lambda gain: None)
+    sdr.get_gain()
+    sdr.get_center_frequency()
+    sdr.set_gain(20.0)
+    sdr.set_center_frequency(81.3e6)
+    sdr.set_manual_gain_mode(True)
+
+    assert device.calls == [], (
+        f"used a handle that had been freed: {device.calls}")
+
+
+def test_a_deferred_close_leaves_the_receiver_closed_too(receiver,
+                                                         monkeypatch):
+    """Even when the close itself has to wait, nothing new may reach it."""
+    sdr = receiver.sdr_receiver
+    device = sdr.sdr
+    monkeypatch.setattr("fm_radio.sdr_receiver._DEVICE_LOCK_TIMEOUT_SEC", 0.3)
+
+    release = threading.Event()
+    holding = threading.Event()
+
+    def hold_the_device():
+        sdr._device_lock.acquire()
+        holding.set()
+        release.wait(10)
+        sdr._device_lock.release()
+
+    holder = threading.Thread(target=hold_the_device, daemon=True)
+    holder.start()
+    assert holding.wait(5)
+
+    try:
+        device.close()                  # deferred: the lock is held
+
+        assert sdr._close_pending
+        assert device.device_opened
+        assert sdr.closed, "a pending close left the receiver looking open"
+    finally:
+        release.set()
+        holder.join(timeout=5)
+
+
+# ----------------------------------------------------------------------
+# The read ending is itself a chance to close
+# ----------------------------------------------------------------------
+
+def test_the_read_ending_makes_good_on_a_deferred_close(receiver,
+                                                        monkeypatch):
+    """The close was deferred because the read would not end.
+
+    When it does end, that is the moment the close became possible, and
+    nothing else is going to come along: writes are refused by then.
+    """
+    sdr = receiver.sdr_receiver
+    device = sdr.sdr
+    monkeypatch.setattr("fm_radio.sdr_receiver._SAMPLING_CANCEL_TIMEOUT_SEC",
+                        0.3)
+
+    reading = threading.Event()
+    release = threading.Event()
+
+    def deaf_read(cb, num_samples=None):
+        device.calls.append("read")
+        device.async_status = RTLSDR_RUNNING
+        device.reading.set()
+        reading.set()
+        release.wait(30)                # ignores every cancel
+        device.reading.clear()
+        device.async_status = RTLSDR_INACTIVE
+
+    monkeypatch.setattr(device, "read_samples_async", deaf_read)
+    thread = threading.Thread(target=sdr.start, name="SDRThread", daemon=True)
+    thread.start()
+    assert reading.wait(5), "the read never started"
+
+    def failing_write(gain):
+        device.close()
+        raise OSError("LIBUSB_ERROR_NO_DEVICE")
+
+    monkeypatch.setattr(device, "set_gain", failing_write)
+    with pytest.raises(SDRDeviceError):
+        sdr.set_gain(30.0)
+
+    assert sdr._close_pending, "the close should have been deferred"
+    assert device.device_opened
+
+    release.set()                       # ... and now the read ends
+    thread.join(timeout=10)
+
+    assert not thread.is_alive()
+    assert not sdr._close_pending, "the deferred close was forgotten"
+    assert not device.device_opened, "the deferred close was never made"
+    assert device.calls.count("close") == 1, device.calls
+    assert "close during read" not in device.calls, device.calls
+
+
+def test_a_refused_write_still_makes_good_on_a_deferred_close(receiver,
+                                                              monkeypatch):
+    """Writes are refused once closing has begun, and a refusal is a
+    perfectly good moment to try the close that could not be made."""
+    sdr = receiver.sdr_receiver
+    device = sdr.sdr
+    monkeypatch.setattr("fm_radio.sdr_receiver._DEVICE_LOCK_TIMEOUT_SEC", 0.3)
+
+    release = threading.Event()
+    holding = threading.Event()
+
+    def hold_the_device():
+        sdr._device_lock.acquire()
+        holding.set()
+        release.wait(10)
+        sdr._device_lock.release()
+
+    holder = threading.Thread(target=hold_the_device, daemon=True)
+    holder.start()
+    assert holding.wait(5)
+
+    device.close()                      # deferred
+    assert sdr._close_pending
+
+    release.set()
+    holder.join(timeout=5)
+
+    sdr.set_gain(20.0)                  # refused, and retries the close
+
+    assert not sdr._close_pending
+    assert not device.device_opened
+    assert device.calls == ["close"], device.calls
+
+
+def test_a_failing_write_retries_a_close_it_could_not_make(receiver,
+                                                           monkeypatch):
+    """The exception path is an exit too, and the read ends behind it."""
+    sdr = receiver.sdr_receiver
+    device = sdr.sdr
+    monkeypatch.setattr("fm_radio.sdr_receiver._SAMPLING_CANCEL_TIMEOUT_SEC",
+                        0.3)
+
+    reading = threading.Event()
+    release = threading.Event()
+    ended = threading.Event()
+
+    def deaf_read(cb, num_samples=None):
+        device.calls.append("read")
+        device.async_status = RTLSDR_RUNNING
+        device.reading.set()
+        reading.set()
+        release.wait(30)
+        device.reading.clear()
+        device.async_status = RTLSDR_INACTIVE
+        ended.set()
+
+    monkeypatch.setattr(device, "read_samples_async", deaf_read)
+    thread = threading.Thread(target=sdr.start, name="SDRThread", daemon=True)
+    thread.start()
+    assert reading.wait(5)
+
+    def failing_write(gain):
+        device.close()                  # deferred: the read will not end
+        raise OSError("LIBUSB_ERROR_NO_DEVICE")
+
+    monkeypatch.setattr(device, "set_gain", failing_write)
+    with pytest.raises(SDRDeviceError):
+        sdr.set_gain(30.0)
+    assert sdr._close_pending
+
+    release.set()
+    thread.join(timeout=10)
+    assert ended.is_set()
+
+    assert not device.device_opened
+    assert device.calls.count("close") == 1, device.calls
+    assert "close during read" not in device.calls, device.calls
+
+
+def test_cleanup_finishes_after_a_deferred_close(receiver, monkeypatch):
+    """Whatever happened above, shutdown still has to end."""
+    sdr = receiver.sdr_receiver
+    device = sdr.sdr
+    monkeypatch.setattr("fm_radio.sdr_receiver._DEVICE_LOCK_TIMEOUT_SEC", 0.3)
+    monkeypatch.setattr("fm_radio.sdr_receiver._SAMPLING_CANCEL_TIMEOUT_SEC",
+                        0.3)
+
+    release = threading.Event()
+    holding = threading.Event()
+
+    def hold_the_device():
+        sdr._device_lock.acquire()
+        holding.set()
+        release.wait(10)
+        sdr._device_lock.release()
+
+    holder = threading.Thread(target=hold_the_device, daemon=True)
+    holder.start()
+    assert holding.wait(5)
+
+    device.close()                      # deferred
+    assert sdr._close_pending
+
+    try:
+        started = time.monotonic()
+        receiver.cleanup()              # the lock is still held
+        elapsed = time.monotonic() - started
+
+        assert elapsed < 15.0, f"cleanup took {elapsed:.1f} s"
+        assert device.device_opened, "closed underneath the lock holder"
+    finally:
+        release.set()
+        holder.join(timeout=5)
+
+    receiver.cleanup()                  # now it can be made
+    assert not device.device_opened
+    assert device.calls.count("close") == 1, device.calls
