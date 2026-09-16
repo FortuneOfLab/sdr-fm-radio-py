@@ -8,6 +8,7 @@ downstream finds that out unless they are told.
 
 from __future__ import annotations
 
+import sys
 import threading
 import time
 
@@ -259,3 +260,120 @@ def _within(seconds: float, predicate) -> bool:
             return True
         time.sleep(0.01)
     return predicate()
+
+
+# ----------------------------------------------------------------------
+# Telling somebody, when there is nobody left to tell
+# ----------------------------------------------------------------------
+
+class _ClosedPipe:
+    """Standard output after whatever was reading it has gone."""
+
+    def write(self, *args) -> int:
+        raise BrokenPipeError(32, "Broken pipe")
+
+    def flush(self) -> None:
+        raise BrokenPipeError(32, "Broken pipe")
+
+
+def test_a_closed_pipe_does_not_keep_the_receiver_running(receiver,
+                                                          monkeypatch):
+    """Stopping comes first, telling second.
+
+    A receiver that goes on running because it could not announce that it
+    had stopped is worse than one that stops quietly - and the reason is
+    in the log either way.
+    """
+    monkeypatch.setattr(sys, "stdout", _ClosedPipe())
+
+    receiver._device_is_gone("LIBUSB_ERROR_NOT_FOUND (-5)")
+
+    assert receiver.quit_event.is_set(), "a broken pipe stopped the shutdown"
+    assert receiver.device_failure == "LIBUSB_ERROR_NOT_FOUND (-5)"
+
+
+def test_a_closed_pipe_does_not_stop_the_sdr_thread_either(unpluggable,
+                                                           monkeypatch):
+    """The same thing where it actually happens: on the SDR thread."""
+    receiver, _device, reading, unplug = unpluggable
+    monkeypatch.setattr(sys, "stdout", _ClosedPipe())
+
+    receiver.start_background()
+    assert reading.wait(5), "the read never started"
+    unplug.set()
+
+    assert _within(5.0, receiver.quit_event.is_set), (
+        "the SDR thread died on the notice instead of stopping the receiver")
+    for thread in list(receiver.threads):
+        thread.join(timeout=10)
+        assert not thread.is_alive(), f"{thread.name} outlived the device"
+
+
+def test_the_reason_still_reaches_the_log(receiver, monkeypatch, caplog):
+    """Losing the printed notice costs nothing that is not written down."""
+    monkeypatch.setattr(sys, "stdout", _ClosedPipe())
+
+    with caplog.at_level("ERROR", logger="fm_receiver.FMReceiverController"):
+        receiver._device_is_gone("LIBUSB_ERROR_NOT_FOUND (-5)")
+
+    assert any("LIBUSB_ERROR_NOT_FOUND" in r.message for r in caplog.records)
+
+
+def test_a_closed_pipe_does_not_keep_the_process_alive(receiver, monkeypatch):
+    """The last flushes before leaving can fail on the same pipe."""
+    import fm_radio.controller as controller_module
+
+    left: list[int] = []
+    monkeypatch.setattr(controller_module.os, "_exit", left.append)
+    monkeypatch.setattr(sys, "stdout", _ClosedPipe())
+    monkeypatch.setattr(sys, "stderr", _ClosedPipe())
+    monkeypatch.setattr(receiver.cmd_interface, "is_alive", lambda: True)
+    receiver.device_failure = "LIBUSB_ERROR_NOT_FOUND (-5)"
+
+    receiver._leave_past_the_blocked_reader()
+
+    assert left == [1], f"a broken pipe stopped the exit: {left}"
+
+
+def test_leaving_on_purpose_says_so(receiver, monkeypatch):
+    """A quit is not a failure, whatever the command thread was doing."""
+    import fm_radio.controller as controller_module
+
+    left: list[int] = []
+    monkeypatch.setattr(controller_module.os, "_exit", left.append)
+    monkeypatch.setattr(receiver.cmd_interface, "is_alive", lambda: True)
+
+    receiver._leave_past_the_blocked_reader()
+
+    assert left == [0]
+
+
+# ----------------------------------------------------------------------
+# A device that goes before the window is built
+# ----------------------------------------------------------------------
+
+def test_the_window_opens_even_if_the_device_went_first():
+    """start_background() then an unplug, both before the window exists.
+
+    The window is what is going to say why, so it has to survive being
+    built into that situation.
+    """
+    pytest.importorskip("PySide6.QtWidgets")
+    from fm_radio.gui.main_window import ReceiverWindow
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    controller = _FakeController()
+    controller.device_failure = "LIBUSB_ERROR_NOT_FOUND (-5)"
+
+    window = ReceiverWindow(controller)
+    try:
+        assert "SDR disconnected" in window._health.text()
+        assert "LIBUSB_ERROR_NOT_FOUND" in window._health.toolTip()
+        assert window._station.text() == "no device"
+        assert not window._timer.isActive(), (
+            "redrawing a dead reading fifty times a second")
+        assert not window._down.isEnabled()
+    finally:
+        window.close()
+        app.processEvents()

@@ -114,13 +114,18 @@ class ReceiverWindow(QMainWindow):
                                    QSizePolicy.Policy.Preferred)
         self.statusBar().addWidget(self._health, 1)
 
-        self._load_presets()
-        self.refresh()
-
+        # Before the first refresh, which may already find that the device
+        # has gone - it stops the timer, and cannot stop one that does not
+        # exist yet.  Starting it here is safe: a Qt timer only fires once
+        # there is an event loop to fire it in, and there is not one until
+        # this window has been built and shown.
         self._timer = QTimer(self)
         self._timer.setInterval(REFRESH_INTERVAL_MS)
         self._timer.timeout.connect(self.refresh)
         self._timer.start()
+
+        self._load_presets()
+        self.refresh()
 
     # ------------------------------------------------------------------
     # Construction

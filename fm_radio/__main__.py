@@ -173,6 +173,13 @@ def main() -> None:
                 exit_code = 1
             sys.exit(exit_code)
         controller.start()
+        if controller.device_failure:
+            # The command line came back because the device went, not
+            # because anybody asked it to.  Said here as well as in
+            # _leave_past_the_blocked_reader, which only runs when the
+            # command thread is still sitting in input() - it often is
+            # not, and the status must not depend on that.
+            sys.exit(1)
     except Exception as e:
         if enable_logging:
             logger.critical(f"Failed to start FM Receiver: {e}", exc_info=True)

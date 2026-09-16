@@ -710,15 +710,33 @@ class FMReceiverController:
             self._device_is_gone(str(e))
 
     def _device_is_gone(self, why: str) -> None:
-        """Record why the samples stopped, and ask everything else to stop."""
+        """Record why the samples stopped, and ask everything else to stop.
+
+        The stopping comes first and the telling second.  Telling can fail
+        - the pipe the output was going to can be closed by then, and print
+        raises BrokenPipeError - and a receiver that keeps running because
+        it could not announce that it had stopped is worse than one that
+        stops quietly.
+        """
         self.logger.error("The SDR stopped delivering samples: %s", why)
         self.device_failure = why
-        # Printed from here rather than left to cleanup: cleanup has a few
-        # bounded waits in it, and the person watching should be told what
-        # happened before they are made to wait for it.
-        print(f"\nSDR disconnected: {why}")
-        print("Stopping the receiver.")
         self.quit_event.set()
+        self._say_the_device_is_gone(why)
+
+    def _say_the_device_is_gone(self, why: str) -> None:
+        """Tell whoever is watching, if there is anywhere left to tell.
+
+        Said from the SDR thread rather than left to cleanup, because
+        cleanup has a few bounded waits in it and the person who has just
+        pulled a cable should be told before being made to wait.  It has
+        already been logged, so losing this costs nothing that matters.
+        """
+        try:
+            print(f"\nSDR disconnected: {why}")
+            print("Stopping the receiver.")
+        except Exception as e:
+            self.logger.debug(
+                "Could not print the disconnect notice: %s", e)
 
     def _announce(self) -> None:
         """Print the banner the command line starts with."""
@@ -773,15 +791,17 @@ class FMReceiverController:
         nothing left to do for us: the device is closed, the audio stream
         is closed, and every recording has been flushed and closed.  The
         status says whether the receiver was asked to stop or stopped
-        because the device went.
+        because the device went - and so does the entry point, for the
+        times the command thread has already gone and this does nothing.
         """
         if not self.cmd_interface.is_alive():
             return
-        sys.stdout.flush()
-        sys.stderr.flush()
-        for handler in logging.getLogger().handlers:
+        # Every one of these can fail on a closed pipe, and none of them is
+        # a reason to stay.
+        for flush in (sys.stdout.flush, sys.stderr.flush,
+                      *(h.flush for h in logging.getLogger().handlers)):
             try:
-                handler.flush()
+                flush()
             except Exception:           # pragma: no cover - best effort
                 pass
         os._exit(1 if self.device_failure else 0)
