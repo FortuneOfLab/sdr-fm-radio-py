@@ -27,6 +27,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import queue
 import logging
@@ -245,7 +246,7 @@ class SDRReceiver(SDRReceiverInterface):
                 self.logger.debug(
                     "Ignoring tune to %.1f MHz: the SDR is closed", freq / 1e6)
                 return
-            with self._device_lock:
+            with self._device_held():
                 if self._closed.is_set() or self._device_closed.is_set():
                     return              # closed while we waited for the lock
                 self.center_freq = freq
@@ -306,7 +307,7 @@ class SDRReceiver(SDRReceiverInterface):
                 self.logger.debug(
                     "Ignoring gain %.1f dB: the SDR is closed", gain)
                 return
-            with self._device_lock:
+            with self._device_held():
                 if self._closed.is_set() or self._device_closed.is_set():
                     return              # closed while we waited for the lock
                 self.sdr.set_gain(gain)
@@ -346,7 +347,15 @@ class SDRReceiver(SDRReceiverInterface):
         """
         try:
             self.manual_gain = manual
-            with self._device_lock:
+            if self._closed.is_set() or self._device_closed.is_set():
+                # Before the lock, not after it: this is called from the
+                # window, and a receiver that is closed has nothing to
+                # queue behind.
+                self.logger.debug(
+                    "Ignoring gain mode %s: the SDR is closed",
+                    "manual" if manual else "AGC")
+                return
+            with self._device_held():
                 if self._closed.is_set() or self._device_closed.is_set():
                     return
                 self.sdr.set_manual_gain_enabled(manual)
@@ -836,7 +845,15 @@ class SDRReceiver(SDRReceiverInterface):
         When any of those cannot be had in time the close is not made.  It
         is remembered instead and retried when the writes let go, or by
         stop().  The handle stays open and valid meanwhile.
+
+        This is the form that waits: it is what pyrtlsdr and stop() call,
+        where the close is the point of the call.  :meth:`_retry_pending_close`
+        is the form that does not.
         """
+        self._close_now(wait=True)
+
+    def _close_now(self, wait: bool) -> None:
+        """Body of the close.  See :meth:`_close_the_handle`."""
         if self._device_closed.is_set():
             return
         # Somebody has decided the device is going: this one, or pyrtlsdr
@@ -850,10 +867,18 @@ class SDRReceiver(SDRReceiverInterface):
         # waiting for this thread.
         if (threading.current_thread() is not self._reading_thread
                 and self._sampling_active.is_set()):
+            if not wait:
+                self._defer_close("the async read is still running")
+                return
             if not self._cancel_sampling():
                 self._defer_close("the async read has not returned")
                 return
-        if not self._device_lock.acquire(timeout=_DEVICE_LOCK_TIMEOUT_SEC):
+        if wait:
+            taken = self._device_lock.acquire(
+                timeout=_DEVICE_LOCK_TIMEOUT_SEC)
+        else:
+            taken = self._device_lock.acquire(blocking=False)
+        if not taken:
             self._defer_close("a device write has not returned")
             return
         try:
@@ -877,11 +902,41 @@ class SDRReceiver(SDRReceiverInterface):
                 "the close is retried when the device is free, and the "
                 "process releases the handle on exit.", because)
 
+    @contextlib.contextmanager
+    def _device_held(self):
+        """Hold the device lock, and try a deferred close on the way out.
+
+        Every operation that holds the device takes it through here, so
+        the last one out always makes good on a close that was waiting for
+        the device to be free.  Without that the retry would rest on a
+        convention - that whoever holds the lock also remembers to try -
+        and a close could sit pending with nothing left to trigger it.
+        """
+        self._device_lock.acquire()
+        try:
+            yield
+        finally:
+            self._device_lock.release()
+            self._retry_pending_close()
+
     def _retry_pending_close(self) -> None:
-        """Make good on a close that was deferred earlier."""
+        """The exit path of every device operation, and of the read.
+
+        A close that could not be made when it was asked for is made here
+        instead, the moment whatever was in the way lets go.  It never
+        waits: whoever holds the device lock right now is inside one of
+        these same operations and will come through here on the way out,
+        so waiting would buy nothing - and these are the calls the window
+        makes, where a wait is a frozen window.
+
+        The last one out therefore makes the close, and an operation that
+        was refused outright still comes past here on its way to
+        returning, which is what covers a receiver nobody talks to again.
+        """
         if self._close_pending and not self._device_closed.is_set():
-            self.logger.info("Retrying a close that was deferred")
-            self._close_the_handle()
+            self._close_now(wait=False)
+            if self._device_closed.is_set():
+                self.logger.info("Made good on a close that was deferred")
 
     def _ask_the_read_to_stop(self) -> None:
         """One attempt at cancelling, with no way for it to close anything.

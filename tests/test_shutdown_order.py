@@ -1677,3 +1677,137 @@ def test_cleanup_finishes_after_a_deferred_close(receiver, monkeypatch):
     receiver.cleanup()                  # now it can be made
     assert not device.device_opened
     assert device.calls.count("close") == 1, device.calls
+
+
+# ----------------------------------------------------------------------
+# What the window feels while a close is pending
+# ----------------------------------------------------------------------
+
+@pytest.fixture
+def write_in_flight(receiver, monkeypatch):
+    """A gain write holding the device, with a deferred close behind it."""
+    sdr = receiver.sdr_receiver
+    device = sdr.sdr
+    # Long enough that a waiting exit path would be unmistakable, short
+    # enough that the test is not slow if one creeps back in.
+    monkeypatch.setattr("fm_radio.sdr_receiver._DEVICE_LOCK_TIMEOUT_SEC", 1.0)
+
+    writing = threading.Event()
+    release = threading.Event()
+    real_set_gain = device.set_gain
+
+    def slow_write(gain):
+        writing.set()
+        release.wait(30)
+        real_set_gain(gain)
+
+    monkeypatch.setattr(device, "set_gain", slow_write)
+    writer = threading.Thread(target=lambda: sdr.set_gain(30.0), daemon=True)
+    writer.start()
+    assert writing.wait(5), "the write never started"
+
+    device.close()                      # deferred: the write has the device
+    assert sdr._close_pending
+    assert device.device_opened
+
+    yield sdr, device, release, writer
+
+    release.set()
+    writer.join(timeout=10)
+
+
+def test_operations_refused_during_a_pending_close_return_at_once(
+        write_in_flight):
+    """These are what the window calls, and it calls them on its own thread.
+
+    The operation is refused - the receiver is closing - and the exit path
+    tries the deferred close.  It must not wait for it: the device lock is
+    held by a write that has nothing to do with this call, and a window
+    that blocks on one is a window that has stopped answering.
+    """
+    sdr, device, _release, _writer = write_in_flight
+
+    operations = [
+        ("tune", lambda: sdr.set_center_frequency(81.3e6)),
+        ("AGC toggle", lambda: sdr.set_manual_gain_mode(True)),
+        ("manual gain", lambda: sdr.set_manual_gain_mode(False)),
+        ("tune", lambda: sdr.set_center_frequency(82.5e6)),
+        ("gain", lambda: sdr.set_gain(20.0)),
+        ("read the gain", sdr.get_gain),
+        ("read the frequency", sdr.get_center_frequency),
+    ]
+    slowest = 0.0
+    for name, call in operations:
+        started = time.monotonic()
+        call()
+        took = time.monotonic() - started
+        assert took < 0.25, f"a refused {name} took {took:.3f} s"
+        slowest = max(slowest, took)
+
+    assert device.device_opened, "closed underneath the write"
+    assert sdr._close_pending, "the close should still be waiting its turn"
+
+
+def test_a_repeated_tune_and_agc_toggle_never_queue_behind_the_write(
+        write_in_flight):
+    """The window can be clicked faster than one call per second."""
+    sdr, device, _release, _writer = write_in_flight
+
+    started = time.monotonic()
+    for i in range(20):
+        sdr.set_center_frequency(80e6 + i * 1e5)
+        sdr.set_manual_gain_mode(i % 2 == 0)
+    took = time.monotonic() - started
+
+    assert took < 0.5, f"40 refused operations took {took:.3f} s"
+    assert device.calls == [], f"reached the device while closing: {device.calls}"
+
+
+def test_the_close_lands_when_the_write_lets_go(write_in_flight):
+    """Not waiting is only safe if somebody still makes the close."""
+    sdr, device, release, writer = write_in_flight
+
+    sdr.set_center_frequency(81.3e6)    # refused, and does not wait
+    assert sdr._close_pending
+
+    release.set()                       # the write finishes
+    writer.join(timeout=10)
+
+    assert not writer.is_alive()
+    assert not sdr._close_pending, "the deferred close was forgotten"
+    assert not device.device_opened, "the deferred close was never made"
+    assert device.calls.count("close") == 1, device.calls
+
+
+def test_the_close_lands_once_however_many_operations_come_past(
+        write_in_flight):
+    """Every exit path tries it; the handle is still freed one time."""
+    sdr, device, release, writer = write_in_flight
+
+    release.set()
+    writer.join(timeout=10)
+
+    for i in range(10):
+        sdr.set_center_frequency(80e6 + i * 1e5)
+        sdr.set_manual_gain_mode(True)
+        sdr.set_gain(20.0)
+
+    assert device.calls.count("close") == 1, device.calls
+
+
+def test_cleanup_is_bounded_with_a_close_still_pending(write_in_flight):
+    """The write is still holding on, and shutdown still has to end."""
+    sdr, device, release, writer = write_in_flight
+
+    started = time.monotonic()
+    sdr.stop()
+    took = time.monotonic() - started
+
+    assert took < 10.0, f"stop took {took:.1f} s"
+    assert device.device_opened, "closed underneath the write"
+
+    release.set()
+    writer.join(timeout=10)
+
+    assert not device.device_opened, "nothing made good on the close"
+    assert device.calls.count("close") == 1, device.calls
