@@ -1997,3 +1997,107 @@ def test_the_close_after_a_late_read_happens_once(read_that_ignores_cancels):
     sdr.stop()
 
     assert device.calls.count("close") == 1, device.calls
+
+
+# ----------------------------------------------------------------------
+# A stop asked for from inside the read
+# ----------------------------------------------------------------------
+
+@pytest.fixture
+def read_with_a_callback(receiver, monkeypatch):
+    """A read that calls back on its own thread, as librtlsdr does.
+
+    rtlsdr_read_async invokes the callback from the thread that called it
+    and keeps running, so anything the callback does happens while the
+    read is still going - and the read cannot end until the callback
+    returns.
+    """
+    sdr = receiver.sdr_receiver
+    device = sdr.sdr
+    in_the_callback = threading.Event()
+    from_the_callback: list = []
+
+    def read_and_call_back(cb, num_samples=None):
+        device.calls.append("read")
+        device.async_status = RTLSDR_RUNNING
+        device.reading.set()
+        try:
+            cb(np.zeros(8, dtype=np.complex64), device)
+            in_the_callback.set()
+            for call in from_the_callback:
+                call()
+            device.cancelled.wait(10)   # the read ends only on a cancel
+        finally:
+            device.reading.clear()
+            device.async_status = RTLSDR_INACTIVE
+
+    monkeypatch.setattr(device, "read_samples_async", read_and_call_back)
+
+    def start(*calls):
+        from_the_callback.extend(calls)
+        thread = threading.Thread(target=sdr.start, name="SDRThread",
+                                  daemon=True)
+        thread.start()
+        return thread
+
+    yield sdr, device, start, in_the_callback
+
+    device.cancelled.set()
+
+
+def test_a_stop_from_the_callback_does_not_close_under_the_read(
+        read_with_a_callback):
+    """The callback is on the reading thread, and the read is still going.
+
+    rtlsdr_close waits for the async read to finish, and the read cannot
+    finish while its own callback is inside the close - so closing here
+    would be the callback waiting for itself.  The cancel goes out, the
+    close waits for the read to return, and the read returning is what
+    makes it.
+    """
+    sdr, device, start, in_the_callback = read_with_a_callback
+
+    thread = start(sdr.stop)
+    assert in_the_callback.wait(5), "the callback never ran"
+    thread.join(timeout=10)
+
+    assert not thread.is_alive(), "the read never returned"
+    assert "close during read" not in device.calls, device.calls
+    assert significant(device.calls) == ["read", "cancel", "close"], device.calls
+    assert not device.device_opened
+    assert not sdr.handle.close_pending
+
+
+def test_a_stop_from_the_callback_returns_without_waiting(
+        read_with_a_callback):
+    """It is the read's own thread: waiting would be waiting for itself."""
+    sdr, device, start, in_the_callback = read_with_a_callback
+    took: list[float] = []
+
+    def timed_stop():
+        started = time.monotonic()
+        sdr.stop()
+        took.append(time.monotonic() - started)
+
+    thread = start(timed_stop)
+    assert in_the_callback.wait(5)
+    thread.join(timeout=10)
+
+    assert took and took[0] < 1.0, f"stop() from the callback took {took}"
+    assert not thread.is_alive()
+
+
+def test_a_stop_from_the_callback_closes_once_however_often_it_is_asked(
+        read_with_a_callback):
+    """Twice from the callback, then again from outside."""
+    sdr, device, start, in_the_callback = read_with_a_callback
+
+    thread = start(sdr.stop, sdr.stop)
+    assert in_the_callback.wait(5)
+    thread.join(timeout=10)
+
+    sdr.stop()
+    sdr.handle.retry_pending_close()
+
+    assert device.calls.count("close") == 1, device.calls
+    assert "close during read" not in device.calls, device.calls
