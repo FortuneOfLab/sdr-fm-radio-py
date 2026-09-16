@@ -684,8 +684,8 @@ class SDRReceiver(SDRReceiverInterface):
             # An IQ recording that is part way through starting finishes
             # installing itself before the teardown below, so it is closed
             # properly instead of being left behind with a worker that has
-            # already gone.  One that starts after this sees _closed and
-            # never opens a file at all.
+            # already gone.  One that starts after this finds the handle
+            # no longer usable and never opens a file at all.
             with self._iq_start_lock:
                 self.stop_iq_recording()
                 self._stop_iq_record_worker()
