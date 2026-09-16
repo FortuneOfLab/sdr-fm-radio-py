@@ -15,6 +15,8 @@ import wave
 import numpy as np
 import pytest
 
+from conftest import FakeLibRtlSdr, RTLSDR_INACTIVE, RTLSDR_RUNNING
+
 import fm_radio.sdr_receiver as fm_sdr
 from fm_radio.controller import FMReceiverController
 from fm_radio.exceptions import RecordingError, SDRDeviceError
@@ -909,13 +911,15 @@ def test_the_fallback_is_not_asked_about_a_read_it_cannot_cancel(receiver,
         thread.join(timeout=10)
 
 
-def test_the_fallback_close_cannot_land_on_a_write(receiver, monkeypatch):
-    """When the read is provably running, the wrapper is safe to ask.
+def test_a_callback_is_not_taken_as_proof_the_read_is_running(receiver,
+                                                              monkeypatch):
+    """A callback says one arrived, not that the read is still running.
 
-    "Provably" means a callback has arrived, which can only happen from
-    inside rtlsdr_read_async.  Even then the ask is made under
-    ``_device_lock``, so a close the wrapper makes on some other failure
-    is serialised with the writes rather than racing them.
+    Between the two the read can have moved to CANCELING, where pyrtlsdr's
+    cancel gets -2, closes the device and leaves the read - still
+    unwinding - using a handle that has been freed.  There is no moment
+    that can be shown from out here to be safe, so the wrapper is never
+    asked at all.
     """
     sdr = receiver.sdr_receiver
     device = sdr.sdr
@@ -925,14 +929,11 @@ def test_the_fallback_close_cannot_land_on_a_write(receiver, monkeypatch):
 
     def slow_to_unwind(cb, num_samples=None):
         real_read(cb, num_samples)      # returns once cancelled
-        time.sleep(0.4)                 # ... and is still unwinding
+        time.sleep(1.0)                 # ... and is still unwinding
 
     monkeypatch.setattr(device, "read_samples_async", slow_to_unwind)
     thread = running_reader(receiver)
-    # What librtlsdr does from inside the read, and the only evidence the
-    # receiver will accept that the read is in a cancellable state.
     sdr.callback(np.zeros(8, dtype=np.complex64), device)
-    assert sdr._read_running.is_set()
 
     writing = threading.Event()
     release = threading.Event()
@@ -953,24 +954,127 @@ def test_the_fallback_close_cannot_land_on_a_write(receiver, monkeypatch):
     done = threading.Event()
     threading.Thread(target=lambda: (receiver.cleanup(), done.set()),
                      daemon=True).start()
-    time.sleep(1.5)
-
-    assert device.device_opened, (
-        "the wrapper closed the device beside an in-flight write")
-    assert not closed_under_the_write
-
-    release.set()                   # the write returns and frees the lock
+    time.sleep(0.4)
+    # Something else cancels: the read is no longer RUNNING by the time
+    # any ask could land, though a callback certainly did arrive.
+    FakeLibRtlSdr.rtlsdr_cancel_async(device)
+    release.set()
 
     assert done.wait(30), "cleanup never finished"
+
+    assert "wrapper cancel" not in device.calls, device.calls
+    assert "cancel failed" not in device.calls, device.calls
+    assert not closed_under_the_write
+    assert device.device_opened, (
+        "closed a device whose state could not be established")
+
+    device.cancelled.set()
     thread.join(timeout=10)
 
-    assert not thread.is_alive()
+
+# ----------------------------------------------------------------------
+# One owner for the handle's lifetime
+# ----------------------------------------------------------------------
+
+def test_a_failed_read_cannot_close_beside_a_write(receiver, monkeypatch):
+    """pyrtlsdr closes the device from inside a failed async read too.
+
+    That is rtlsdr.py:601-603, on the reader thread, which holds nothing.
+    The close waits for the write in flight instead of freeing the handle
+    the write is still using.
+    """
+    sdr = receiver.sdr_receiver
+    device = sdr.sdr
+    reading = threading.Event()
+    fail_now = threading.Event()
+
+    def failing_read(cb, num_samples=None):
+        device.calls.append("read")
+        device.async_status = RTLSDR_RUNNING
+        device.reading.set()
+        reading.set()
+        fail_now.wait(10)
+        device.reading.clear()
+        device.async_status = RTLSDR_INACTIVE
+        device.calls.append("read failed")
+        device.close()                  # rtlsdr.py:601-603
+        raise OSError("LIBUSB_ERROR_IO: could not read")
+
+    writing = threading.Event()
+    release = threading.Event()
+    closed_under_the_write: list[float] = []
+    real_set_gain = device.set_gain
+
+    def slow_write(gain):
+        writing.set()
+        release.wait(10)
+        if not device.device_opened:
+            closed_under_the_write.append(gain)
+        real_set_gain(gain)
+
+    monkeypatch.setattr(device, "read_samples_async", failing_read)
+    monkeypatch.setattr(device, "set_gain", slow_write)
+
+    def read_and_swallow():
+        try:
+            sdr.start()
+        except SDRDeviceError:
+            pass                        # the point is the close, not the raise
+
+    reader = threading.Thread(target=read_and_swallow, name="SDRThread",
+                              daemon=True)
+    reader.start()
+    assert reading.wait(5), "the read never started"
+
+    writer = threading.Thread(target=lambda: sdr.set_gain(30.0), daemon=True)
+    writer.start()
+    assert writing.wait(5), "the write never started"
+
+    fail_now.set()                      # the read fails and asks to close
+    time.sleep(0.5)
+
+    assert device.device_opened, (
+        "closed the device while a write was still inside it")
+    assert not closed_under_the_write
+
+    release.set()                       # the write returns
+    writer.join(timeout=10)
+    reader.join(timeout=10)
+
+    assert not writer.is_alive() and not reader.is_alive()
     assert not closed_under_the_write, (
-        "the device closed under a write that was still in flight")
-    assert device.calls.count("wrapper cancel") == 1, (
-        f"the fallback was taken {device.calls.count('wrapper cancel')} "
-        f"times: {device.calls}")
-    assert "cancel failed" not in device.calls, device.calls
+        "the write found the device closed under it")
+    assert device.calls.count("close") == 1, device.calls
+
+
+def test_a_close_waiting_on_a_wedged_write_gives_up(receiver, monkeypatch):
+    """The same bargain as everywhere else, and bounded."""
+    sdr = receiver.sdr_receiver
+    device = sdr.sdr
+    monkeypatch.setattr("fm_radio.sdr_receiver._DEVICE_LOCK_TIMEOUT_SEC", 0.4)
+
+    writing = threading.Event()
+    release = threading.Event()
+    monkeypatch.setattr(device, "set_gain",
+                        lambda gain: (writing.set(), release.wait(30)))
+
+    writer = threading.Thread(target=lambda: sdr.set_gain(30.0), daemon=True)
+    writer.start()
+    assert writing.wait(5)
+
+    try:
+        started = time.monotonic()
+        device.close()                  # as pyrtlsdr would, from elsewhere
+        elapsed = time.monotonic() - started
+
+        assert elapsed < 5.0, f"the close waited {elapsed:.1f} s"
+        assert device.device_opened, "closed underneath a wedged write"
+        assert "close" not in device.calls, device.calls
+    finally:
+        release.set()
+        writer.join(timeout=10)
+
+
 
 
 # ----------------------------------------------------------------------
