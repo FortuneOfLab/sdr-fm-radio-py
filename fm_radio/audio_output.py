@@ -283,6 +283,16 @@ class AudioOutput(AudioOutputInterface):
         # only place that can truncate the target file, and we want
         # exactly one caller per session to reach it.
         with self._start_lock:
+            if self._closed.is_set():
+                # Same reasoning as SDRReceiver.start_iq_recording: the
+                # worker that would write the chunks has gone, and no
+                # audio is coming to write.
+                self.logger.warning(
+                    "Ignoring start_recording for %s: the audio output is "
+                    "closed", filename)
+                raise RecordingError(
+                    "Cannot start recording: the audio output is closed")
+
             if self.recording:
                 self.logger.warning(
                     "Already recording; ignoring duplicate "
@@ -353,18 +363,27 @@ class AudioOutput(AudioOutputInterface):
         # Push a flush sentinel.  The worker writes every chunk before
         # the sentinel and then sets _flush_event.
         self._flush_event.clear()
-        try:
-            self._record_q.put(_RECORD_FLUSH_SENTINEL, timeout=5.0)
-        except queue.Full:
+        if not self._record_worker.is_alive():
+            # Nothing is left to answer the sentinel, so waiting for one
+            # would just be fifteen seconds of nothing happening.
             self.logger.warning(
-                "Could not enqueue flush sentinel; tail chunks may be lost",
+                "The record worker is no longer running; closing the file "
+                "without waiting for a flush",
             )
         else:
-            if not self._flush_event.wait(timeout=10.0):
+            try:
+                self._record_q.put(_RECORD_FLUSH_SENTINEL, timeout=5.0)
+            except queue.Full:
                 self.logger.warning(
-                    "Recording flush did not complete within 10 s; "
-                    "closing anyway",
+                    "Could not enqueue flush sentinel; tail chunks may be "
+                    "lost",
                 )
+            else:
+                if not self._flush_event.wait(timeout=10.0):
+                    self.logger.warning(
+                        "Recording flush did not complete within 10 s; "
+                        "closing anyway",
+                    )
 
         with self.record_lock:
             parts_count = self._record_part_index + 1
@@ -561,19 +580,25 @@ class AudioOutput(AudioOutputInterface):
         with self._close_lock:
             self._closed.set()
         try:
-            # Stop recording if active
-            if self.recording:
-                self.logger.info("Stopping active recording during cleanup")
-                self.stop_recording()
+            # A recording part way through starting finishes installing
+            # itself before the teardown, so it is closed properly rather
+            # than left behind with a worker that has already gone.  One
+            # that starts after this is refused.
+            with self._start_lock:
+                # Stop recording if active
+                if self.recording:
+                    self.logger.info(
+                        "Stopping active recording during cleanup")
+                    self.stop_recording()
 
-            # Tell the recording worker to exit.
-            self._record_worker_stop.set()
-            try:
-                self._record_q.put_nowait(_RECORD_WORKER_SHUTDOWN)
-            except queue.Full:
-                pass
-            if self._record_worker.is_alive():
-                self._record_worker.join(timeout=1.0)
+                # Tell the recording worker to exit.
+                self._record_worker_stop.set()
+                try:
+                    self._record_q.put_nowait(_RECORD_WORKER_SHUTDOWN)
+                except queue.Full:
+                    pass
+                if self._record_worker.is_alive():
+                    self._record_worker.join(timeout=1.0)
 
             self.stream.stop_stream()
             self.stream.close()

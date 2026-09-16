@@ -98,6 +98,14 @@ class SDRReceiver(SDRReceiverInterface):
         # and stalling the processing thread behind a USB write does.
         self._last_freq_hz: float = float(center_freq)
         self._last_gain_db: float = 0.0
+        # Serialises stop() against itself, so the steps below happen once
+        # however many times cleanup runs.  It matters more than tidiness:
+        # pyrtlsdr's cancel_read_async dereferences the device pointer
+        # without checking whether it is still open, so a second call
+        # after the close would be reading freed memory.
+        self._stop_lock: threading.Lock = threading.Lock()
+        self._sampling_cancelled: threading.Event = threading.Event()
+        self._device_closed: threading.Event = threading.Event()
         self.iq_recording: bool = False
         self.iq_record_wave: wave.Wave_write | None = None
         # ``iq_record_lock`` guards self.iq_record_wave (file open/close vs
@@ -363,6 +371,16 @@ class SDRReceiver(SDRReceiverInterface):
             handle and flip ``self.iq_recording``.
         """
         with self._iq_start_lock:
+            if self._closed.is_set():
+                # The worker that would write the blocks is gone, and no
+                # blocks are coming anyway.  Opening the file here would
+                # leave one behind with iq_recording set against nothing.
+                self.logger.warning(
+                    "Ignoring start_iq_recording for %s: the receiver has "
+                    "been stopped", filename)
+                raise RecordingError(
+                    "Cannot start IQ recording: the receiver has been stopped")
+
             if self.iq_recording:
                 self.logger.warning(
                     "IQ recording already active; ignoring duplicate "
@@ -437,18 +455,27 @@ class SDRReceiver(SDRReceiverInterface):
         # Push a flush sentinel.  The worker writes every block before
         # the sentinel and only then sets _iq_flush_event.
         self._iq_flush_event.clear()
-        try:
-            self._iq_record_q.put(_IQ_RECORD_FLUSH_SENTINEL, timeout=5.0)
-        except queue.Full:
+        if not self._iq_record_worker.is_alive():
+            # Nothing is left to answer the sentinel, so waiting for one
+            # would just be fifteen seconds of nothing happening.
             self.logger.warning(
-                "Could not enqueue IQ flush sentinel; tail blocks may be lost",
+                "The IQ record worker is no longer running; closing the "
+                "file without waiting for a flush",
             )
         else:
-            if not self._iq_flush_event.wait(timeout=10.0):
+            try:
+                self._iq_record_q.put(_IQ_RECORD_FLUSH_SENTINEL, timeout=5.0)
+            except queue.Full:
                 self.logger.warning(
-                    "IQ recording flush did not complete within 10 s; "
-                    "closing anyway",
+                    "Could not enqueue IQ flush sentinel; tail blocks may "
+                    "be lost",
                 )
+            else:
+                if not self._iq_flush_event.wait(timeout=10.0):
+                    self.logger.warning(
+                        "IQ recording flush did not complete within 10 s; "
+                        "closing anyway",
+                    )
 
         with self.iq_record_lock:
             parts_count = self._iq_record_part_index + 1
@@ -616,16 +643,66 @@ class SDRReceiver(SDRReceiverInterface):
             raise SDRDeviceError(f"Failed to start SDR async read: {e}") from e
 
     def stop(self) -> None:
-        """Stop asynchronous sample retrieval and close the SDR.
+        """Stop sampling and close the SDR.
 
         Marks the device closed before touching it, so a write already on
         its way from another thread is dropped rather than landing on a
-        handle that is about to go.
+        handle that is about to go.  Sampling always stops, even when the
+        close cannot happen; closing is the only part that has to wait for
+        an in-flight write, and the only part that can be given up on.
+        Safe to call more than once.
         """
-        self._closed.set()
-        self.stop_iq_recording()
+        with self._stop_lock:
+            self._closed.set()
+            # An IQ recording that is part way through starting finishes
+            # installing itself before the teardown below, so it is closed
+            # properly instead of being left behind with a worker that has
+            # already gone.  One that starts after this sees _closed and
+            # never opens a file at all.
+            with self._iq_start_lock:
+                self.stop_iq_recording()
+                self._stop_iq_record_worker()
 
-        # Shut down the IQ record worker.
+            # Cancelling the async read does not need the device lock:
+            # rtlsdr_cancel_async only flips two fields on the device
+            # struct - no USB traffic, nothing freed - so it is safe
+            # alongside a control-transfer write that is still in the air.
+            # close() is the one that cannot overlap a write, because it
+            # frees the handle that write is still using.  Keeping the two
+            # apart is what lets sampling stop even when the close cannot.
+            self._cancel_sampling()
+
+            if self._device_closed.is_set():
+                return
+            # Bounded, because a USB write that never returns would
+            # otherwise hold shutdown open for as long as the process.
+            if not self._device_lock.acquire(timeout=_DEVICE_LOCK_TIMEOUT_SEC):
+                # Not closing anyway: that is precisely what the lock is
+                # for.  A write stuck this long means the device has
+                # stopped answering, and the handle goes when the process
+                # exits.  Sampling has already been cancelled above, so
+                # nothing is still being pulled off the device.
+                self.logger.error(
+                    "A device write has not returned after %.1f s; leaving "
+                    "the SDR open rather than closing underneath it. "
+                    "Sampling has been cancelled and the handle is released "
+                    "when the process exits.",
+                    _DEVICE_LOCK_TIMEOUT_SEC)
+                return
+            try:
+                if self._device_closed.is_set():
+                    return
+                try:
+                    self.sdr.close()
+                    self._device_closed.set()
+                    self.logger.info("SDR closed successfully")
+                except OSError as e:
+                    self.logger.error(f"Error closing SDR: {e}")
+            finally:
+                self._device_lock.release()
+
+    def _stop_iq_record_worker(self) -> None:
+        """Wake the IQ-recording worker and wait briefly for it to exit."""
         self._iq_record_worker_stop.set()
         try:
             self._iq_record_q.put_nowait(_IQ_RECORD_WORKER_SHUTDOWN)
@@ -634,32 +711,26 @@ class SDRReceiver(SDRReceiverInterface):
         if self._iq_record_worker.is_alive():
             self._iq_record_worker.join(timeout=1.0)
 
-        # Under the lock: a write already in progress finishes first, and
-        # one that has not started sees _closed and gives up rather than
-        # landing on a handle that is about to go.  Bounded, because a USB
-        # write that never returns would otherwise hold shutdown open for
-        # as long as the process lives.
-        if not self._device_lock.acquire(timeout=_DEVICE_LOCK_TIMEOUT_SEC):
-            # Not closing anyway: that is precisely what the lock is for.
-            # A write stuck this long means the device has stopped
-            # answering, and the handle goes when the process exits.
-            self.logger.error(
-                "A device write has not returned after %.1f s; leaving the "
-                "SDR open rather than closing underneath it. The handle is "
-                "released when the process exits.",
-                _DEVICE_LOCK_TIMEOUT_SEC)
+    def _cancel_sampling(self) -> None:
+        """Ask the async read to return, once and never after the close.
+
+        pyrtlsdr passes the device pointer to rtlsdr_cancel_async without
+        checking whether the device is still open, so a second call after
+        close() would be reading memory that has been freed.  It also
+        closes the device itself when a control write fails, which is what
+        ``device_opened`` is being consulted for.
+        """
+        if self._sampling_cancelled.is_set() or self._device_closed.is_set():
+            return
+        self._sampling_cancelled.set()
+        if not getattr(self.sdr, "device_opened", True):
+            self.logger.warning(
+                "The SDR was already closed by the driver; not cancelling "
+                "the async read")
+            self._device_closed.set()
             return
         try:
-            try:
-                self.logger.info("Stopping SDR async read")
-                self.sdr.cancel_read_async()
-            except OSError as e:
-                self.logger.warning(f"Error canceling async read: {e}")
-
-            try:
-                self.sdr.close()
-                self.logger.info("SDR closed successfully")
-            except OSError as e:
-                self.logger.error(f"Error closing SDR: {e}")
-        finally:
-            self._device_lock.release()
+            self.logger.info("Stopping SDR async read")
+            self.sdr.cancel_read_async()
+        except OSError as e:
+            self.logger.warning(f"Error canceling async read: {e}")
