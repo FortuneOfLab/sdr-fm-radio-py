@@ -57,6 +57,12 @@ _IQ_RECORD_FLUSH_SENTINEL = object()
 # thing the lock exists to prevent.
 _DEVICE_LOCK_TIMEOUT_SEC: float = 5.0
 
+# Longest stop() keeps asking the async read to return.  A cancel that
+# arrives before librtlsdr has marked the read as running does nothing at
+# all, and the read then starts anyway, so one attempt is not enough.
+_SAMPLING_CANCEL_TIMEOUT_SEC: float = 2.0
+_SAMPLING_CANCEL_RETRY_SEC: float = 0.05
+
 
 class SDRReceiver(SDRReceiverInterface):
     """
@@ -106,6 +112,13 @@ class SDRReceiver(SDRReceiverInterface):
         self._stop_lock: threading.Lock = threading.Lock()
         self._sampling_cancelled: threading.Event = threading.Event()
         self._device_closed: threading.Event = threading.Event()
+        # start() arms _sampling_active under _sampling_lock, and stop()
+        # reads it under the same lock.  That is what decides whether there
+        # is a read to cancel at all: cancelling one that has not started
+        # is not merely pointless, it makes librtlsdr return an error and
+        # pyrtlsdr answer that by closing the device.
+        self._sampling_lock: threading.Lock = threading.Lock()
+        self._sampling_active: threading.Event = threading.Event()
         self.iq_recording: bool = False
         self.iq_record_wave: wave.Wave_write | None = None
         # ``iq_record_lock`` guards self.iq_record_wave (file open/close vs
@@ -634,13 +647,33 @@ class SDRReceiver(SDRReceiverInterface):
                 # CLI can still call stop_iq_recording later.
 
     def start(self) -> None:
-        """Start asynchronous sample retrieval."""
+        """Start asynchronous sample retrieval.
+
+        Does nothing once the receiver is closed.  The check and the
+        arming happen under ``_sampling_lock``, which stop() also takes,
+        so a read either arms in time to be cancelled or sees the flag and
+        never touches the device - there is no third outcome where this
+        thread starts reading through a handle shutdown has already freed.
+        """
+        with self._sampling_lock:
+            if self._closed.is_set():
+                self.logger.info(
+                    "Not starting the async read: the receiver is closed")
+                return
+            self._sampling_active.set()
         try:
             self.logger.info("Starting SDR async read")
             self.sdr.read_samples_async(self.callback, num_samples=self.block_size)
         except OSError as e:
             self.logger.error(f"Failed to start SDR async read: {e}")
+            # pyrtlsdr closes the device itself when rtlsdr_read_async
+            # fails, so there is nothing left to close or cancel.
+            if not getattr(self.sdr, "device_opened", True):
+                self._closed.set()
+                self._device_closed.set()
             raise SDRDeviceError(f"Failed to start SDR async read: {e}") from e
+        finally:
+            self._sampling_active.clear()
 
     def stop(self) -> None:
         """Stop sampling and close the SDR.
@@ -670,9 +703,18 @@ class SDRReceiver(SDRReceiverInterface):
             # close() is the one that cannot overlap a write, because it
             # frees the handle that write is still using.  Keeping the two
             # apart is what lets sampling stop even when the close cannot.
-            self._cancel_sampling()
+            sampling_stopped = self._cancel_sampling()
 
             if self._device_closed.is_set():
+                return
+            if not sampling_stopped:
+                # Closing would free the handle the read is still going
+                # through.  Same bargain as a write that will not return:
+                # the device stays open and the process releases it.
+                self.logger.error(
+                    "The async read is still running; leaving the SDR open "
+                    "rather than freeing the handle it is reading through. "
+                    "The handle is released when the process exits.")
                 return
             # Bounded, because a USB write that never returns would
             # otherwise hold shutdown open for as long as the process.
@@ -711,26 +753,76 @@ class SDRReceiver(SDRReceiverInterface):
         if self._iq_record_worker.is_alive():
             self._iq_record_worker.join(timeout=1.0)
 
-    def _cancel_sampling(self) -> None:
-        """Ask the async read to return, once and never after the close.
+    def _cancel_sampling(self) -> bool:
+        """Ask the async read to return, and say whether it has.
 
-        pyrtlsdr passes the device pointer to rtlsdr_cancel_async without
-        checking whether the device is still open, so a second call after
-        close() would be reading memory that has been freed.  It also
-        closes the device itself when a control write fails, which is what
-        ``device_opened`` is being consulted for.
+        Three things about pyrtlsdr shape this.  It passes the device
+        pointer to rtlsdr_cancel_async without checking whether the device
+        is still open, so this must not run twice or after the close.
+        rtlsdr_cancel_async returns an error whenever the read is not
+        running - before it starts, and after it has been cancelled once -
+        and the wrapper answers an error by closing the device and raising.
+        That close would land outside ``_device_lock``, on top of a gain
+        write still using the handle, which is the one thing the lock
+        exists to stop.  And ``read_bytes_async`` clears the wrapper's
+        ``read_async_canceling`` flag on its way in.
+
+        So: nothing is cancelled unless a read is actually armed, the flag
+        is set before every attempt to disarm the close-and-raise path (it
+        also stops any further callbacks), and the ask is repeated until
+        the read has returned, because a cancel landing in the moment
+        between arming and librtlsdr marking the read as running does
+        nothing and the read starts regardless.
+
+        Returns:
+            True when no read is running any more - including when one was
+            never started.  False when one is still going, in which case
+            the caller must not close the handle it is reading through.
         """
-        if self._sampling_cancelled.is_set() or self._device_closed.is_set():
-            return
-        self._sampling_cancelled.set()
-        if not getattr(self.sdr, "device_opened", True):
-            self.logger.warning(
-                "The SDR was already closed by the driver; not cancelling "
-                "the async read")
-            self._device_closed.set()
-            return
-        try:
-            self.logger.info("Stopping SDR async read")
-            self.sdr.cancel_read_async()
-        except OSError as e:
-            self.logger.warning(f"Error canceling async read: {e}")
+        with self._sampling_lock:
+            if self._device_closed.is_set():
+                return True
+            if not getattr(self.sdr, "device_opened", True):
+                # pyrtlsdr closes the device itself when a control write
+                # fails.  There is nothing to cancel and nothing to close.
+                self.logger.warning(
+                    "The driver has already closed the SDR; nothing to "
+                    "cancel")
+                self._device_closed.set()
+                return True
+            if self._sampling_cancelled.is_set():
+                return not self._sampling_active.is_set()
+            self._sampling_cancelled.set()
+            # _closed is set before this runs, so start() cannot arm after
+            # this point: what is armed now is all there will ever be.
+            if not self._sampling_active.is_set():
+                self.logger.info(
+                    "No async read to cancel; the receiver never started one")
+                return True
+
+        self.logger.info("Stopping SDR async read")
+        deadline = time.monotonic() + _SAMPLING_CANCEL_TIMEOUT_SEC
+        while True:
+            if not getattr(self.sdr, "device_opened", True):
+                self.logger.warning(
+                    "The driver closed the SDR while we were cancelling; "
+                    "not asking it again")
+                self._device_closed.set()
+                return True
+            try:
+                # Before every attempt: read_bytes_async clears it again
+                # each time it starts, and without it a failed cancel
+                # closes the device from outside the device lock.
+                self.sdr.read_async_canceling = True
+                self.sdr.cancel_read_async()
+            except OSError as e:
+                self.logger.warning(f"Error canceling async read: {e}")
+            if not self._sampling_active.is_set():
+                return True
+            if time.monotonic() >= deadline:
+                self.logger.error(
+                    "The async read has not returned %.1f s after being "
+                    "cancelled",
+                    _SAMPLING_CANCEL_TIMEOUT_SEC)
+                return False
+            time.sleep(_SAMPLING_CANCEL_RETRY_SEC)

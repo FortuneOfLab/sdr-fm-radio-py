@@ -48,13 +48,26 @@ def _install_fake_pyaudio() -> None:
 # ----------------------------------------------------------------------
 
 class FakeRtlSdr:
-    """Stands in for rtlsdr.RtlSdr; records gain calls for assertions."""
+    """Stands in for rtlsdr.RtlSdr, including the parts that bite.
+
+    The async read blocks until it is cancelled, as the real one does, and
+    the cancel copies pyrtlsdr's behaviour rather than the C library's: the
+    C call returns an error whenever no read is running, and the wrapper
+    answers that by closing the device and raising (rtlsdr.py:699-706).
+    Tests that never start a read therefore see the same trap the real
+    driver sets.
+    """
 
     def __init__(self) -> None:
         self.sample_rate = 1.024e6
         self.center_freq = 80e6
         self.direct_sampling = 0
         self.gain_calls: list[float] = []
+        self.device_opened = True
+        self.read_async_canceling = False
+        self.calls: list[str] = []
+        self.reading: threading.Event = threading.Event()
+        self.cancelled: threading.Event = threading.Event()
 
     def set_manual_gain_enabled(self, manual: bool) -> None: ...
 
@@ -64,11 +77,34 @@ class FakeRtlSdr:
     def get_gain(self) -> float:
         return 0.0
 
-    def read_samples_async(self, cb, num_samples=None) -> None: ...
+    def read_samples_async(self, cb, num_samples=None) -> None:
+        # read_bytes_async clears the wrapper's flag on its way in.
+        self.read_async_canceling = False
+        self.calls.append("read")
+        self.cancelled.clear()
+        self.reading.set()
+        try:
+            self.cancelled.wait(30)
+        finally:
+            self.reading.clear()
 
-    def cancel_read_async(self) -> None: ...
+    def cancel_read_async(self) -> None:
+        if self.reading.is_set():
+            self.calls.append("cancel")
+            self.read_async_canceling = True
+            self.cancelled.set()
+            return
+        # rtlsdr_cancel_async returned -2: no read is running.
+        if not self.read_async_canceling:
+            self.calls.append("cancel failed")
+            self.close()
+            raise OSError(
+                "LIBUSB_ERROR_INVALID_PARAM: Could not cancel async read")
+        self.read_async_canceling = True
 
-    def close(self) -> None: ...
+    def close(self) -> None:
+        self.calls.append("close")
+        self.device_opened = False
 
 
 def _install_fake_rtlsdr() -> None:

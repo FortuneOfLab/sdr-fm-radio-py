@@ -480,51 +480,55 @@ def test_sampling_stops_even_when_the_device_cannot_be_closed(receiver,
         time.sleep(0.2)             # let the wedged write unwind
 
 
-def test_sampling_is_cancelled_before_the_device_is_closed(receiver,
-                                                           monkeypatch):
+def running_reader(receiver):
+    """Start the SDR thread and wait until the async read is under way."""
+    sdr = receiver.sdr_receiver
+    thread = threading.Thread(target=sdr.start, name="SDRThread", daemon=True)
+    thread.start()
+    assert sdr.sdr.reading.wait(5), "the async read never started"
+    return thread
+
+
+def test_sampling_is_cancelled_before_the_device_is_closed(receiver):
     """Order matters: cancel_read_async dereferences the handle close frees."""
-    device = receiver.sdr_receiver.sdr
-    order: list[str] = []
-    monkeypatch.setattr(device, "cancel_read_async",
-                        lambda: order.append("cancel"))
-    monkeypatch.setattr(device, "close", lambda: order.append("close"))
+    sdr = receiver.sdr_receiver
+    thread = running_reader(receiver)
 
-    receiver.sdr_receiver.stop()
+    sdr.stop()
+    thread.join(timeout=5)
 
-    assert order == ["cancel", "close"]
+    assert not thread.is_alive()
+    assert sdr.sdr.calls == ["read", "cancel", "close"]
 
 
-def test_stopping_twice_does_not_touch_a_freed_handle(receiver, monkeypatch):
+def test_stopping_twice_does_not_touch_a_freed_handle(receiver):
     """cleanup runs twice on several paths, and the second must do nothing.
 
     pyrtlsdr guards close() with its own flag but passes the device
     pointer to rtlsdr_cancel_async without checking, so a second cancel
     after the close reads memory that has been freed.
     """
-    device = receiver.sdr_receiver.sdr
-    calls: list[str] = []
-    monkeypatch.setattr(device, "cancel_read_async",
-                        lambda: calls.append("cancel"))
-    monkeypatch.setattr(device, "close", lambda: calls.append("close"))
+    sdr = receiver.sdr_receiver
+    thread = running_reader(receiver)
 
-    receiver.sdr_receiver.stop()
-    receiver.sdr_receiver.stop()
+    sdr.stop()
+    sdr.stop()
+    thread.join(timeout=5)
 
-    assert calls == ["cancel", "close"]
+    assert not thread.is_alive()
+    assert sdr.sdr.calls == ["read", "cancel", "close"]
 
 
 def test_a_driver_side_close_stops_the_cancel(receiver, monkeypatch):
     """pyrtlsdr closes the device itself when a control write fails."""
     device = receiver.sdr_receiver.sdr
-    calls: list[str] = []
-    monkeypatch.setattr(device, "device_opened", False, raising=False)
-    monkeypatch.setattr(device, "cancel_read_async",
-                        lambda: calls.append("cancel"))
-    monkeypatch.setattr(device, "close", lambda: calls.append("close"))
+    monkeypatch.setattr(device, "device_opened", False)
+    device.calls.clear()
 
     receiver.sdr_receiver.stop()
 
-    assert calls == [], f"touched a handle the driver had already freed: {calls}"
+    assert device.calls == [], (
+        f"touched a handle the driver had already freed: {device.calls}")
 
 
 # ----------------------------------------------------------------------
@@ -615,3 +619,149 @@ def test_an_audio_recording_cannot_start_after_cleanup(receiver, tmp_path):
     assert not audio.recording
     assert audio.record_wave is None
     assert not path.exists()
+
+
+# ----------------------------------------------------------------------
+# The cancel that fails, and what pyrtlsdr does about it
+# ----------------------------------------------------------------------
+#
+# rtlsdr_cancel_async returns an error whenever no read is running, and
+# pyrtlsdr answers an error by closing the device and raising
+# (rtlsdr.py:699-706).  That close lands outside _device_lock, which is
+# the one place a close must never be.  The fake in conftest copies this.
+
+
+def test_cleanup_before_the_read_begins_never_cancels(receiver):
+    """The thread exists, the read does not: there is nothing to cancel.
+
+    Asking anyway is what makes the C call fail, and a failed cancel takes
+    the device with it.  The read that follows then goes through a handle
+    that has already been freed.
+    """
+    sdr = receiver.sdr_receiver
+    device = sdr.sdr
+    at_the_gate = threading.Event()
+    gate = threading.Event()
+
+    def late_start():
+        at_the_gate.set()
+        gate.wait(10)
+        sdr.start()
+
+    thread = threading.Thread(target=late_start, name="SDRThread", daemon=True)
+    thread.start()
+    assert at_the_gate.wait(5), "the SDR thread never started"
+
+    receiver.cleanup()
+    gate.set()                      # the thread only gets going now
+    thread.join(timeout=10)
+
+    assert not thread.is_alive()
+    assert "cancel failed" not in device.calls, (
+        f"asked a device that was not reading to cancel: {device.calls}")
+    assert "read" not in device.calls, (
+        f"started a read after the device was closed: {device.calls}")
+    assert device.calls.count("close") == 1, device.calls
+
+
+def test_a_cancel_that_arrives_too_early_does_not_close_the_device(
+        receiver, monkeypatch):
+    """The window between arming the read and librtlsdr running it.
+
+    A cancel landing in there fails, and pyrtlsdr's answer to a failed
+    cancel is to close - from a thread that does not hold the device lock,
+    on top of a gain write that is still using the handle.  Suppressing
+    the wrapper's close is only half of it: the cancel itself did nothing,
+    so the read starts regardless and has to be asked again.
+    """
+    sdr = receiver.sdr_receiver
+    device = sdr.sdr
+    armed = threading.Event()
+    let_the_read_begin = threading.Event()
+    real_read = device.read_samples_async
+
+    def read_samples_async(cb, num_samples=None):
+        armed.set()
+        let_the_read_begin.wait(10)     # armed, not yet running
+        real_read(cb, num_samples)
+
+    writing = threading.Event()
+    release = threading.Event()
+    closed_under_the_write: list[float] = []
+    real_set_gain = device.set_gain
+
+    def slow_write(gain):
+        writing.set()
+        release.wait(10)
+        if not device.device_opened:
+            closed_under_the_write.append(gain)
+        real_set_gain(gain)
+
+    monkeypatch.setattr(device, "read_samples_async", read_samples_async)
+    monkeypatch.setattr(device, "set_gain", slow_write)
+
+    thread = threading.Thread(target=sdr.start, name="SDRThread", daemon=True)
+    thread.start()
+    assert armed.wait(5), "the read never armed"
+    receiver.auto_gain._submit_async_gain(30.0)
+    assert writing.wait(5), "the gain worker never started writing"
+
+    done = threading.Event()
+    threading.Thread(target=lambda: (receiver.cleanup(), done.set()),
+                     daemon=True).start()
+    # Past auto_gain's one-second join and well into the cancel attempts.
+    time.sleep(1.5)
+
+    assert device.device_opened, (
+        f"a failed cancel closed the device: {device.calls}")
+    assert not closed_under_the_write
+
+    let_the_read_begin.set()        # the read finally reaches librtlsdr
+    release.set()                   # and the write finally returns
+
+    assert done.wait(20), "cleanup never finished"
+    thread.join(timeout=10)
+
+    assert not thread.is_alive(), "the read was never cancelled"
+    assert not closed_under_the_write, (
+        "the device closed under a write that was still in flight")
+    assert device.calls.count("close") == 1, device.calls
+    assert device.calls[-2:] == ["cancel", "close"], device.calls
+
+
+def test_a_read_that_will_not_return_leaves_the_device_open(receiver,
+                                                            monkeypatch):
+    """Closing would free the handle the read is still going through."""
+    sdr = receiver.sdr_receiver
+    device = sdr.sdr
+    reading = threading.Event()
+    release = threading.Event()
+
+    def deaf_read(cb, num_samples=None):
+        device.read_async_canceling = False
+        device.calls.append("read")
+        device.reading.set()
+        reading.set()
+        release.wait(30)            # ignores every cancel
+        device.reading.clear()
+
+    monkeypatch.setattr(device, "read_samples_async", deaf_read)
+    monkeypatch.setattr("fm_radio.sdr_receiver._SAMPLING_CANCEL_TIMEOUT_SEC",
+                        0.3)
+
+    thread = threading.Thread(target=sdr.start, name="SDRThread", daemon=True)
+    thread.start()
+    assert reading.wait(5)
+
+    try:
+        started = time.monotonic()
+        receiver.cleanup()
+        elapsed = time.monotonic() - started
+
+        assert elapsed < 10.0, f"cleanup took {elapsed:.1f} s"
+        assert "close" not in device.calls, (
+            "freed a handle a read was still going through")
+        assert device.device_opened
+    finally:
+        release.set()
+        thread.join(timeout=10)
