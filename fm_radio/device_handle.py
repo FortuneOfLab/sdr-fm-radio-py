@@ -372,6 +372,14 @@ class DeviceHandle:
         """Body of the close.  See :meth:`close`."""
         if self.closed.is_set():
             return
+        if not getattr(self.device, "device_opened", True):
+            # The driver closed it for us on the way out of a call that
+            # failed.  There is nothing left to free, and reaching for it
+            # would be reaching into memory that has been given back.
+            self.logger.warning(
+                "The driver has already closed the SDR; nothing to close")
+            self.note_closed_by_driver()
+            return
         # Somebody has decided the device is going: this caller, or
         # pyrtlsdr from inside a call that failed.  Either way nothing new
         # should reach it from here, whether or not the close itself lands
@@ -423,7 +431,12 @@ class DeviceHandle:
         """Remember a close that could not be made, and say so once."""
         if not self.close_pending:
             self.close_pending = True
-            self.logger.error(
+            # A warning rather than an error: the handle is intact, the
+            # request is kept, and the next operation to finish with the
+            # device makes good on it.  The errors in here are for the
+            # things that do not recover - a device that stops answering
+            # a cancel, a cancel that cannot be reached at all.
+            self.logger.warning(
                 "Not closing the SDR: %s. The handle stays open and valid; "
                 "the close is retried when the device is free, and the "
                 "process releases the handle on exit.", because)
