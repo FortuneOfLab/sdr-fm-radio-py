@@ -146,6 +146,9 @@ class FakeRtlSdr:
         self.read_async_canceling = True
 
     def close(self) -> None:
+        if self.reading.is_set():
+            # librtlsdr is inside rtlsdr_read_async, using this handle.
+            self.calls.append("close during read")
         self.calls.append("close")
         self.device_opened = False
 

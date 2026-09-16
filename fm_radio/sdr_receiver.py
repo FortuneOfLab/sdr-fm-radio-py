@@ -147,6 +147,14 @@ class SDRReceiver(SDRReceiverInterface):
         self._handle_lock: threading.Lock = threading.Lock()
         self._handle_alive: bool = True
         self._no_safe_cancel_reported: bool = False
+        # A close that was asked for but could not be made yet, because
+        # something was still using the device.  Retried when the writes
+        # let go, and again by stop().
+        self._close_pending: bool = False
+        # Whichever thread is inside read_samples_async.  A close asked
+        # for from in there must not wait for the read to end: the read
+        # has ended, that is why pyrtlsdr is closing.
+        self._reading_thread: threading.Thread | None = None
         self.iq_recording: bool = False
         self.iq_record_wave: wave.Wave_write | None = None
         # ``iq_record_lock`` guards self.iq_record_wave (file open/close vs
@@ -243,6 +251,7 @@ class SDRReceiver(SDRReceiverInterface):
                 self.center_freq = freq
                 self.sdr.center_freq = freq
                 self._last_freq_hz = float(freq)
+            self._retry_pending_close()
             # Bumped after the hardware change, never before: a block
             # captured on the new frequency but enqueued before this point
             # is then treated as belonging to the old tuning, which loses a
@@ -295,6 +304,7 @@ class SDRReceiver(SDRReceiverInterface):
                     return              # closed while we waited for the lock
                 self.sdr.set_gain(gain)
                 self._last_gain_db = float(gain)
+            self._retry_pending_close()
             self.logger.info(f"Gain set to {gain:.1f} dB")
         except OSError as e:
             self.logger.error(f"Failed to set gain to {gain:.1f} dB: {e}")
@@ -331,6 +341,7 @@ class SDRReceiver(SDRReceiverInterface):
                 if self._closed.is_set():
                     return
                 self.sdr.set_manual_gain_enabled(manual)
+            self._retry_pending_close()
             mode = "manual" if manual else "AGC"
             self.logger.info(f"Gain mode set to {mode}")
         except OSError as e:
@@ -696,20 +707,24 @@ class SDRReceiver(SDRReceiverInterface):
                 self.logger.info(
                     "Not starting the async read: the receiver is closed")
                 return
+            self._reading_thread = threading.current_thread()
             self._sampling_active.set()
         try:
             self.logger.info("Starting SDR async read")
             self.sdr.read_samples_async(self.callback, num_samples=self.block_size)
         except OSError as e:
             self.logger.error(f"Failed to start SDR async read: {e}")
-            # pyrtlsdr closes the device itself when rtlsdr_read_async
-            # fails, so there is nothing left to close or cancel.
+            # The read is over and pyrtlsdr has asked for the device to be
+            # closed on the way out.  Whether that close could be made yet
+            # or had to be deferred, this receiver is finished: refuse
+            # writes from here rather than leaving it looking open.
+            self._closed.set()
             if not getattr(self.sdr, "device_opened", True):
-                self._closed.set()
                 self._device_closed.set()
             raise SDRDeviceError(f"Failed to start SDR async read: {e}") from e
         finally:
             self._sampling_active.clear()
+            self._reading_thread = None
 
     def stop(self) -> None:
         """Stop sampling and close the SDR.
@@ -772,10 +787,12 @@ class SDRReceiver(SDRReceiverInterface):
                     return
                 try:
                     self.sdr.close()
-                    self._device_closed.set()
-                    self.logger.info("SDR closed successfully")
                 except OSError as e:
                     self.logger.error(f"Error closing SDR: {e}")
+                if not self._device_closed.is_set():
+                    self.logger.error(
+                        "The SDR could not be closed; it stays open and the "
+                        "process releases the handle on exit.")
             finally:
                 self._device_lock.release()
 
@@ -796,25 +813,58 @@ class SDRReceiver(SDRReceiverInterface):
         the length of its call, so a close cannot land between its
         liveness check and the call.
 
-        A write that will not return gets the same answer here as
-        everywhere else: the close is not made.  The handle stays open and
-        valid, stop() will try again, and the process releases it on exit.
+        And the async read must have ended.  librtlsdr is using the
+        handle for as long as rtlsdr_read_async has not returned, and a
+        gain write failing is no reason to pull it out from under that, so
+        a close asked for while a read is running cancels the read and
+        waits for it - bounded, like everything else here.
+
+        When any of those cannot be had in time the close is not made.  It
+        is remembered instead and retried when the writes let go, or by
+        stop().  The handle stays open and valid meanwhile.
         """
+        if self._device_closed.is_set():
+            return
+        # A close from inside the read is a read that has already ended:
+        # that is why pyrtlsdr is closing.  Waiting for it here would be
+        # waiting for this thread.
+        if (threading.current_thread() is not self._reading_thread
+                and self._sampling_active.is_set()):
+            # Something has decided the device is going.  Nothing new
+            # should reach it, whether or not the close lands this time.
+            self._closed.set()
+            if not self._cancel_sampling():
+                self._defer_close("the async read has not returned")
+                return
         if not self._device_lock.acquire(timeout=_DEVICE_LOCK_TIMEOUT_SEC):
-            self.logger.error(
-                "A device write has not returned after %.1f s; not closing "
-                "the SDR underneath it. The handle stays open and is "
-                "released when the process exits.", _DEVICE_LOCK_TIMEOUT_SEC)
+            self._defer_close("a device write has not returned")
             return
         try:
             with self._handle_lock:
                 if not self._handle_alive:
                     return
                 self._handle_alive = False
+                self._close_pending = False
                 self._device_closed.set()
                 self._real_close()
+                self.logger.info("SDR handle closed")
         finally:
             self._device_lock.release()
+
+    def _defer_close(self, because: str) -> None:
+        """Remember a close that could not be made, and say so once."""
+        if not self._close_pending:
+            self._close_pending = True
+            self.logger.error(
+                "Not closing the SDR: %s. The handle stays open and valid; "
+                "the close is retried when the device is free, and the "
+                "process releases the handle on exit.", because)
+
+    def _retry_pending_close(self) -> None:
+        """Make good on a close that was deferred earlier."""
+        if self._close_pending and not self._device_closed.is_set():
+            self.logger.info("Retrying a close that was deferred")
+            self._close_the_handle()
 
     def _ask_the_read_to_stop(self) -> None:
         """One attempt at cancelling, with no way for it to close anything.
