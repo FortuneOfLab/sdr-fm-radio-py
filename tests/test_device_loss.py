@@ -8,6 +8,8 @@ downstream finds that out unless they are told.
 
 from __future__ import annotations
 
+import contextlib
+import logging
 import sys
 import threading
 import time
@@ -123,11 +125,21 @@ def test_a_device_that_never_goes_leaves_the_receiver_alone(receiver):
 class _FakeController:
     """Enough of a controller for the window, with a device that can go."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, recording: bool = False) -> None:
         self.quit_event = threading.Event()
         self.device_failure: str | None = None
         self.center_freq = 80e6
         self.stereo_enabled = True
+        self.recording = recording
+        # Set when the window asks for the device to be released, so a test
+        # can wait for it rather than guess how long it takes.
+        self.cleaned_up = threading.Event()
+        self.cleanups: list[str] = []
+
+    def cleanup(self) -> None:
+        self.cleanups.append(threading.current_thread().name)
+        self.recording = False
+        self.cleaned_up.set()
 
 
     def current_station(self):
@@ -149,7 +161,7 @@ class _FakeController:
         return False
 
     def is_recording(self) -> bool:
-        return False
+        return self.recording
 
     def is_iq_recording(self) -> bool:
         return False
@@ -377,3 +389,198 @@ def test_the_window_opens_even_if_the_device_went_first():
     finally:
         window.close()
         app.processEvents()
+
+
+# ----------------------------------------------------------------------
+# What the window does about the recording that was running
+# ----------------------------------------------------------------------
+
+def test_the_window_frees_the_device_without_being_closed():
+    """A recording must not sit half-written until somebody closes a window.
+
+    The record buttons are disabled by then, so nothing else is going to
+    end it, and the audio stream has nothing left to play.
+    """
+    pytest.importorskip("PySide6.QtWidgets")
+    from fm_radio.gui.main_window import ReceiverWindow
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    controller = _FakeController(recording=True)
+    window = ReceiverWindow(controller)
+    try:
+        controller.device_failure = "LIBUSB_ERROR_NOT_FOUND (-5)"
+        window.refresh()
+
+        assert controller.cleaned_up.wait(5), (
+            "the recording was left open until the window closed")
+        assert not controller.recording
+        # And the window is still there to be read.
+        assert "SDR disconnected" in window._health.text()
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_freeing_the_device_does_not_block_the_window():
+    """cleanup() has bounded waits; a frozen window explains nothing."""
+    pytest.importorskip("PySide6.QtWidgets")
+    from fm_radio.gui.main_window import ReceiverWindow
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    controller = _FakeController(recording=True)
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_cleanup() -> None:
+        started.set()
+        release.wait(10)
+        controller.recording = False
+        controller.cleaned_up.set()
+
+    controller.cleanup = slow_cleanup
+    window = ReceiverWindow(controller)
+    try:
+        controller.device_failure = "LIBUSB_ERROR_NOT_FOUND (-5)"
+        window.refresh()            # must come straight back
+
+        assert started.wait(5), "the release never started"
+        assert not controller.cleaned_up.is_set(), (
+            "refresh() waited for the cleanup it started")
+        assert "SDR disconnected" in window._health.text()
+    finally:
+        release.set()
+        if window._releasing is not None:
+            window._releasing.join(timeout=10)
+        window.close()
+        app.processEvents()
+
+
+def test_the_device_is_freed_once_however_often_refresh_runs():
+    """refresh() is on a timer and is called after anything that changes."""
+    pytest.importorskip("PySide6.QtWidgets")
+    from fm_radio.gui.main_window import ReceiverWindow
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    controller = _FakeController(recording=True)
+    window = ReceiverWindow(controller)
+    try:
+        controller.device_failure = "LIBUSB_ERROR_NOT_FOUND (-5)"
+        for _ in range(5):
+            window.refresh()
+
+        assert controller.cleaned_up.wait(5)
+        window._releasing.join(timeout=10)
+        assert controller.cleanups == ["DeviceLossCleanup"], controller.cleanups
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_two_cleanups_at_once_do_not_overlap(receiver):
+    """The window starts one, closing the window starts another.
+
+    They are the same call arriving twice, and the second waits for the
+    first rather than tearing down beside it.
+    """
+    inside: list[str] = []
+    overlapped: list[bool] = []
+    original = receiver._cleanup
+
+    def watched_cleanup() -> None:
+        overlapped.append(bool(inside))
+        inside.append(threading.current_thread().name)
+        try:
+            time.sleep(0.2)
+            original()
+        finally:
+            inside.pop()
+
+    receiver._cleanup = watched_cleanup
+    threads = [threading.Thread(target=receiver.cleanup, daemon=True)
+               for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=15)
+
+    assert not any(thread.is_alive() for thread in threads)
+    assert overlapped == [False] * 4, "two cleanups ran at the same time"
+
+
+# ----------------------------------------------------------------------
+# When the log is the thing that cannot be written
+# ----------------------------------------------------------------------
+
+class _ClosedFile:
+    """A stream whose file has been closed underneath it.
+
+    Distinct from _ClosedPipe on purpose: logging swallows a handler
+    failure by reporting it to stderr, and swallows only OSError while
+    doing that.  A BrokenPipeError is an OSError and disappears; a
+    ValueError from a closed file comes back out at whoever logged.
+    """
+
+    def write(self, *args) -> int:
+        raise ValueError("I/O operation on closed file")
+
+    def flush(self) -> None:
+        raise ValueError("I/O operation on closed file")
+
+
+@contextlib.contextmanager
+def nowhere_to_log(receiver, monkeypatch):
+    """A log handler on a closed file, and no stderr to complain to."""
+    handler = logging.StreamHandler(_ClosedFile())
+    receiver.logger.addHandler(handler)
+    monkeypatch.setattr(receiver.logger, "propagate", False)
+    monkeypatch.setattr(logging, "raiseExceptions", True)
+    monkeypatch.setattr(sys, "stderr", _ClosedFile())
+    try:
+        yield
+    finally:
+        receiver.logger.removeHandler(handler)
+
+
+def test_a_log_that_cannot_be_written_does_not_keep_the_receiver_running(
+        receiver, monkeypatch):
+    """The state goes up before any kind of telling is attempted.
+
+    Both kinds can fail on a handle closed underneath them, and a receiver
+    that keeps running because it could not announce that it had stopped
+    is worse than one that stops quietly.
+    """
+    with nowhere_to_log(receiver, monkeypatch):
+        receiver._device_is_gone("LIBUSB_ERROR_NOT_FOUND (-5)")
+
+    assert receiver.quit_event.is_set(), "a broken log stopped the shutdown"
+    assert receiver.device_failure == "LIBUSB_ERROR_NOT_FOUND (-5)"
+
+
+def test_a_log_that_cannot_be_written_still_lets_the_console_hear(
+        receiver, monkeypatch, capsys):
+    """One kind of telling failing is no reason not to try the other."""
+    with nowhere_to_log(receiver, monkeypatch):
+        receiver._device_is_gone("LIBUSB_ERROR_NOT_FOUND (-5)")
+
+    printed = capsys.readouterr().out
+    assert "SDR disconnected" in printed, printed
+
+
+def test_a_broken_log_does_not_stop_the_sdr_thread_either(unpluggable,
+                                                          monkeypatch):
+    """The same thing where it actually happens: on the SDR thread."""
+    receiver, _device, reading, unplug = unpluggable
+
+    with nowhere_to_log(receiver, monkeypatch):
+        receiver.start_background()
+        assert reading.wait(5), "the read never started"
+        unplug.set()
+
+        assert _within(5.0, receiver.quit_event.is_set), (
+            "the SDR thread died on the log instead of stopping the receiver")
+        for thread in list(receiver.threads):
+            thread.join(timeout=10)
+            assert not thread.is_alive(), f"{thread.name} outlived the device"

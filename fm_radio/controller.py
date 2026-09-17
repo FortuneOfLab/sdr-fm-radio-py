@@ -187,6 +187,10 @@ class FMReceiverController:
         # whatever is showing the receiver to a person: the command line
         # prints it on the way out, the window puts it on the health line.
         self.device_failure: str | None = None
+        # cleanup() can be asked for from two places at once: the window
+        # starts one when the device goes, and closing the window starts
+        # another.  It is idempotent, but only one at a time.
+        self._cleanup_lock: threading.Lock = threading.Lock()
         # Nationwide catalogue (bundled snapshot + the user's stations.toml)
         # and the short preset list the CLI tunes by number.  Loading
         # problems are printed as well as logged: logging is off unless
@@ -712,16 +716,27 @@ class FMReceiverController:
     def _device_is_gone(self, why: str) -> None:
         """Record why the samples stopped, and ask everything else to stop.
 
-        The stopping comes first and the telling second.  Telling can fail
-        - the pipe the output was going to can be closed by then, and print
-        raises BrokenPipeError - and a receiver that keeps running because
-        it could not announce that it had stopped is worse than one that
-        stops quietly.
+        The stopping comes first and every kind of telling second.  Both
+        kinds can fail on a handle that has been closed underneath them -
+        print raises BrokenPipeError, and a log handler on a closed file
+        raises ValueError - and a receiver that keeps running because it
+        could not announce that it had stopped is worse than one that
+        stops quietly.  They are also separate from each other: a log that
+        cannot be written is no reason not to try the console.
         """
-        self.logger.error("The SDR stopped delivering samples: %s", why)
         self.device_failure = why
         self.quit_event.set()
+        self._log_the_device_is_gone(why)
         self._say_the_device_is_gone(why)
+
+    def _log_the_device_is_gone(self, why: str) -> None:
+        """Write the reason down, if there is anywhere left to write it."""
+        try:
+            self.logger.error("The SDR stopped delivering samples: %s", why)
+        except Exception:               # pragma: no cover - last resort
+            # Nowhere left to report a logging failure to.  The console
+            # notice is tried next and may still get through.
+            pass
 
     def _say_the_device_is_gone(self, why: str) -> None:
         """Tell whoever is watching, if there is anywhere left to tell.
@@ -814,6 +829,11 @@ class FMReceiverController:
         underneath it would be using a stream that has already gone.  Safe to
         call twice, and safe to call on a receiver that never fully started.
         """
+        with self._cleanup_lock:
+            self._cleanup()
+
+    def _cleanup(self) -> None:
+        """Body of :meth:`cleanup`; the caller holds ``_cleanup_lock``."""
         try:
             self.logger.info("Cleaning up FM Receiver Controller")
             # Whoever is shutting us down may not have asked the threads to

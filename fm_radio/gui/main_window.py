@@ -37,6 +37,8 @@ are deliberately not here.
 
 from __future__ import annotations
 
+import threading
+
 import logging
 import time
 
@@ -119,6 +121,9 @@ class ReceiverWindow(QMainWindow):
         # exist yet.  Starting it here is safe: a Qt timer only fires once
         # there is an event loop to fire it in, and there is not one until
         # this window has been built and shown.
+        # Started once when the device goes; see _free_the_device.
+        self._releasing: threading.Thread | None = None
+
         self._timer = QTimer(self)
         self._timer.setInterval(REFRESH_INTERVAL_MS)
         self._timer.timeout.connect(self.refresh)
@@ -391,6 +396,29 @@ class ReceiverWindow(QMainWindow):
                        self._auto_gain, self._gain_slider,
                        self._record_audio, self._record_iq):
             widget.setEnabled(False)
+        self._free_the_device()
+
+    def _free_the_device(self) -> None:
+        """Close the recording and the audio stream, once, off this thread.
+
+        The window stays up so the reason can be read, but a recording the
+        user had running should not sit half-written until they get round
+        to closing it, and the audio stream has nothing left to play.  The
+        record buttons are disabled by now, so this is the only thing that
+        will end it.
+
+        On a thread of its own because cleanup() has several bounded waits
+        in it, and a window frozen for a few seconds is a poor way to
+        explain what happened.  cleanup() is idempotent and serialised, so
+        the one that runs when the window closes is the same call arriving
+        second.
+        """
+        if self._releasing is not None:
+            return
+        self._releasing = threading.Thread(
+            target=self.controller.cleanup,
+            name="DeviceLossCleanup", daemon=True)
+        self._releasing.start()
 
     def _show_without_status(self) -> None:
         """Show what can be known without a snapshot: the tuner's own state."""
