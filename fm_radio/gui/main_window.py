@@ -37,13 +37,16 @@ are deliberately not here.
 
 from __future__ import annotations
 
+import threading
+
 import logging
 import time
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QGridLayout, QGroupBox, QHBoxLayout,
-    QLabel, QMainWindow, QProgressBar, QPushButton, QSlider, QStatusBar,
+    QLabel, QMainWindow, QProgressBar, QPushButton, QSizePolicy, QSlider,
+    QStatusBar,
     QVBoxLayout, QWidget,
 )
 
@@ -105,15 +108,34 @@ class ReceiverWindow(QMainWindow):
 
         self.setStatusBar(QStatusBar(self))
         self._health = QLabel("waiting for the first block")
-        self.statusBar().addWidget(self._health)
+        # A driver message can run to a couple of hundred characters, and a
+        # status label is allowed to ask the window to be that wide.  It is
+        # not: the window is the size the controls need, and a line that
+        # does not fit is elided rather than allowed to push the edge out.
+        self._health.setSizePolicy(QSizePolicy.Policy.Ignored,
+                                   QSizePolicy.Policy.Preferred)
+        self.statusBar().addWidget(self._health, 1)
 
-        self._load_presets()
-        self.refresh()
+        # Before the first refresh, which may already find that the device
+        # has gone - it stops the timer, and cannot stop one that does not
+        # exist yet.  Starting it here is safe: a Qt timer only fires once
+        # there is an event loop to fire it in, and there is not one until
+        # this window has been built and shown.
+        # Started once when the device goes; see _free_the_device.
+        self._releasing: threading.Thread | None = None
+        # Whether a recording was running when the device went.  Asked
+        # once, before the release starts, because the release answers it
+        # differently long before it is finished; see
+        # _show_the_recording_ending.
+        self._was_recording: bool | None = None
 
         self._timer = QTimer(self)
         self._timer.setInterval(REFRESH_INTERVAL_MS)
         self._timer.timeout.connect(self.refresh)
         self._timer.start()
+
+        self._load_presets()
+        self.refresh()
 
     # ------------------------------------------------------------------
     # Construction
@@ -337,6 +359,10 @@ class ReceiverWindow(QMainWindow):
         snapshot, which happens at startup, just after tuning, and while
         snapshots cannot be built.
         """
+        failure = getattr(self.controller, "device_failure", None)
+        if failure is not None:
+            self._show_the_device_has_gone(failure)
+            return
         status = self.controller.get_status()
         if status is None:
             self._show_without_status()
@@ -348,6 +374,94 @@ class ReceiverWindow(QMainWindow):
         notice = self._current_notice()
         if notice is not None:
             self._health.setText(notice)
+
+    def _show_the_device_has_gone(self, why: str) -> None:
+        """Say why the receiver stopped, and stop pretending otherwise.
+
+        The window stays: closing it here would take the explanation with
+        it, and the person who just pulled a cable is the one who needs to
+        read it.  Nothing in it will reach the device again - the receiver
+        is already shutting down - so the controls go quiet and the timer
+        stops rather than redrawing the same dead reading fifty times a
+        second.  Closing the window runs the usual cleanup.
+
+        The readings go with the controls.  Leaving the last ones up -
+        STEREO, a pilot SNR, two meters near the top of their range - is
+        the window saying the radio is playing, about a radio that is not
+        there.  The recording line is the same, and is the last thing
+        still moving: see :meth:`_show_the_recording_ending`.
+        """
+        self._show_without_status()
+        self._station.setText("no device")
+        self._health.setText("SDR disconnected - the receiver has stopped")
+        # The driver's own words, for whoever wants them.  Not on the
+        # status line, where they would be most of a paragraph.
+        self._health.setToolTip(why)
+        for widget in (self._down, self._up, self._presets,
+                       self._auto_gain, self._gain_slider,
+                       self._record_audio, self._record_iq):
+            widget.setEnabled(False)
+        # Asked before the release starts, not after: stop_recording
+        # clears the flag and then flushes the queue, closes the wave file
+        # and writes the sidecar, so a release already under way would
+        # answer "nothing is recording" about a file still being written.
+        if self._was_recording is None:
+            self._was_recording = (self.controller.is_recording()
+                                   or self.controller.is_iq_recording())
+        self._free_the_device()
+        self._show_the_recording_ending()
+
+    def _show_the_recording_ending(self) -> None:
+        """Follow the recording out, and stop refreshing once it has gone.
+
+        Freeing the device takes a moment and happens on another thread,
+        so for that moment there really is still a recording open.  Saying
+        "recording audio" after it has been closed would be the same lie
+        the meters were telling, and saying nothing while it is still
+        being written would be another - so the window keeps refreshing
+        until the file is closed, and then goes quiet for good.
+
+        "Until the file is closed" means until the release thread is
+        finished, not until the receiver says it is no longer recording.
+        Those are a long way apart: stop_recording clears its flag first
+        and then flushes the queue, waits for the worker, closes the wave
+        file and writes the sidecar.  Asking the receiver would clear this
+        line while the file was still being written.
+
+        The record buttons are left unchecked as well as disabled: a
+        disabled button still shows that it is pressed in, which reads as
+        a recording that is running.
+        """
+        if (self._was_recording and self._releasing is not None
+                and self._releasing.is_alive()):
+            self._recording_status.setText("closing the recording")
+            return                      # the timer brings us back
+        self._timer.stop()
+        self._recording_status.setText("")
+        for button in (self._record_audio, self._record_iq):
+            button.setChecked(False)
+
+    def _free_the_device(self) -> None:
+        """Close the recording and the audio stream, once, off this thread.
+
+        The window stays up so the reason can be read, but a recording the
+        user had running should not sit half-written until they get round
+        to closing it, and the audio stream has nothing left to play.  The
+        record buttons are disabled by now, so this is the only thing that
+        will end it.
+
+        On a thread of its own because cleanup() has several bounded waits
+        in it, and a window frozen for a few seconds is a poor way to
+        explain what happened.  cleanup() is idempotent and serialised, so
+        the one that runs when the window closes is the same call arriving
+        second.
+        """
+        if self._releasing is not None:
+            return
+        self._releasing = threading.Thread(
+            target=self.controller.cleanup,
+            name="DeviceLossCleanup", daemon=True)
+        self._releasing.start()
 
     def _show_without_status(self) -> None:
         """Show what can be known without a snapshot: the tuner's own state."""

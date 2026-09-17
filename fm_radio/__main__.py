@@ -165,8 +165,21 @@ def main() -> None:
                 # never have opened; cleanup() sets it either way and waits
                 # for the threads before closing what they are using.
                 controller.cleanup()
+            if controller.device_failure and exit_code == 0:
+                # The window closed normally, but only because the device
+                # went.  A script that started this should be able to tell
+                # that apart from a person closing the window, the same way
+                # it can on the command line.
+                exit_code = 1
             sys.exit(exit_code)
         controller.start()
+        if controller.device_failure:
+            # The command line came back because the device went, not
+            # because anybody asked it to.  Said here as well as in
+            # _leave_past_the_blocked_reader, which only runs when the
+            # command thread is still sitting in input() - it often is
+            # not, and the status must not depend on that.
+            sys.exit(1)
     except Exception as e:
         if enable_logging:
             logger.critical(f"Failed to start FM Receiver: {e}", exc_info=True)

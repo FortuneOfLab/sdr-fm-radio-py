@@ -20,14 +20,19 @@ import fm_radio.__main__ as entry
 class FakeController:
     """Records the order of the lifecycle calls made against it."""
 
-    def __init__(self, *, fail_at: str | None = None, **kwargs) -> None:
+    def __init__(self, *, fail_at: str | None = None,
+                 loses_the_device: str | None = None, **kwargs) -> None:
         self.kwargs = kwargs
         self.fail_at = fail_at
+        self.loses_the_device = loses_the_device
         self.calls: list[str] = []
         # A real Event, not None: the threads the receiver starts watch this,
         # and a stand-in that cannot record it being set hides whether
         # anything ever asked them to stop.
         self.quit_event = threading.Event()
+        # Set by the real controller when the device goes; the entry point
+        # turns it into an exit status.
+        self.device_failure: str | None = None
 
     def _record(self, name: str) -> None:
         self.calls.append(name)
@@ -38,6 +43,9 @@ class FakeController:
         self._record("start_background")
 
     def start(self) -> None:
+        if self.loses_the_device is not None:
+            # The real one comes back from its main loop for this reason.
+            self.device_failure = self.loses_the_device
         self._record("start")
 
     def cleanup(self) -> None:
@@ -50,14 +58,22 @@ def entry_point(monkeypatch):
     built: list[FakeController] = []
     gui_calls: list[object] = []
 
-    def _run(argv, *, fail_at=None, gui_exit=0, gui_error=None):
+    def _run(argv, *, fail_at=None, gui_exit=0, gui_error=None,
+             device_failure=None):
         def build(**kwargs):
-            controller = FakeController(fail_at=fail_at, **kwargs)
+            controller = FakeController(
+                fail_at=fail_at,
+                loses_the_device=None if "--gui" in argv else device_failure,
+                **kwargs)
             built.append(controller)
             return controller
 
         def run_gui(controller):
             gui_calls.append(controller)
+            if device_failure is not None:
+                # The window closed because the radio went, not because
+                # anybody asked it to.
+                controller.device_failure = device_failure
             if gui_error is not None:
                 raise gui_error
             return gui_exit
@@ -193,3 +209,39 @@ def test_cleanup_on_a_receiver_that_never_started(no_user_config):
                                       stations_path=str(no_user_config))
     controller.cleanup()                # no threads at all
     assert controller.quit_event.is_set()
+
+
+def test_a_device_that_went_shows_up_in_the_exit_status(entry_point):
+    """A window that closed because the radio vanished is not a clean exit.
+
+    A script that started this can tell that apart from a person closing
+    the window, the same way it can on the command line.
+    """
+    controller, _gui_calls, code = entry_point(
+        ["--light", "--gui"], device_failure="LIBUSB_ERROR_NOT_FOUND (-5)")
+
+    assert code == 1
+    assert controller.calls == ["start_background", "cleanup"]
+
+
+def test_a_device_that_went_shows_up_on_the_command_line_too(entry_point):
+    """The status must not depend on where the command thread happened to be.
+
+    The receiver exits past a command thread still sitting in input(), and
+    that path sets the status itself - but the thread is often not there:
+    it sees quit_event and returns, or stdin was a pipe that ended.  Then
+    start() simply comes back, and the entry point is what is left to say
+    what happened.
+    """
+    controller, _gui_calls, code = entry_point(
+        ["--light"], device_failure="LIBUSB_ERROR_NOT_FOUND (-5)")
+
+    assert code == 1
+    assert controller.calls == ["start"]
+
+
+def test_a_command_line_that_was_asked_to_quit_exits_cleanly(entry_point):
+    """The other half: quitting on purpose is still a clean exit."""
+    _controller, _gui_calls, code = entry_point(["--light"])
+
+    assert code is None or code == 0
