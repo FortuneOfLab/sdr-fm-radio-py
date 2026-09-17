@@ -248,10 +248,13 @@ class CommandLineInterface(threading.Thread):
 
     def _cmd_record_start(self, cmd: str) -> bool:
         """Handle 'record start' — begin recording with auto-generated filename."""
-        freq = self.controller.get_frequency() / 1e6
-        filename = build_recording_path(freq, iq=False)
         try:
-            self.controller.start_recording(filename)
+            # The name says which station this is, so it is chosen while
+            # the tuner is held on that station and not a moment later.
+            with self.controller.while_the_tuner_is_still():
+                freq = self.controller.get_frequency() / 1e6
+                filename = build_recording_path(freq, iq=False)
+                self.controller.start_recording(filename)
             print(f"Recording started: {filename}")
         except RecordingError as e:
             print(f"Recording start failed: {e}")
@@ -268,10 +271,11 @@ class CommandLineInterface(threading.Thread):
 
     def _cmd_iq_record_start(self, cmd: str) -> bool:
         """Handle 'iqrec start' - begin IQ recording with auto-generated filename."""
-        freq = self.controller.get_frequency() / 1e6
-        filename = build_recording_path(freq, iq=True)
         try:
-            self.controller.start_iq_recording(filename)
+            with self.controller.while_the_tuner_is_still():
+                freq = self.controller.get_frequency() / 1e6
+                filename = build_recording_path(freq, iq=True)
+                self.controller.start_iq_recording(filename)
             print(f"IQ recording started: {filename}")
         except RecordingError as e:
             print(f"IQ recording start failed: {e}")

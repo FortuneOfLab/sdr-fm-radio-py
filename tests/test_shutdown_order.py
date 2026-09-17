@@ -2317,3 +2317,211 @@ def test_a_tune_does_not_wait_for_the_recording_to_finish(receiver, tmp_path):
             assert after.wait(5), "a later write queued behind the recording"
     finally:
         finish.set()
+
+
+def a_start_that_is_half_way(receiver, what):
+    """Hold a recording between its metadata and its file being installed.
+
+    The window the tune must not fit through: the frequency has been
+    read for the sidecar, and nothing is yet calling itself a recording.
+    """
+    inside = threading.Event()
+    go = threading.Event()
+    if what == "audio":
+        owner, name = receiver.audio_output, "start_recording"
+    else:
+        owner, name = receiver.sdr_receiver, "start_iq_recording"
+    real = getattr(owner, name)
+
+    def slow_start(filename, **kw):
+        inside.set()
+        assert go.wait(10), "the test never let the recording start"
+        return real(filename, **kw)
+
+    setattr(owner, name, slow_start)
+    return inside, go
+
+
+def test_a_tune_waits_for_a_recording_that_is_half_started(receiver, tmp_path):
+    """Otherwise the file is named for a station it does not contain.
+
+    Starting a recording reads the frequency for the sidecar, opens the
+    file and only then calls itself a recording.  A tune that went
+    through the middle of that found no recording to stop, moved, and
+    left the new station being written into the old station's file.
+    """
+    audio = receiver.audio_output
+    sdr = receiver.sdr_receiver
+    was_on = sdr.get_center_frequency()
+    inside, go = a_start_that_is_half_way(receiver, "audio")
+
+    path = tmp_path / "half_started.wav"
+    starting = threading.Thread(target=receiver.start_recording,
+                                args=(str(path),), daemon=True)
+    starting.start()
+    assert inside.wait(5), "the recording never started starting"
+
+    when_the_write_went = {}
+    real_set = sdr.set_center_frequency
+
+    def watched(freq_hz):
+        when_the_write_went["recording"] = audio.recording
+        return real_set(freq_hz)
+
+    sdr.set_center_frequency = watched
+
+    try:
+        tuned = receiver.tune(81.3e6)
+        assert not tuned.wait(0.3), \
+            "the tune went past a recording that was being installed"
+
+        go.set()
+        starting.join(5)
+        assert not starting.is_alive(), "the recording never finished starting"
+        assert tuned.wait(5), "the tune never landed"
+
+        # It started, and then the tune stopped it - in that order, and
+        # before the frequency moved.  So the file is short, and what is
+        # in it is the station its sidecar names.
+        assert when_the_write_went == {"recording": False}, when_the_write_went
+        assert audio._record_meta["center_freq_hz"] == pytest.approx(was_on)
+    finally:
+        sdr.set_center_frequency = real_set
+        go.set()
+
+
+def test_a_tune_waits_for_an_iq_recording_that_is_half_started(receiver,
+                                                               tmp_path):
+    """The IQ sidecar names a centre frequency too."""
+    sdr = receiver.sdr_receiver
+    inside, go = a_start_that_is_half_way(receiver, "iq")
+
+    path = tmp_path / "half_started_iq.wav"
+    starting = threading.Thread(target=receiver.start_iq_recording,
+                                args=(str(path),), daemon=True)
+    starting.start()
+    assert inside.wait(5), "the recording never started starting"
+
+    when_the_write_went = {}
+    real_set = sdr.set_center_frequency
+
+    def watched(freq_hz):
+        when_the_write_went["iq_recording"] = sdr.iq_recording
+        return real_set(freq_hz)
+
+    sdr.set_center_frequency = watched
+
+    try:
+        tuned = receiver.tune(81.3e6)
+        assert not tuned.wait(0.3), \
+            "the tune went past an IQ recording that was being installed"
+
+        go.set()
+        starting.join(5)
+        assert tuned.wait(5), "the tune never landed"
+
+        assert when_the_write_went == {"iq_recording": False}, \
+            when_the_write_went
+    finally:
+        sdr.set_center_frequency = real_set
+        go.set()
+
+
+def test_a_recording_is_refused_rather_than_left_waiting_for_the_tuner(
+        receiver, tmp_path, monkeypatch):
+    """The wait is on the thread that pressed the button, so it is bounded.
+
+    On a device that has stopped answering the frequency write never
+    returns, and a window that waited for it would be a frozen window.
+    """
+    monkeypatch.setattr("fm_radio.controller._TUNER_SETTLE_TIMEOUT_SEC", 0.2)
+    sdr = receiver.sdr_receiver
+    stuck = threading.Event()
+    writing = threading.Event()
+    real_set = sdr.set_center_frequency
+
+    def never_answers(freq_hz):
+        writing.set()
+        stuck.wait(10)
+        return real_set(freq_hz)
+
+    sdr.set_center_frequency = never_answers
+
+    try:
+        receiver.tune(81.3e6)
+        assert writing.wait(5), "the write never started"
+
+        started = time.monotonic()
+        with pytest.raises(RecordingError):
+            receiver.start_recording(str(tmp_path / "refused.wav"))
+        waited = time.monotonic() - started
+
+        assert waited < 5.0, f"the button was held for {waited:.1f} s"
+    finally:
+        stuck.set()
+        sdr.set_center_frequency = real_set
+
+
+def test_a_tune_that_fails_half_way_still_finishes_what_it_took(receiver,
+                                                                tmp_path):
+    """The debt is written down as it is taken, not after it all succeeds.
+
+    The audio recording has been stopped and its file is open when the
+    IQ side blows up.  If that skipped the finish, the WAV would be left
+    for shutdown to wait twenty seconds for and then abandon.
+    """
+    audio = receiver.audio_output
+    path = tmp_path / "half_way.wav"
+    audio.start_recording(str(path))
+    audio.record(np.zeros((2048, 2), dtype=np.float32))
+
+    def blows_up():
+        raise RuntimeError("the IQ side blew up")
+
+    receiver.sdr_receiver.begin_stopping_the_iq_recording = blows_up
+
+    asked = receiver.tune(81.3e6)
+    assert asked.wait(5), "the tune never answered"
+    assert asked.failed, "the tune was supposed to fail"
+
+    assert audio.wait_for_the_recording_to_close(10), \
+        "the recording was left half closed"
+    assert audio.record_wave is None, "the file was left open"
+    with wave.open(str(path), "rb") as f:
+        assert f.getnframes() == 2048
+
+
+def test_a_frequency_write_that_fails_still_finishes_what_it_took(receiver,
+                                                                   tmp_path):
+    """The same, one line later."""
+    audio = receiver.audio_output
+    audio.start_recording(str(tmp_path / "write_failed.wav"))
+
+    def blows_up(freq_hz):
+        raise SDRDeviceError("the write blew up")
+
+    receiver.sdr_receiver.set_center_frequency = blows_up
+
+    asked = receiver.tune(81.3e6)
+    assert asked.wait(5), "the tune never answered"
+    assert asked.failed, "the tune was supposed to fail"
+
+    assert audio.wait_for_the_recording_to_close(10), \
+        "the recording was left half closed"
+    assert audio.record_wave is None, "the file was left open"
+
+
+def test_naming_and_starting_a_recording_can_be_one_step(receiver, tmp_path):
+    """A caller that reads the frequency for the name keeps the tuner still.
+
+    The name claims a station as much as the sidecar does, so the two
+    are chosen together - which means taking the tuner's lock around a
+    start_recording that takes it again.
+    """
+    with receiver.while_the_tuner_is_still():
+        mhz = receiver.get_frequency() / 1e6
+        receiver.start_recording(str(tmp_path / f"{mhz:.1f}MHz.wav"))
+
+    assert receiver.audio_output.recording, "the recording never started"
+    assert receiver.audio_output._record_meta["center_freq_hz"] == \
+        pytest.approx(mhz * 1e6)

@@ -339,10 +339,13 @@ class ReceiverWindow(QMainWindow):
             try:
                 # Inside the try: naming the file creates recordings/, which
                 # fails with an OSError of its own before the receiver has
-                # been asked for anything.
-                path = build_recording_path(
-                    self.controller.get_frequency() / 1e6)
-                self.controller.start_recording(path)
+                # been asked for anything.  Inside the tuner's lock as
+                # well: the frequency in the name and the station in the
+                # file have to be the same one.
+                with self.controller.while_the_tuner_is_still():
+                    path = build_recording_path(
+                        self.controller.get_frequency() / 1e6)
+                    self.controller.start_recording(path)
             except (RecordingError, OSError) as exc:
                 logger.error("Could not start recording: %s", exc)
                 self._set_notice(f"recording failed: {exc}")
@@ -356,9 +359,10 @@ class ReceiverWindow(QMainWindow):
             self.controller.stop_iq_recording()
         else:
             try:
-                path = build_recording_path(
-                    self.controller.get_frequency() / 1e6, iq=True)
-                self.controller.start_iq_recording(path)
+                with self.controller.while_the_tuner_is_still():
+                    path = build_recording_path(
+                        self.controller.get_frequency() / 1e6, iq=True)
+                    self.controller.start_iq_recording(path)
             except (RecordingError, OSError) as exc:
                 logger.error("Could not start IQ recording: %s", exc)
                 self._set_notice(f"IQ recording failed: {exc}")

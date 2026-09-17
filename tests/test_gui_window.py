@@ -10,6 +10,7 @@ Qt runs offscreen (see the ``qt_app`` fixture), so these need no display.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import threading
 import time
@@ -26,9 +27,13 @@ pytest.importorskip("PySide6.QtWidgets", reason="the GUI is optional")
 
 from PySide6.QtCore import Qt                                  # noqa: E402
 
+from fm_radio.controller import (                         # noqa: E402
+    _TUNER_SETTLE_TIMEOUT_SEC,
+)
 from fm_radio.device_worker import (                      # noqa: E402
     GAIN, GAIN_MODE, TUNE, DeviceWorker,
 )
+from fm_radio.exceptions import RecordingError            # noqa: E402
 from fm_radio.gui.main_window import (                         # noqa: E402
     METER_FLOOR_DBFS, REFRESH_INTERVAL_MS, ReceiverWindow, _level_percent,
 )
@@ -61,6 +66,9 @@ class FakeController:
         self.presets = [("TOKYO FM", 80.0e6), ("J-WAVE", 81.3e6)]
         self.tune_error: Exception | None = None
         self.record_error: Exception | None = None
+        # As in the controller: held while the frequency is being
+        # written, and by anything naming or installing a recording.
+        self._tuner_lock = threading.RLock()
 
     # --- reading ---
     def get_status(self):
@@ -112,9 +120,10 @@ class FakeController:
         self.calls.append(("tune", freq_hz))
 
         def write():
-            if self.tune_error is not None:
-                raise self.tune_error
-            self.frequency = freq_hz
+            with self._tuner_lock:
+                if self.tune_error is not None:
+                    raise self.tune_error
+                self.frequency = freq_hz
 
         self.last_tune = self.device_worker.submit(
             TUNE, f"Tuned to {freq_hz / 1e6:.1f} MHz", write)
@@ -163,6 +172,19 @@ class FakeController:
         self.last_write = self.device_worker.submit(
             GAIN, f"Gain set to {gain_db:.1f} dB", write)
         return self.last_write
+
+    @contextlib.contextmanager
+    def while_the_tuner_is_still(self):
+        """Mirror the controller: held, or the recording is refused."""
+        if not self._tuner_lock.acquire(
+                timeout=_TUNER_SETTLE_TIMEOUT_SEC):
+            raise RecordingError(
+                "Cannot start recording: the tuner is not answering")
+        self.calls.append(("tuner held",))
+        try:
+            yield
+        finally:
+            self._tuner_lock.release()
 
     def start_recording(self, path):
         self.calls.append(("start_recording", path))
@@ -837,3 +859,30 @@ def test_turning_auto_off_is_true_before_the_write_lands(window):
         assert asked.kind == GAIN,             f"turning Auto off pins the gain; that is a {asked.kind} write"
     finally:
         release.set()
+
+
+def test_the_window_holds_the_tuner_while_it_names_a_recording(window):
+    """The frequency in the name and the station in the file are one.
+
+    The window reads the frequency to build the filename and then asks
+    for the recording; a tune landing between the two would leave a file
+    called 80.0 MHz with the next station in it.  So both happen with
+    the tuner held.
+    """
+    view, controller = window()
+
+    view._record_audio.click()
+
+    assert controller.calls[:1] == [("tuner held",)], controller.calls
+    assert controller.calls[1][0] == "start_recording", controller.calls
+    assert "80.0MHz" in controller.calls[1][1], controller.calls[1][1]
+
+
+def test_the_window_holds_the_tuner_while_it_names_an_iq_recording(window):
+    """The same for the IQ file, whose sidecar names a frequency too."""
+    view, controller = window()
+
+    view._record_iq.click()
+
+    assert controller.calls[:1] == [("tuner held",)], controller.calls
+    assert controller.calls[1][0] == "start_iq_recording", controller.calls
