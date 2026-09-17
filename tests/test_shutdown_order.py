@@ -17,7 +17,7 @@ import pytest
 
 from conftest import FakeLibRtlSdr, RTLSDR_INACTIVE, RTLSDR_RUNNING
 
-import fm_radio.sdr_receiver as fm_sdr
+import fm_radio.device_handle as device_handle
 from fm_radio.controller import FMReceiverController
 from fm_radio.exceptions import RecordingError, SDRDeviceError
 
@@ -123,6 +123,7 @@ def test_a_write_in_flight_finishes_before_the_device_closes(receiver,
     close waits behind the same lock.
     """
     device = receiver.sdr_receiver.sdr
+    handle = receiver.sdr_receiver.handle
     closed = threading.Event()
     writing = threading.Event()
     after_close = []
@@ -138,14 +139,17 @@ def test_a_write_in_flight_finishes_before_the_device_closes(receiver,
             after_close.append(gain)
         return original_set_gain(gain)
 
-    original_close = device.close
+    # _real_close, not device.close: the handle keeps the original and
+    # calls it directly, so device.close is not on the path that frees
+    # anything.  Watching that one would be watching nothing.
+    original_close = handle._real_close
 
     def marked_close():
         closed.set()
         return original_close()
 
     monkeypatch.setattr(device, "set_gain", slow_write)
-    monkeypatch.setattr(device, "close", marked_close)
+    monkeypatch.setattr(handle, "_real_close", marked_close)
 
     receiver.auto_gain._submit_async_gain(30.0)
     assert writing.wait(5), "the gain worker never started writing"
@@ -218,17 +222,22 @@ def test_a_wedged_write_does_not_hold_cleanup_open(receiver, monkeypatch):
     than pulling the handle out from under a call that is still inside it.
     """
     device = receiver.sdr_receiver.sdr
+    handle = receiver.sdr_receiver.handle
     writing = threading.Event()
     release = threading.Event()
     closes: list[str] = []
+    real_close = handle._real_close
 
     def wedged_write(gain):
         writing.set()
         release.wait(30)                    # never set until the test is done
 
     monkeypatch.setattr(device, "set_gain", wedged_write)
-    monkeypatch.setattr(device, "close", lambda: closes.append("close"))
-    monkeypatch.setattr("fm_radio.sdr_receiver._DEVICE_LOCK_TIMEOUT_SEC", 0.5)
+    # The handle calls _real_close directly; device.close is not on the
+    # path that frees anything.
+    monkeypatch.setattr(handle, "_real_close",
+                        lambda: (closes.append("close"), real_close()))
+    monkeypatch.setattr("fm_radio.device_handle.DEVICE_LOCK_TIMEOUT_SEC", 0.5)
 
     receiver.auto_gain._submit_async_gain(30.0)
     assert writing.wait(5), "the gain worker never started writing"
@@ -257,7 +266,7 @@ def test_a_write_released_after_the_wait_still_finds_the_device_marked_closed(
         release.wait(30)
 
     monkeypatch.setattr(device, "set_gain", wedged_write)
-    monkeypatch.setattr("fm_radio.sdr_receiver._DEVICE_LOCK_TIMEOUT_SEC", 0.3)
+    monkeypatch.setattr("fm_radio.device_handle.DEVICE_LOCK_TIMEOUT_SEC", 0.3)
 
     receiver.auto_gain._submit_async_gain(30.0)
     assert writing.wait(5)
@@ -379,14 +388,14 @@ def test_a_read_does_not_wait_behind_a_device_write(receiver):
     exactly current one.
     """
     sdr = receiver.sdr_receiver
-    assert sdr._device_lock.acquire()
+    assert sdr.handle.device_lock.acquire()
     try:
         started = time.monotonic()
         sdr.get_center_frequency()
         sdr.get_gain()
         elapsed = time.monotonic() - started
     finally:
-        sdr._device_lock.release()
+        sdr.handle.device_lock.release()
 
     assert elapsed < 0.1, f"a read waited {elapsed * 1e3:.0f} ms for the lock"
 
@@ -460,7 +469,7 @@ def test_sampling_stops_even_when_the_device_cannot_be_closed(receiver,
 
     monkeypatch.setattr(device, "set_gain",
                         lambda gain: (writing.set(), release.wait(30)))
-    monkeypatch.setattr("fm_radio.sdr_receiver._DEVICE_LOCK_TIMEOUT_SEC", 0.5)
+    monkeypatch.setattr("fm_radio.device_handle.DEVICE_LOCK_TIMEOUT_SEC", 0.5)
 
     reader = running_reader(receiver)
     receiver.auto_gain._submit_async_gain(30.0)
@@ -755,7 +764,7 @@ def test_a_read_that_will_not_return_leaves_the_device_open(receiver,
         device.reading.clear()
 
     monkeypatch.setattr(device, "read_samples_async", deaf_read)
-    monkeypatch.setattr("fm_radio.sdr_receiver._SAMPLING_CANCEL_TIMEOUT_SEC",
+    monkeypatch.setattr("fm_radio.device_handle.SAMPLING_CANCEL_TIMEOUT_SEC",
                         0.3)
 
     thread = threading.Thread(target=sdr.start, name="SDRThread", daemon=True)
@@ -876,8 +885,8 @@ def test_the_fallback_is_not_asked_about_a_read_it_cannot_cancel(receiver,
     """
     sdr = receiver.sdr_receiver
     device = sdr.sdr
-    monkeypatch.setattr("fm_radio.sdr_receiver._RAW_CANCEL_ASYNC", None)
-    monkeypatch.setattr("fm_radio.sdr_receiver._SAMPLING_CANCEL_TIMEOUT_SEC",
+    monkeypatch.setattr("fm_radio.device_handle.RAW_CANCEL_ASYNC", None)
+    monkeypatch.setattr("fm_radio.device_handle.SAMPLING_CANCEL_TIMEOUT_SEC",
                         0.3)
 
     armed = threading.Event()
@@ -923,7 +932,7 @@ def test_a_callback_is_not_taken_as_proof_the_read_is_running(receiver,
     """
     sdr = receiver.sdr_receiver
     device = sdr.sdr
-    monkeypatch.setattr("fm_radio.sdr_receiver._RAW_CANCEL_ASYNC", None)
+    monkeypatch.setattr("fm_radio.device_handle.RAW_CANCEL_ASYNC", None)
 
     real_read = device.read_samples_async
 
@@ -1051,7 +1060,7 @@ def test_a_close_waiting_on_a_wedged_write_gives_up(receiver, monkeypatch):
     """The same bargain as everywhere else, and bounded."""
     sdr = receiver.sdr_receiver
     device = sdr.sdr
-    monkeypatch.setattr("fm_radio.sdr_receiver._DEVICE_LOCK_TIMEOUT_SEC", 0.4)
+    monkeypatch.setattr("fm_radio.device_handle.DEVICE_LOCK_TIMEOUT_SEC", 0.4)
 
     writing = threading.Event()
     release = threading.Event()
@@ -1097,14 +1106,14 @@ def test_a_close_cannot_land_between_the_check_and_the_c_call(receiver,
 
     in_the_close = threading.Event()
     let_the_close_finish = threading.Event()
-    real_close = sdr._real_close
+    real_close = sdr.handle._real_close
 
     def slow_close():
         in_the_close.set()
         let_the_close_finish.wait(10)
         real_close()
 
-    monkeypatch.setattr(sdr, "_real_close", slow_close)
+    monkeypatch.setattr(sdr.handle, "_real_close", slow_close)
 
     # rtlsdr.py:317 - a failed gain write closes the device itself.
     def failing_write(gain):
@@ -1158,14 +1167,14 @@ def test_a_close_cannot_slip_in_while_the_c_call_is_being_made(receiver,
 
     at_the_call = threading.Event()
     close_done = threading.Event()
-    real_raw = fm_sdr._RAW_CANCEL_ASYNC
+    real_raw = device_handle.RAW_CANCEL_ASYNC
 
     def stalled_raw(dev_p):
         at_the_call.set()
         close_done.wait(1.0)        # bounded: with the lock held it expires
         return real_raw(dev_p)
 
-    monkeypatch.setattr("fm_radio.sdr_receiver._RAW_CANCEL_ASYNC", stalled_raw)
+    monkeypatch.setattr("fm_radio.device_handle.RAW_CANCEL_ASYNC", stalled_raw)
 
     def close_from_a_failing_write():
         if not at_the_call.wait(10):
@@ -1189,6 +1198,76 @@ def test_a_close_cannot_slip_in_while_the_c_call_is_being_made(receiver,
     assert not thread.is_alive()
     assert "cancel after close" not in device.calls, (
         f"handed librtlsdr a pointer that had been freed: {device.calls}")
+
+
+def test_a_close_from_a_failed_read_waits_for_a_cancel_in_flight(receiver,
+                                                                 monkeypatch):
+    """The one interleaving only handle_lock covers.
+
+    A read that fails closes the device from the reader thread
+    (rtlsdr.py:601-603), and that close does not wait for the read to end -
+    the read has ended, that is why pyrtlsdr is closing.  So the guard
+    that holds every other close back is not in play here.  Meanwhile a
+    cancel from another thread has satisfied itself that the handle is
+    alive and is inside librtlsdr with the pointer.  handle_lock is what
+    keeps the close out until that call returns.
+    """
+    sdr = receiver.sdr_receiver
+    handle = sdr.handle
+    device = sdr.sdr
+
+    at_the_call = threading.Event()
+    cancel_done = threading.Event()
+    real_raw = device_handle.RAW_CANCEL_ASYNC
+
+    def stalled_raw(dev_p):
+        at_the_call.set()
+        cancel_done.wait(1.0)       # bounded: with the lock held it expires
+        return real_raw(dev_p)
+
+    monkeypatch.setattr("fm_radio.device_handle.RAW_CANCEL_ASYNC", stalled_raw)
+
+    reading = threading.Event()
+    fail_now = threading.Event()
+
+    def failing_read(cb, num_samples=None):
+        device.calls.append("read")
+        device.async_status = RTLSDR_RUNNING
+        device.reading.set()
+        reading.set()
+        fail_now.wait(10)
+        device.reading.clear()
+        device.async_status = RTLSDR_INACTIVE
+        device.calls.append("read failed")
+        device.close()              # rtlsdr.py:601-603, on this thread
+        raise OSError("LIBUSB_ERROR_IO: could not read")
+
+    monkeypatch.setattr(device, "read_samples_async", failing_read)
+
+    def read_and_swallow():
+        try:
+            sdr.start()
+        except SDRDeviceError:
+            pass                    # the point is the close, not the raise
+
+    reader = threading.Thread(target=read_and_swallow, name="SDRThread",
+                              daemon=True)
+    reader.start()
+    assert reading.wait(5), "the read never started"
+
+    canceller = threading.Thread(target=handle.stop_sampling, daemon=True)
+    canceller.start()
+    assert at_the_call.wait(5), "the cancel never reached librtlsdr"
+
+    fail_now.set()                  # the read fails and asks to close
+    reader.join(timeout=15)
+    canceller.join(timeout=15)
+
+    assert not reader.is_alive() and not canceller.is_alive()
+    assert "cancel after close" not in device.calls, (
+        f"freed the handle while librtlsdr had the pointer: {device.calls}")
+    assert device.calls.count("close") == 1, device.calls
+    assert not device.device_opened
 
 
 def test_a_driver_side_close_is_not_closed_again(receiver, monkeypatch):
@@ -1255,7 +1334,7 @@ def test_a_read_that_will_not_end_defers_the_close(receiver, monkeypatch):
     """Waiting for the read has to be bounded like everything else."""
     sdr = receiver.sdr_receiver
     device = sdr.sdr
-    monkeypatch.setattr("fm_radio.sdr_receiver._SAMPLING_CANCEL_TIMEOUT_SEC",
+    monkeypatch.setattr("fm_radio.device_handle.SAMPLING_CANCEL_TIMEOUT_SEC",
                         0.3)
 
     reading = threading.Event()
@@ -1291,7 +1370,7 @@ def test_a_read_that_will_not_end_defers_the_close(receiver, monkeypatch):
         assert elapsed < 10.0, f"the close waited {elapsed:.1f} s"
         assert "close" not in device.calls, device.calls
         assert device.device_opened
-        assert sdr._close_pending, "the close was forgotten rather than kept"
+        assert sdr.handle.close_pending, "the close was forgotten rather than kept"
     finally:
         release.set()
         thread.join(timeout=10)
@@ -1308,7 +1387,7 @@ def test_a_deferred_close_is_made_when_the_write_lets_go(receiver,
     """
     sdr = receiver.sdr_receiver
     device = sdr.sdr
-    monkeypatch.setattr("fm_radio.sdr_receiver._DEVICE_LOCK_TIMEOUT_SEC", 0.3)
+    monkeypatch.setattr("fm_radio.device_handle.DEVICE_LOCK_TIMEOUT_SEC", 0.3)
 
     reading = threading.Event()
     fail_now = threading.Event()
@@ -1357,7 +1436,7 @@ def test_a_deferred_close_is_made_when_the_write_lets_go(receiver,
 
     assert not thread.is_alive()
     assert device.device_opened, "closed while a write was still inside it"
-    assert sdr._close_pending, "the close request was dropped"
+    assert sdr.handle.close_pending, "the close request was dropped"
     assert sdr.closed, "a failed read left the receiver looking open"
 
     release.set()                       # the write finishes
@@ -1374,23 +1453,23 @@ def test_a_deferred_close_is_made_by_stop_if_nothing_else_does(receiver,
     """No further writes come, so the last chance is cleanup."""
     sdr = receiver.sdr_receiver
     device = sdr.sdr
-    monkeypatch.setattr("fm_radio.sdr_receiver._DEVICE_LOCK_TIMEOUT_SEC", 0.3)
+    monkeypatch.setattr("fm_radio.device_handle.DEVICE_LOCK_TIMEOUT_SEC", 0.3)
 
     release = threading.Event()
     holding = threading.Event()
 
     def hold_the_device():
-        sdr._device_lock.acquire()
+        sdr.handle.device_lock.acquire()
         holding.set()
         release.wait(10)
-        sdr._device_lock.release()
+        sdr.handle.device_lock.release()
 
     holder = threading.Thread(target=hold_the_device, daemon=True)
     holder.start()
     assert holding.wait(5)
 
     device.close()                      # deferred: the lock is held
-    assert sdr._close_pending
+    assert sdr.handle.close_pending
     assert device.device_opened
 
     release.set()
@@ -1406,16 +1485,16 @@ def test_a_deferred_close_is_made_only_once(receiver, monkeypatch):
     """Retried from several places, but the handle is freed one time."""
     sdr = receiver.sdr_receiver
     device = sdr.sdr
-    monkeypatch.setattr("fm_radio.sdr_receiver._DEVICE_LOCK_TIMEOUT_SEC", 0.3)
+    monkeypatch.setattr("fm_radio.device_handle.DEVICE_LOCK_TIMEOUT_SEC", 0.3)
 
     release = threading.Event()
     holding = threading.Event()
 
     def hold_the_device():
-        sdr._device_lock.acquire()
+        sdr.handle.device_lock.acquire()
         holding.set()
         release.wait(10)
-        sdr._device_lock.release()
+        sdr.handle.device_lock.release()
 
     holder = threading.Thread(target=hold_the_device, daemon=True)
     holder.start()
@@ -1423,13 +1502,13 @@ def test_a_deferred_close_is_made_only_once(receiver, monkeypatch):
 
     device.close()
     device.close()                      # asked twice, deferred twice
-    assert sdr._close_pending
+    assert sdr.handle.close_pending
 
     release.set()
     holder.join(timeout=5)
 
-    sdr._retry_pending_close()
-    sdr._retry_pending_close()
+    sdr.handle.retry_pending_close()
+    sdr.handle.retry_pending_close()
     receiver.cleanup()
     receiver.cleanup()
 
@@ -1480,16 +1559,16 @@ def test_a_deferred_close_leaves_the_receiver_closed_too(receiver,
     """Even when the close itself has to wait, nothing new may reach it."""
     sdr = receiver.sdr_receiver
     device = sdr.sdr
-    monkeypatch.setattr("fm_radio.sdr_receiver._DEVICE_LOCK_TIMEOUT_SEC", 0.3)
+    monkeypatch.setattr("fm_radio.device_handle.DEVICE_LOCK_TIMEOUT_SEC", 0.3)
 
     release = threading.Event()
     holding = threading.Event()
 
     def hold_the_device():
-        sdr._device_lock.acquire()
+        sdr.handle.device_lock.acquire()
         holding.set()
         release.wait(10)
-        sdr._device_lock.release()
+        sdr.handle.device_lock.release()
 
     holder = threading.Thread(target=hold_the_device, daemon=True)
     holder.start()
@@ -1498,7 +1577,7 @@ def test_a_deferred_close_leaves_the_receiver_closed_too(receiver,
     try:
         device.close()                  # deferred: the lock is held
 
-        assert sdr._close_pending
+        assert sdr.handle.close_pending
         assert device.device_opened
         assert sdr.closed, "a pending close left the receiver looking open"
     finally:
@@ -1519,7 +1598,7 @@ def test_the_read_ending_makes_good_on_a_deferred_close(receiver,
     """
     sdr = receiver.sdr_receiver
     device = sdr.sdr
-    monkeypatch.setattr("fm_radio.sdr_receiver._SAMPLING_CANCEL_TIMEOUT_SEC",
+    monkeypatch.setattr("fm_radio.device_handle.SAMPLING_CANCEL_TIMEOUT_SEC",
                         0.3)
 
     reading = threading.Event()
@@ -1547,14 +1626,14 @@ def test_the_read_ending_makes_good_on_a_deferred_close(receiver,
     with pytest.raises(SDRDeviceError):
         sdr.set_gain(30.0)
 
-    assert sdr._close_pending, "the close should have been deferred"
+    assert sdr.handle.close_pending, "the close should have been deferred"
     assert device.device_opened
 
     release.set()                       # ... and now the read ends
     thread.join(timeout=10)
 
     assert not thread.is_alive()
-    assert not sdr._close_pending, "the deferred close was forgotten"
+    assert not sdr.handle.close_pending, "the deferred close was forgotten"
     assert not device.device_opened, "the deferred close was never made"
     assert device.calls.count("close") == 1, device.calls
     assert "close during read" not in device.calls, device.calls
@@ -1566,30 +1645,30 @@ def test_a_refused_write_still_makes_good_on_a_deferred_close(receiver,
     perfectly good moment to try the close that could not be made."""
     sdr = receiver.sdr_receiver
     device = sdr.sdr
-    monkeypatch.setattr("fm_radio.sdr_receiver._DEVICE_LOCK_TIMEOUT_SEC", 0.3)
+    monkeypatch.setattr("fm_radio.device_handle.DEVICE_LOCK_TIMEOUT_SEC", 0.3)
 
     release = threading.Event()
     holding = threading.Event()
 
     def hold_the_device():
-        sdr._device_lock.acquire()
+        sdr.handle.device_lock.acquire()
         holding.set()
         release.wait(10)
-        sdr._device_lock.release()
+        sdr.handle.device_lock.release()
 
     holder = threading.Thread(target=hold_the_device, daemon=True)
     holder.start()
     assert holding.wait(5)
 
     device.close()                      # deferred
-    assert sdr._close_pending
+    assert sdr.handle.close_pending
 
     release.set()
     holder.join(timeout=5)
 
     sdr.set_gain(20.0)                  # refused, and retries the close
 
-    assert not sdr._close_pending
+    assert not sdr.handle.close_pending
     assert not device.device_opened
     assert device.calls == ["close"], device.calls
 
@@ -1599,7 +1678,7 @@ def test_a_failing_write_retries_a_close_it_could_not_make(receiver,
     """The exception path is an exit too, and the read ends behind it."""
     sdr = receiver.sdr_receiver
     device = sdr.sdr
-    monkeypatch.setattr("fm_radio.sdr_receiver._SAMPLING_CANCEL_TIMEOUT_SEC",
+    monkeypatch.setattr("fm_radio.device_handle.SAMPLING_CANCEL_TIMEOUT_SEC",
                         0.3)
 
     reading = threading.Event()
@@ -1628,7 +1707,7 @@ def test_a_failing_write_retries_a_close_it_could_not_make(receiver,
     monkeypatch.setattr(device, "set_gain", failing_write)
     with pytest.raises(SDRDeviceError):
         sdr.set_gain(30.0)
-    assert sdr._close_pending
+    assert sdr.handle.close_pending
 
     release.set()
     thread.join(timeout=10)
@@ -1643,25 +1722,25 @@ def test_cleanup_finishes_after_a_deferred_close(receiver, monkeypatch):
     """Whatever happened above, shutdown still has to end."""
     sdr = receiver.sdr_receiver
     device = sdr.sdr
-    monkeypatch.setattr("fm_radio.sdr_receiver._DEVICE_LOCK_TIMEOUT_SEC", 0.3)
-    monkeypatch.setattr("fm_radio.sdr_receiver._SAMPLING_CANCEL_TIMEOUT_SEC",
+    monkeypatch.setattr("fm_radio.device_handle.DEVICE_LOCK_TIMEOUT_SEC", 0.3)
+    monkeypatch.setattr("fm_radio.device_handle.SAMPLING_CANCEL_TIMEOUT_SEC",
                         0.3)
 
     release = threading.Event()
     holding = threading.Event()
 
     def hold_the_device():
-        sdr._device_lock.acquire()
+        sdr.handle.device_lock.acquire()
         holding.set()
         release.wait(10)
-        sdr._device_lock.release()
+        sdr.handle.device_lock.release()
 
     holder = threading.Thread(target=hold_the_device, daemon=True)
     holder.start()
     assert holding.wait(5)
 
     device.close()                      # deferred
-    assert sdr._close_pending
+    assert sdr.handle.close_pending
 
     try:
         started = time.monotonic()
@@ -1690,7 +1769,7 @@ def write_in_flight(receiver, monkeypatch):
     device = sdr.sdr
     # Long enough that a waiting exit path would be unmistakable, short
     # enough that the test is not slow if one creeps back in.
-    monkeypatch.setattr("fm_radio.sdr_receiver._DEVICE_LOCK_TIMEOUT_SEC", 1.0)
+    monkeypatch.setattr("fm_radio.device_handle.DEVICE_LOCK_TIMEOUT_SEC", 1.0)
 
     writing = threading.Event()
     release = threading.Event()
@@ -1707,7 +1786,7 @@ def write_in_flight(receiver, monkeypatch):
     assert writing.wait(5), "the write never started"
 
     device.close()                      # deferred: the write has the device
-    assert sdr._close_pending
+    assert sdr.handle.close_pending
     assert device.device_opened
 
     yield sdr, device, release, writer
@@ -1745,7 +1824,7 @@ def test_operations_refused_during_a_pending_close_return_at_once(
         slowest = max(slowest, took)
 
     assert device.device_opened, "closed underneath the write"
-    assert sdr._close_pending, "the close should still be waiting its turn"
+    assert sdr.handle.close_pending, "the close should still be waiting its turn"
 
 
 def test_a_repeated_tune_and_agc_toggle_never_queue_behind_the_write(
@@ -1768,13 +1847,13 @@ def test_the_close_lands_when_the_write_lets_go(write_in_flight):
     sdr, device, release, writer = write_in_flight
 
     sdr.set_center_frequency(81.3e6)    # refused, and does not wait
-    assert sdr._close_pending
+    assert sdr.handle.close_pending
 
     release.set()                       # the write finishes
     writer.join(timeout=10)
 
     assert not writer.is_alive()
-    assert not sdr._close_pending, "the deferred close was forgotten"
+    assert not sdr.handle.close_pending, "the deferred close was forgotten"
     assert not device.device_opened, "the deferred close was never made"
     assert device.calls.count("close") == 1, device.calls
 
