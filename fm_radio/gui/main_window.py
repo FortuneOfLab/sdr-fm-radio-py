@@ -123,6 +123,11 @@ class ReceiverWindow(QMainWindow):
         # this window has been built and shown.
         # Started once when the device goes; see _free_the_device.
         self._releasing: threading.Thread | None = None
+        # Whether a recording was running when the device went.  Asked
+        # once, before the release starts, because the release answers it
+        # differently long before it is finished; see
+        # _show_the_recording_ending.
+        self._was_recording: bool | None = None
 
         self._timer = QTimer(self)
         self._timer.setInterval(REFRESH_INTERVAL_MS)
@@ -396,6 +401,13 @@ class ReceiverWindow(QMainWindow):
                        self._auto_gain, self._gain_slider,
                        self._record_audio, self._record_iq):
             widget.setEnabled(False)
+        # Asked before the release starts, not after: stop_recording
+        # clears the flag and then flushes the queue, closes the wave file
+        # and writes the sidecar, so a release already under way would
+        # answer "nothing is recording" about a file still being written.
+        if self._was_recording is None:
+            self._was_recording = (self.controller.is_recording()
+                                   or self.controller.is_iq_recording())
         self._free_the_device()
         self._show_the_recording_ending()
 
@@ -409,13 +421,19 @@ class ReceiverWindow(QMainWindow):
         being written would be another - so the window keeps refreshing
         until the file is closed, and then goes quiet for good.
 
+        "Until the file is closed" means until the release thread is
+        finished, not until the receiver says it is no longer recording.
+        Those are a long way apart: stop_recording clears its flag first
+        and then flushes the queue, waits for the worker, closes the wave
+        file and writes the sidecar.  Asking the receiver would clear this
+        line while the file was still being written.
+
         The record buttons are left unchecked as well as disabled: a
         disabled button still shows that it is pressed in, which reads as
         a recording that is running.
         """
-        if (self._releasing is not None and self._releasing.is_alive()
-                and (self.controller.is_recording()
-                     or self.controller.is_iq_recording())):
+        if (self._was_recording and self._releasing is not None
+                and self._releasing.is_alive()):
             self._recording_status.setText("closing the recording")
             return                      # the timer brings us back
         self._timer.stop()

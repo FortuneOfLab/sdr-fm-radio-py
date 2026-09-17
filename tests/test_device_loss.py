@@ -134,11 +134,22 @@ class _FakeController:
         # Set when the window asks for the device to be released, so a test
         # can wait for it rather than guess how long it takes.
         self.cleaned_up = threading.Event()
+        # Set once the flag has been cleared and the file is being closed;
+        # cleared until the test lets that finish.
+        self.finalising = threading.Event()
+        self.finish = threading.Event()
+        self.finish.set()
         self.cleanups: list[str] = []
 
     def cleanup(self) -> None:
+        # In the order the real one does it: AudioOutput.stop_recording
+        # clears the flag first and only then flushes the queue, closes
+        # the wave file and writes the sidecar.  Asking "is it recording?"
+        # after that point says no about a file still being written.
         self.cleanups.append(threading.current_thread().name)
         self.recording = False
+        self.finalising.set()
+        self.finish.wait(10)
         self.cleaned_up.set()
 
 
@@ -426,9 +437,11 @@ def test_freeing_the_device_does_not_block_the_window(qt_app):
     release = threading.Event()
 
     def slow_cleanup() -> None:
+        # The flag goes first, as it does in AudioOutput.stop_recording;
+        # the file is still being closed for as long as this waits.
+        controller.recording = False
         started.set()
         release.wait(10)
-        controller.recording = False
         controller.cleaned_up.set()
 
     controller.cleanup = slow_cleanup
@@ -621,9 +634,11 @@ def test_the_recording_line_says_so_while_the_file_is_still_closing(qt_app):
     release = threading.Event()
 
     def slow_cleanup() -> None:
+        # The flag goes first, as it does in AudioOutput.stop_recording;
+        # the file is still being closed for as long as this waits.
+        controller.recording = False
         started.set()
         release.wait(10)
-        controller.recording = False
         controller.cleaned_up.set()
 
     controller.cleanup = slow_cleanup
@@ -662,6 +677,72 @@ def test_nothing_was_recording_and_the_window_goes_quiet_at_once(qt_app):
 
         assert not window._timer.isActive()
         assert window._recording_status.text() == ""
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_the_recording_line_outlasts_the_flag_that_goes_up_first(qt_app):
+    """The receiver stops calling it a recording long before it is closed.
+
+    AudioOutput.stop_recording clears its flag and only then flushes the
+    queue, waits for the worker, closes the wave file and writes the
+    sidecar - up to ten seconds of a file that is still being written
+    while the receiver answers "not recording".  The window follows the
+    release out instead of the flag.
+    """
+    from fm_radio.gui.main_window import ReceiverWindow
+
+    app = qt_app
+    controller = _FakeController(recording=True)
+    controller.finish.clear()           # hold it inside the finalising
+    window = ReceiverWindow(controller)
+    try:
+        controller.device_failure = "LIBUSB_ERROR_NOT_FOUND (-5)"
+        window.refresh()
+
+        assert controller.finalising.wait(5), "the release never started"
+        assert not controller.recording, (
+            "the fake is meant to clear the flag before the file is closed")
+        assert window._releasing.is_alive()
+
+        window.refresh()                # the timer would have brought this
+
+        assert window._recording_status.text() == "closing the recording", (
+            "the window gave up on the recording while it was still closing")
+        assert window._timer.isActive(), "and stopped looking"
+
+        controller.finish.set()
+        window._releasing.join(timeout=10)
+        window.refresh()
+
+        assert window._recording_status.text() == ""
+        assert not window._record_audio.isChecked()
+        assert not window._timer.isActive()
+    finally:
+        controller.finish.set()
+        window.close()
+        app.processEvents()
+
+
+def test_a_recording_that_started_and_stopped_before_the_unplug(qt_app):
+    """Nothing was recording when the device went, so nothing to follow."""
+    from fm_radio.gui.main_window import ReceiverWindow
+
+    app = qt_app
+    controller = _FakeController(recording=True)
+    window = ReceiverWindow(controller)
+    try:
+        window.refresh()
+        controller.recording = False    # the user stopped it themselves
+        window.refresh()
+
+        controller.device_failure = "LIBUSB_ERROR_NOT_FOUND (-5)"
+        window.refresh()
+
+        assert window._recording_status.text() == ""
+        assert not window._timer.isActive(), (
+            "kept looking for a recording that was not there")
     finally:
         window.close()
         app.processEvents()
