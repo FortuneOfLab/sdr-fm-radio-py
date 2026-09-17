@@ -138,10 +138,48 @@ def test_every_block_publishes_when_the_interval_is_zero(receiver):
 
 
 def test_tuning_drops_the_previous_snapshot(receiver):
-    """The old snapshot describes the old station's pilot and blend."""
+    """The old snapshot describes the old station's pilot and blend.
+
+    Dropped when the tune lands, not when it is asked for: until the
+    write has happened the radio really is still on the old station, and
+    the old snapshot is the truth about it.
+    """
     run_blocks(receiver, 4)
     assert receiver.get_status() is not None
-    receiver.tune(81.3e6)
+
+    request = receiver.tune(81.3e6)
+
+    assert request.wait(5), "the tune never landed"
+    assert receiver.get_status() is None
+
+
+def test_the_old_snapshot_stands_until_the_tune_lands(receiver, monkeypatch):
+    """A tune that has been asked for is not a tune that has happened.
+
+    The window would otherwise have nothing to show for as long as the
+    write takes - 60 ms on a device that is answering - having been told
+    the reading it has is stale when the receiver has not moved yet.
+    """
+    landed = threading.Event()
+    original = receiver.sdr_receiver.set_center_frequency
+
+    def slow_write(freq_hz):
+        landed.wait(10)
+        original(freq_hz)
+
+    monkeypatch.setattr(receiver.sdr_receiver, "set_center_frequency",
+                        slow_write)
+    run_blocks(receiver, 4)
+    before = receiver.get_status()
+    assert before is not None
+
+    request = receiver.tune(81.3e6)
+
+    assert receiver.get_status() is before, (
+        "dropped the old station's reading before leaving it")
+
+    landed.set()
+    assert request.wait(5)
     assert receiver.get_status() is None
 
 

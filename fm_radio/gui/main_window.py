@@ -52,6 +52,7 @@ from PySide6.QtWidgets import (
 
 from fm_radio.cli import build_recording_path
 from fm_radio.exceptions import RecordingError, SDRDeviceError
+from fm_radio.device_worker import TUNE
 from fm_radio.telemetry import SILENCE_DBFS, StatusSnapshot
 
 logger = logging.getLogger('fm_receiver.gui')
@@ -123,6 +124,10 @@ class ReceiverWindow(QMainWindow):
         # this window has been built and shown.
         # Started once when the device goes; see _free_the_device.
         self._releasing: threading.Thread | None = None
+        # The last device request whose outcome has been shown, and the
+        # frequency of a tune that has been asked for and not yet made.
+        self._last_outcome_shown: int = 0
+        self._tuning_to: float | None = None
         # Whether a recording was running when the device went.  Asked
         # once, before the release starts, because the release answers it
         # differently long before it is finished; see
@@ -256,14 +261,16 @@ class ReceiverWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _tune(self, freq_hz: float) -> None:
-        try:
-            self.controller.tune(freq_hz)
-        except SDRDeviceError as exc:
-            # A tuner that refused is worth saying out loud, but not worth
-            # taking the window down over.
-            logger.error("Could not tune to %.1f MHz: %s", freq_hz / 1e6, exc)
-            self._set_notice(f"tuning failed: {exc}")
-            return
+        """Ask for a new frequency and carry on drawing.
+
+        The write is 60 ms of USB on a device that is answering, so this
+        does not wait for it: what went wrong, if anything did, arrives
+        on the next refresh through the worker's latest request.  Until
+        then the reading on screen is the station the receiver is still
+        on, which is the truth.
+        """
+        self._tuning_to = freq_hz
+        self.controller.tune(freq_hz)
         self.refresh()
 
     def _step(self, delta_hz: float) -> None:
@@ -371,6 +378,7 @@ class ReceiverWindow(QMainWindow):
         self._show_recording()
         # A failure the user just caused outranks the health line until it
         # has been up long enough to read.
+        self._show_the_device_worker()
         notice = self._current_notice()
         if notice is not None:
             self._health.setText(notice)
@@ -462,6 +470,30 @@ class ReceiverWindow(QMainWindow):
             target=self.controller.cleanup,
             name="DeviceLossCleanup", daemon=True)
         self._releasing.start()
+
+    def _show_the_device_worker(self) -> None:
+        """Say what became of the last thing the window asked the SDR for.
+
+        Nothing waits for a device write any more, so this is where the
+        answer turns up: a failure becomes a notice, and a tune that has
+        been asked for but not yet made says so rather than leaving the
+        window looking as though the button did nothing.
+        """
+        worker = getattr(self.controller, "device_worker", None)
+        if worker is None:
+            return
+        latest = worker.latest
+        if latest is not None and latest.serial != self._last_outcome_shown:
+            self._last_outcome_shown = latest.serial
+            if latest.failed:
+                logger.error("%s failed: %s", latest.what, latest.error)
+                self._set_notice(f"{latest.what} failed: {latest.error}")
+        if self._tuning_to is not None:
+            if latest is not None and latest.kind == TUNE and latest.finished:
+                self._tuning_to = None
+            else:
+                self._set_notice(
+                    f"tuning to {self._tuning_to / 1e6:.1f} MHz...")
 
     def _show_without_status(self) -> None:
         """Show what can be known without a snapshot: the tuner's own state."""

@@ -10,6 +10,8 @@ Qt runs offscreen (see the ``qt_app`` fixture), so these need no display.
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from fm_radio.telemetry import SILENCE_DBFS, StatusSnapshot
@@ -22,6 +24,7 @@ pytest.importorskip("PySide6.QtWidgets", reason="the GUI is optional")
 
 from PySide6.QtCore import Qt                                  # noqa: E402
 
+from fm_radio.device_worker import TUNE, DeviceWorker    # noqa: E402
 from fm_radio.gui.main_window import (                         # noqa: E402
     METER_FLOOR_DBFS, REFRESH_INTERVAL_MS, ReceiverWindow, _level_percent,
 )
@@ -36,6 +39,10 @@ class FakeController:
 
     def __init__(self, status: StatusSnapshot | None = None) -> None:
         self.status = status
+        # The real controller owns one of these; the window reads it to
+        # find out how the writes it asked for went.
+        self.device_worker = DeviceWorker(logging.getLogger("test.gui"))
+        self.last_tune = None
         self.frequency = 80.0e6
         self.gain = 28.0
         self.auto_gain = True
@@ -73,12 +80,33 @@ class FakeController:
     def get_stations_list(self):
         return list(self.presets)
 
+    def tuned(self, timeout: float = 5.0) -> None:
+        """Wait for the tune that was asked for, as a test may.
+
+        The window never does this; it carries on drawing and picks the
+        outcome up on a later refresh.
+        """
+        assert self.last_tune is not None, "nothing asked for a tune"
+        assert self.last_tune.wait(timeout), "the tune never landed"
+
     # --- changing ---
     def tune(self, freq_hz):
+        """Hand the write to the worker, as the real one does.
+
+        Nothing is raised at the caller any more: a tune that fails does
+        so on the worker thread, and the window hears about it through
+        the request the worker keeps.
+        """
         self.calls.append(("tune", freq_hz))
-        if self.tune_error is not None:
-            raise self.tune_error
-        self.frequency = freq_hz
+
+        def write():
+            if self.tune_error is not None:
+                raise self.tune_error
+            self.frequency = freq_hz
+
+        self.last_tune = self.device_worker.submit(
+            TUNE, f"Tuned to {freq_hz / 1e6:.1f} MHz", write)
+        return self.last_tune
 
     def set_agc_mode(self, enabled):
         self.calls.append(("set_agc_mode", enabled))
@@ -246,10 +274,18 @@ def test_a_snapshot_arriving_later_replaces_the_placeholder(window):
 # ----------------------------------------------------------------------
 
 def test_the_arrows_tune_by_one_step(window):
+    """Each step is asked for from where the receiver is, not where it was.
+
+    The asking no longer waits for the write, so the arrows read back the
+    frequency the receiver reports - which is the one it is still on
+    until the tune lands.  Each click is therefore let land before the
+    next, the way a person clicking would.
+    """
     view, controller = window()
-    view._up.click()
-    view._down.click()
-    view._down.click()
+    for button in (view._up, view._down, view._down):
+        button.click()
+        controller.tuned()
+        view.refresh()
 
     assert [c for c in controller.calls if c[0] == "tune"] == [
         ("tune", 80.1e6), ("tune", 80.0e6), ("tune", 79.9e6)]
@@ -278,10 +314,14 @@ def test_a_tuner_that_refuses_is_reported_not_raised(window):
 
     controller = FakeController(snapshot())
     controller.tune_error = SDRDeviceError("device gone")
-    view, _ = window(controller)
+    view, controller = window(controller)
 
     view._up.click()                    # must not raise
-    assert "tuning failed" in view._health.text()
+    controller.tuned()                  # the write fails on the worker
+    view.refresh()                      # ... and the window hears about it
+
+    assert "failed" in view._health.text(), view._health.text()
+    assert "device gone" in view._health.text()
 
 
 def test_a_failure_survives_the_next_refresh(window):
@@ -290,12 +330,13 @@ def test_a_failure_survives_the_next_refresh(window):
 
     controller = FakeController(snapshot())
     controller.tune_error = SDRDeviceError("device gone")
-    view, _ = window(controller)
+    view, controller = window(controller)
 
     view._up.click()
+    controller.tuned()
     view.refresh()
     view.refresh()
-    assert "tuning failed" in view._health.text()
+    assert "failed" in view._health.text(), view._health.text()
 
 
 def test_a_failure_gives_way_to_the_health_line_eventually(window,
@@ -305,10 +346,12 @@ def test_a_failure_gives_way_to_the_health_line_eventually(window,
 
     controller = FakeController(snapshot())
     controller.tune_error = SDRDeviceError("device gone")
-    view, _ = window(controller)
+    view, controller = window(controller)
 
     view._up.click()
-    assert "tuning failed" in view._health.text()
+    controller.tuned()
+    view.refresh()
+    assert "failed" in view._health.text(), view._health.text()
 
     clock = [main_window.time.monotonic() + main_window.NOTICE_SECONDS + 1]
     monkeypatch.setattr(main_window.time, "monotonic", lambda: clock[0])

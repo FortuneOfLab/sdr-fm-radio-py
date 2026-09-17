@@ -56,6 +56,12 @@ def build_recording_path(freq_mhz: float, iq: bool = False) -> str:
     return os.path.join(RECORDINGS_DIR, f"{stamp}_{freq_mhz:.1f}MHz{suffix}.wav")
 
 
+#: How long a typed tune waits for the SDR before the prompt comes back
+#: without an answer.  A tune is 60 ms of USB on a device that is
+#: answering; this is long enough to look instant and short enough that a
+#: device which has stopped answering does not take the prompt with it.
+TUNE_REPORT_TIMEOUT_SEC: float = 2.0
+
 #: Upper bound on catalogue rows printed at once.  The command prompt
 #: shares the terminal with this output, so a full 983-line dump would
 #: scroll the prompt away.
@@ -329,15 +335,33 @@ class CommandLineInterface(threading.Thread):
                 stations = self.controller.get_stations_list()
                 if 0 <= idx < len(stations):
                     name, new_freq = stations[idx]
-                    self.controller.tune(new_freq)
-                    print(f"Tuned to {name} ({new_freq/1e6:.1f} MHz).")
+                    self._report_tuning(self.controller.tune(new_freq),
+                                        f"{name} ({new_freq/1e6:.1f} MHz)")
                 else:
                     print("Invalid station number.")
             else:
                 freq_val = float(cmd)
                 new_freq = freq_val * 1e6
-                self.controller.tune(new_freq)
-                print(f"Tuned to {new_freq/1e6:.1f} MHz.")
+                self._report_tuning(self.controller.tune(new_freq),
+                                    f"{new_freq/1e6:.1f} MHz")
         except ValueError:
             print("Unknown command.")
         return True
+
+    def _report_tuning(self, request, where: str) -> None:
+        """Say how the tune went, having waited a moment for it to go.
+
+        Somebody typed a command and is looking at the prompt, so this
+        waits - unlike the window, which has a whole interface to keep
+        answering.  Bounded, because the wait is the thing being avoided
+        everywhere else: a device that is not answering gets a line
+        saying so rather than a prompt that never comes back.
+        """
+        if not request.wait(TUNE_REPORT_TIMEOUT_SEC):
+            print(f"Tuning to {where}... (the SDR has not answered yet)")
+        elif request.superseded:
+            print(f"Tuning to {where} was replaced by a later one.")
+        elif request.failed:
+            print(f"Could not tune to {where}: {request.error}")
+        else:
+            print(f"Tuned to {where}.")

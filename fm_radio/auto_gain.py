@@ -26,12 +26,12 @@ from fm_radio.constants import (
     AGC_WARMUP_SEC,
 )
 
+from fm_radio.device_worker import GAIN, GAIN_MODE, DeviceWorker
+
 if TYPE_CHECKING:
     from fm_radio.sdr_receiver import SDRReceiver
 
 
-# Sentinel placed in the gain-request queue to signal worker shutdown.
-_GAIN_WORKER_SHUTDOWN = object()
 
 
 class AutoGainController:
@@ -51,9 +51,15 @@ class AutoGainController:
     remain synchronous since they are not on a real-time path.
     """
 
-    def __init__(self, sdr_receiver: SDRReceiver) -> None:
+    def __init__(self, sdr_receiver: SDRReceiver,
+                 device_worker: DeviceWorker) -> None:
         self.logger = logging.getLogger('fm_receiver.AutoGainController')
         self._sdr = sdr_receiver
+        # Every gain change goes through here, along with every other
+        # write to this device.  It used to be a worker of its own, which
+        # made two threads writing to one device and two ideas about what
+        # to do when one of them is slow.
+        self._worker = device_worker
         self._lock = threading.Lock()
 
         # State
@@ -66,21 +72,11 @@ class AutoGainController:
         # filter settling can otherwise produce spurious fast firings).
         self._start_time: float = time.perf_counter()
 
-        # Async gain-change worker: own all USB control transfers
-        # triggered from the real-time processing thread.
-        self._gain_q: queue.Queue[object] = queue.Queue(maxsize=4)
-        self._gain_worker_stop: threading.Event = threading.Event()
         # Last value successfully applied to the SDR (in dB).  Updated
-        # by the worker after each set_gain call and read by disable()
-        # to pin the gain at "current" rather than letting an in-flight
-        # AGC request continue to land afterwards.
+        # after each gain write and read by disable() to pin the gain at
+        # "current" rather than letting an in-flight AGC request continue
+        # to land afterwards.
         self._last_applied_gain: float = AGC_GAIN_TABLE[self._gain_index] / 10.0
-        self._gain_worker: threading.Thread = threading.Thread(
-            target=self._gain_worker_loop,
-            name='AutoGainWorker',
-            daemon=True,
-        )
-        self._gain_worker.start()
 
         # Apply initial gain: switch to manual gain mode
         self._sdr.set_manual_gain_mode(True)
@@ -91,60 +87,31 @@ class AutoGainController:
     # ------------------------------------------------------------------
 
     def _submit_async_gain(self, gain_db: float) -> None:
-        """Enqueue a gain-change request for the worker thread.
+        """Ask the device worker for a gain change, and come back.
 
-        Coalesces by draining stale pending requests so that only the
-        most recent gain decision survives.  This way a burst of AGC
-        firings collapses to whatever the final desired level is.
+        The worker keeps only the newest request of each kind, so a burst
+        of AGC firings collapses to whatever level it settled on - the
+        same coalescing this used to do for itself.
         """
-        try:
-            while True:
-                self._gain_q.get_nowait()
-        except queue.Empty:
-            pass
-        try:
-            self._gain_q.put_nowait(float(gain_db))
-        except queue.Full:
-            self.logger.debug("Gain request queue full (should not happen)")
+        gain_db = float(gain_db)
+        self._worker.submit(
+            GAIN, f"Auto gain applied {gain_db:.1f} dB",
+            lambda: self._apply_gain(gain_db))
 
-    def _gain_worker_loop(self) -> None:
-        """Worker thread loop: applies pending gain requests via USB."""
-        while not self._gain_worker_stop.is_set():
-            try:
-                item = self._gain_q.get(timeout=0.2)
-            except queue.Empty:
-                continue
-            if item is _GAIN_WORKER_SHUTDOWN:
-                break
-            gain_db = float(item)
-            t0 = time.perf_counter()
-            try:
-                self._sdr.set_gain(gain_db)
-            except Exception as e:
-                self.logger.error(
-                    f"Failed to apply gain {gain_db:.1f} dB: {e}",
-                    exc_info=True,
-                )
-                continue
-            with self._lock:
-                self._last_applied_gain = gain_db
-            dt_ms = (time.perf_counter() - t0) * 1000.0
-            level = logging.WARNING if dt_ms >= 50.0 else logging.INFO
-            self.logger.log(
-                level,
-                "Auto gain applied %.1f dB (USB blocked %.1fms, async)",
-                gain_db, dt_ms,
-            )
+    def _apply_gain(self, gain_db: float) -> None:
+        """Write the gain; called on the worker thread."""
+        self._sdr.set_gain(gain_db)
+        with self._lock:
+            self._last_applied_gain = gain_db
 
     def stop(self) -> None:
-        """Stop the async gain worker thread (called from cleanup)."""
-        self._gain_worker_stop.set()
-        try:
-            self._gain_q.put_nowait(_GAIN_WORKER_SHUTDOWN)
-        except queue.Full:
-            pass
-        if self._gain_worker.is_alive():
-            self._gain_worker.join(timeout=1.0)
+        """Nothing of its own to stop any more.
+
+        Kept because shutdown asks for it by name, and because the thing
+        it used to stop - the writer - still has to go before the device
+        it writes to.  That is the device worker now, and the controller
+        stops it.
+        """
 
     # ------------------------------------------------------------------
     # Public API (called from CLI / controller thread)
@@ -163,10 +130,12 @@ class AutoGainController:
         cannot race against any USB transfer that might still be in
         flight in the worker.
         """
-        # set_manual_gain_mode is only ever called on enable/disable
-        # transitions (not on the realtime path) so a synchronous USB
-        # call here is acceptable.
-        self._sdr.set_manual_gain_mode(True)
+        # Asked for rather than done here: this is called from the
+        # window's own thread when somebody ticks Auto, and the write
+        # costs 30 ms of USB on a device that is answering.
+        self._worker.submit(
+            GAIN_MODE, "Gain mode set to manual",
+            lambda: self._sdr.set_manual_gain_mode(True))
         with self._lock:
             self._enabled = True
             self._clip_counter = 0

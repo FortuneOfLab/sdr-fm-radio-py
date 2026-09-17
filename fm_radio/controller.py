@@ -41,6 +41,7 @@ from fm_radio.demodulator import FMDemodulator, FMDemodulatorLight
 from fm_radio.audio_output import AudioOutput
 from fm_radio.cli import CommandLineInterface
 from fm_radio.auto_gain import AutoGainController
+from fm_radio.device_worker import TUNE, DeviceWorker, Request
 from fm_radio.exceptions import SDRDeviceError, AudioOutputError
 from fm_radio.stations import (
     Station, load_stations, favorites, search, in_area, nearest,
@@ -231,7 +232,11 @@ class FMReceiverController:
                 output_rate=AUDIO_OUTPUT_RATE, frames_per_buffer=AUDIO_FRAMES_PER_BUFFER,
             )
             # Auto gain controller (replaces hardware AGC)
-            self.auto_gain: AutoGainController = AutoGainController(self.sdr_receiver)
+            # One thread for every write to the device, so that no
+            # window and no command line ever waits for USB.
+            self.device_worker: DeviceWorker = DeviceWorker(self.logger)
+            self.auto_gain: AutoGainController = AutoGainController(
+                self.sdr_receiver, self.device_worker)
             # Latest-value slot the processing thread publishes state to;
             # see fm_radio.telemetry for why it is rate-limited rather than
             # written every block.
@@ -317,14 +322,37 @@ class FMReceiverController:
         """
         return self.telemetry.latest
 
-    def tune(self, freq_hz: float) -> None:
-        """Tune to a new frequency.
+    def tune(self, freq_hz: float) -> "Request":
+        """Ask for a new frequency, and come straight back.
 
-        Sets the SDR center frequency, flushes stale IQ data, resets
-        demodulator state, and stops any active recording.
+        The write itself is 60 ms of USB on a device that is answering
+        and forever on one that is not, so it happens on the device
+        worker rather than on whichever thread asked - the window asks
+        from the thread that draws it.
+
+        Everything that follows a tune - the stale IQ, the demodulator
+        state, the AGC counters, a recording that was of a different
+        station - happens on the worker too, after the write, so a
+        caller who does wait sees a receiver that has finished moving.
 
         Args:
             freq_hz: Target frequency in Hz.
+
+        Returns:
+            The request, for a caller that wants to know how it went.
+            The window does not; the command line waits a moment.
+        """
+        return self.device_worker.submit(
+            TUNE, f"Tuned to {freq_hz / 1e6:.1f} MHz",
+            lambda: self._tune_now(freq_hz))
+
+    def _tune_now(self, freq_hz: float) -> None:
+        """Change frequency and settle everything behind it.
+
+        Runs on the device worker.  The order matters: nothing downstream
+        should see a block from the old station tagged with the new one,
+        which is what the generation on each block and the flush here are
+        between them for.
         """
         self.sdr_receiver.set_center_frequency(freq_hz)
         self._flush_data_queue()
@@ -844,6 +872,9 @@ class FMReceiverController:
             # goes before the device it writes to.  Each resource also
             # refuses use once closed, because a bounded join cannot promise
             # that every thread has finished.
+            # The writer goes before the device it writes to, and the
+            # writer is one thread for all of them now.
+            self.device_worker.stop()
             self.auto_gain.stop()
             self.sdr_receiver.stop()
             self._join_threads()
