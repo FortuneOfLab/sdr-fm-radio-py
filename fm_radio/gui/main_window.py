@@ -383,9 +383,9 @@ class ReceiverWindow(QMainWindow):
         The readings go with the controls.  Leaving the last ones up -
         STEREO, a pilot SNR, two meters near the top of their range - is
         the window saying the radio is playing, about a radio that is not
-        there.
+        there.  The recording line is the same, and is the last thing
+        still moving: see :meth:`_show_the_recording_ending`.
         """
-        self._timer.stop()
         self._show_without_status()
         self._station.setText("no device")
         self._health.setText("SDR disconnected - the receiver has stopped")
@@ -397,6 +397,31 @@ class ReceiverWindow(QMainWindow):
                        self._record_audio, self._record_iq):
             widget.setEnabled(False)
         self._free_the_device()
+        self._show_the_recording_ending()
+
+    def _show_the_recording_ending(self) -> None:
+        """Follow the recording out, and stop refreshing once it has gone.
+
+        Freeing the device takes a moment and happens on another thread,
+        so for that moment there really is still a recording open.  Saying
+        "recording audio" after it has been closed would be the same lie
+        the meters were telling, and saying nothing while it is still
+        being written would be another - so the window keeps refreshing
+        until the file is closed, and then goes quiet for good.
+
+        The record buttons are left unchecked as well as disabled: a
+        disabled button still shows that it is pressed in, which reads as
+        a recording that is running.
+        """
+        if (self._releasing is not None and self._releasing.is_alive()
+                and (self.controller.is_recording()
+                     or self.controller.is_iq_recording())):
+            self._recording_status.setText("closing the recording")
+            return                      # the timer brings us back
+        self._timer.stop()
+        self._recording_status.setText("")
+        for button in (self._record_audio, self._record_iq):
+            button.setChecked(False)
 
     def _free_the_device(self) -> None:
         """Close the recording and the audio stream, once, off this thread.

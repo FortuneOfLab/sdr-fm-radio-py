@@ -584,3 +584,100 @@ def test_a_broken_log_does_not_stop_the_sdr_thread_either(unpluggable,
         for thread in list(receiver.threads):
             thread.join(timeout=10)
             assert not thread.is_alive(), f"{thread.name} outlived the device"
+
+
+def test_the_recording_line_does_not_outlive_the_recording():
+    """A status line saying "recording audio" about a closed file.
+
+    Observed on hardware: everything else went to "--" and the recording
+    line kept its last sentence, because the disconnected view returns
+    before refresh() gets to the recording.
+    """
+    pytest.importorskip("PySide6.QtWidgets")
+    from fm_radio.gui.main_window import ReceiverWindow
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    controller = _FakeController(recording=True)
+    window = ReceiverWindow(controller)
+    try:
+        window.refresh()
+        assert "recording" in window._recording_status.text()
+
+        controller.device_failure = "LIBUSB_ERROR_NOT_FOUND (-5)"
+        window.refresh()
+
+        assert controller.cleaned_up.wait(5)
+        window._releasing.join(timeout=10)
+        window.refresh()            # the timer would have brought this
+
+        assert window._recording_status.text() == "", (
+            "the window still claims to be recording")
+        # A disabled button still shows that it is pressed in, which reads
+        # as a recording that is running.
+        assert not window._record_audio.isChecked()
+        assert not window._record_iq.isChecked()
+        assert not window._timer.isActive()
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_the_recording_line_says_so_while_the_file_is_still_closing():
+    """For that moment there really is still a recording open."""
+    pytest.importorskip("PySide6.QtWidgets")
+    from fm_radio.gui.main_window import ReceiverWindow
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    controller = _FakeController(recording=True)
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_cleanup() -> None:
+        started.set()
+        release.wait(10)
+        controller.recording = False
+        controller.cleaned_up.set()
+
+    controller.cleanup = slow_cleanup
+    window = ReceiverWindow(controller)
+    try:
+        controller.device_failure = "LIBUSB_ERROR_NOT_FOUND (-5)"
+        window.refresh()
+        assert started.wait(5)
+
+        assert window._recording_status.text() == "closing the recording"
+        # Still refreshing, because the recording is still moving.
+        assert window._timer.isActive()
+
+        release.set()
+        window._releasing.join(timeout=10)
+        window.refresh()
+
+        assert window._recording_status.text() == ""
+        assert not window._timer.isActive()
+    finally:
+        release.set()
+        window.close()
+        app.processEvents()
+
+
+def test_nothing_was_recording_and_the_window_goes_quiet_at_once():
+    """No recording to follow out, so no reason to keep refreshing."""
+    pytest.importorskip("PySide6.QtWidgets")
+    from fm_radio.gui.main_window import ReceiverWindow
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    controller = _FakeController()
+    window = ReceiverWindow(controller)
+    try:
+        controller.device_failure = "LIBUSB_ERROR_NOT_FOUND (-5)"
+        window.refresh()
+
+        assert not window._timer.isActive()
+        assert window._recording_status.text() == ""
+    finally:
+        window.close()
+        app.processEvents()
