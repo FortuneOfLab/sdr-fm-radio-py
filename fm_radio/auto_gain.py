@@ -179,10 +179,10 @@ class AutoGainController:
             # the worker will therefore drain the AGC value and end
             # at final_gain.
             asked = self._submit_async_gain(final_gain)
-        return asked
         self.logger.info(
             "Auto gain control disabled, gain pinned at %.1f dB", final_gain,
         )
+        return asked
 
     def set_gain_manual(self, gain_db: float) -> "Request | None":
         """Set gain explicitly (for CLI ``gain <value>`` command).

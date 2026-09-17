@@ -125,3 +125,18 @@ def test_stopping_the_worker_ends_the_thread_that_writes(agc_pair):
     sdr, agc = agc_pair
     agc._worker.stop()
     assert not agc._worker.running
+
+
+def test_turning_auto_off_is_in_the_log(agc_pair, caplog):
+    """The log is how anybody works out what the gain is doing.
+
+    A gain that stops moving and no line saying why is a puzzle; this
+    one says where the gain was pinned and by what.
+    """
+    _sdr, agc = agc_pair
+    agc.enable()
+    with caplog.at_level(logging.INFO, logger=agc.logger.name):
+        agc.disable(22.0)
+
+    assert any("Auto gain control disabled" in r.message
+               and "22.0" in r.message for r in caplog.records),         [r.message for r in caplog.records]

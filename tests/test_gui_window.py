@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 
 import pytest
 
@@ -120,17 +121,36 @@ class FakeController:
         return self.last_tune
 
     def set_agc_mode(self, enabled):
-        self.calls.append(("set_agc_mode", enabled))
+        """Switch Auto now and write later, as AutoGainController does.
 
-        def write():
+        The real one flips ``_enabled`` under its own lock as the call
+        goes through; only the USB write waits for the worker, so a
+        refresh between the two finds Auto already on.  Turning it on
+        asks for the mode and then a gain, and hands back the mode
+        request; turning it off asks for a gain alone - the one that
+        pins the gain where the AGC left it - and hands that back.
+        """
+        self.calls.append(("set_agc_mode", enabled))
+        self.auto_gain = enabled
+
+        def write_mode():
             if self.mode_error is not None:
                 raise self.mode_error
-            self.auto_gain = enabled
 
-        self.last_write = self.device_worker.submit(
-            GAIN_MODE, f"Gain mode set to {'auto' if enabled else 'manual'}",
-            write)
-        return self.last_write
+        def write_gain():
+            if self.gain_error is not None:
+                raise self.gain_error
+
+        if enabled:
+            asked = self.device_worker.submit(
+                GAIN_MODE, "Gain mode set to manual", write_mode)
+            self.last_write = self.device_worker.submit(
+                GAIN, f"Auto gain applied {self.gain:.1f} dB", write_gain)
+        else:
+            asked = self.device_worker.submit(
+                GAIN, f"Gain set to {self.gain:.1f} dB", write_gain)
+            self.last_write = asked
+        return asked
 
     def set_gain(self, gain_db):
         self.calls.append(("set_gain", gain_db))
@@ -760,3 +780,60 @@ def test_a_tune_replaced_by_a_later_one_is_not_reported_as_a_failure(window):
     view.refresh()
 
     assert "failed" not in view._health.text(), view._health.text()
+
+
+def test_a_failure_stays_readable_while_a_tune_is_still_going(window):
+    """Both want the one status line, and the failure needs it more.
+
+    A tune that has not landed says so again on the next refresh, and
+    the one after that.  A gain that would not write gets one chance to
+    be read, so it is not the one that gives way.
+    """
+    view, controller = window()
+    view._auto_gain.setChecked(False)
+    controller.settled()
+    controller.gain_error = OSError("LIBUSB_ERROR_TIMEOUT")
+    view._gain_slider.setValue(220)          # 22.0 dB, tenths
+    view._gain_slider.sliderReleased.emit()
+    controller.settled()
+
+    release = held(controller)
+    try:
+        # The click refreshes, and that one refresh has both to report:
+        # the gain that failed and the tune that has not landed.
+        view._up.click()
+
+        assert "LIBUSB_ERROR_TIMEOUT" in view._health.text(),             view._health.text()
+
+        # Once it has had its few seconds the tune is still going, and
+        # saying so is the best thing left to say.
+        message, _expires, sort = view._notice
+        view._notice = (message, time.monotonic() - 1.0, sort)
+        view.refresh()
+
+        assert "tuning to 80.1 MHz" in view._health.text(),             view._health.text()
+    finally:
+        release.set()
+
+
+def test_turning_auto_off_is_true_before_the_write_lands(window):
+    """The controller flips the mode under its own lock, not on the worker.
+
+    AutoGainController.disable sets ``_enabled`` and comes back; what it
+    hands to the worker is the gain that pins the device where the AGC
+    left it, and that is a gain write, not a mode one.  A refresh
+    between the two has to find Auto already off.
+    """
+    view, controller = window()
+    assert controller.auto_gain, "the stand-in is meant to start with Auto on"
+    release = held(controller)
+    try:
+        view._auto_gain.setChecked(False)
+        view.refresh()
+
+        assert not controller.auto_gain, "the mode waited for the USB write"
+        asked = view._asked_for[-1]
+        assert not asked.finished, "the worker was supposed to be busy"
+        assert asked.kind == GAIN,             f"turning Auto off pins the gain; that is a {asked.kind} write"
+    finally:
+        release.set()

@@ -88,6 +88,13 @@ def _level_percent(dbfs: float) -> int:
                          / -METER_FLOOR_DBFS * 100.0)))
 
 
+#: What a notice is about.  A failure is news the user has to read and
+#: gets its few seconds; progress is a line that will be repeated on the
+#: next refresh if it is still true, so anything may take its place.
+_FAILURE = "failure"
+_PROGRESS = "progress"
+
+
 class ReceiverWindow(QMainWindow):
     """Status and control for a running receiver."""
 
@@ -95,8 +102,8 @@ class ReceiverWindow(QMainWindow):
         super().__init__(parent)
         self.controller = controller
         self.setWindowTitle("SDR FM Receiver")
-        # (message, expiry); see NOTICE_SECONDS.
-        self._notice: tuple[str, float] | None = None
+        # (message, expiry, sort); see NOTICE_SECONDS and _set_notice.
+        self._notice: tuple[str, float, str] | None = None
 
         central = QWidget(self)
         layout = QVBoxLayout(central)
@@ -134,9 +141,6 @@ class ReceiverWindow(QMainWindow):
         # that one can be somebody else's, and a gain landing between two
         # refreshes would otherwise hide a tune that is still going.
         self._asked_for: list = []
-        # Whether the notice on screen is one of ours about a tune in
-        # flight, which stops being worth showing the moment it lands.
-        self._saying_tuning: bool = False
         # Whether a recording was running when the device went.  Asked
         # once, before the release starts, because the release answers it
         # differently long before it is finished; see
@@ -365,20 +369,26 @@ class ReceiverWindow(QMainWindow):
     # Display
     # ------------------------------------------------------------------
 
-    def _set_notice(self, message: str) -> None:
+    def _set_notice(self, message: str, sort: str = _FAILURE) -> None:
         """Put *message* in the status bar and keep it there to be read."""
-        self._notice = (message, time.monotonic() + NOTICE_SECONDS)
+        self._notice = (message, time.monotonic() + NOTICE_SECONDS, sort)
         self._health.setText(message)
 
     def _current_notice(self) -> str | None:
         """The notice still worth showing, or None once it has had its time."""
         if self._notice is None:
             return None
-        message, expires = self._notice
+        message, expires, _sort = self._notice
         if time.monotonic() >= expires:
             self._notice = None
             return None
         return message
+
+    def _showing(self, sort: str) -> bool:
+        """True when the notice still worth showing is of this sort."""
+        if self._current_notice() is None:
+            return False
+        return self._notice is not None and self._notice[2] == sort
 
     def refresh(self) -> None:
         """Read the published state and show it.
@@ -515,23 +525,23 @@ class ReceiverWindow(QMainWindow):
             if request.failed:
                 logger.error("%s failed: %s", request.what, request.error)
                 self._set_notice(f"{request.what} failed: {request.error}")
-                # Whatever is on the status line now, it is this, and it
-                # is worth its few seconds - the tuning line is not.
-                self._saying_tuning = False
         self._asked_for = still_going
 
         tuning = [r for r in still_going if r.kind == TUNE]
         if tuning and self._tuning_to is not None:
-            self._set_notice(
-                f"tuning to {self._tuning_to / 1e6:.1f} MHz...")
-            self._saying_tuning = True
+            # Unless there is a failure up that the user has not had
+            # time to read.  A gain that would not write is worth more
+            # than the news that a tune is still going: the tune says so
+            # again on the next refresh, and the failure will not.
+            if not self._showing(_FAILURE):
+                self._set_notice(
+                    f"tuning to {self._tuning_to / 1e6:.1f} MHz...", _PROGRESS)
         else:
             self._tuning_to = None
-            if self._saying_tuning:
+            if self._showing(_PROGRESS):
                 # "tuning to 80.1 MHz..." was true while it was; a notice
                 # normally sits for a few seconds so it can be read, and
                 # this one has nothing left to say the moment it lands.
-                self._saying_tuning = False
                 self._notice = None
 
     def _show_without_status(self) -> None:

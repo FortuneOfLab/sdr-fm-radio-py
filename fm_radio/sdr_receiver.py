@@ -460,12 +460,26 @@ class SDRReceiver(SDRReceiverInterface):
         was queued before stop_iq_recording was called, via a flush
         sentinel + Event handshake.
         """
+        if self.begin_stopping_the_iq_recording():
+            self.finish_stopping_the_iq_recording()
+
+    def begin_stopping_the_iq_recording(self) -> bool:
+        """Stop taking IQ for the recording, and nothing else.
+
+        Mirrors AudioOutput.begin_stopping_the_recording: the half that
+        has to happen before the tuner moves, so that no sample of the
+        new station reaches the old station's file.
+
+        Returns:
+            True when this call took the recording and owes it a
+            ``finish_stopping_the_iq_recording``.
+        """
         with self._iq_enqueue_lock:
             if not self.iq_recording:
                 self.logger.debug(
                     "stop_iq_recording called but not currently recording",
                 )
-                return
+                return False
             # Stop further enqueues from the SDR callback.  Because we
             # hold _iq_enqueue_lock, any callback that already passed
             # the flag check has also completed its put before us.
@@ -473,6 +487,10 @@ class SDRReceiver(SDRReceiverInterface):
             # From here the file is open and nothing calls it a
             # recording.  Anybody who needs it finished waits on this.
             self._iq_finalising.set()
+        return True
+
+    def finish_stopping_the_iq_recording(self) -> None:
+        """Flush what was queued, close the file and write the sidecar."""
         try:
             self._finish_the_iq_recording()
         finally:

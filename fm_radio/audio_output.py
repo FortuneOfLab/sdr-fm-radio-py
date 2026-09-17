@@ -381,10 +381,28 @@ class AudioOutput(AudioOutputInterface):
         which point all preceding chunks have been processed under
         ``record_lock``.
         """
+        if self.begin_stopping_the_recording():
+            self.finish_stopping_the_recording()
+
+    def begin_stopping_the_recording(self) -> bool:
+        """Stop taking audio for the recording, and nothing else.
+
+        The two halves of stopping cost very different amounts.  This
+        one is a flag under a lock and returns at once; the other is a
+        handshake with the worker and can take fifteen seconds.  A
+        caller who must not carry on putting the new station into the
+        old station's file - tuning - needs this half to have happened
+        before it goes on, and can leave the other to a thread.
+
+        Returns:
+            True when this call is the one that took the recording, and
+            therefore owes it a ``finish_stopping_the_recording``.
+            False when there was nothing to stop.
+        """
         with self._enqueue_lock:
             if not self.recording:
                 self.logger.debug("stop_recording called but not currently recording")
-                return
+                return False
             # Stop further enqueues from the realtime path.  Because we
             # hold _enqueue_lock, any record() that has already passed
             # its flag check has also completed its put before us.
@@ -392,6 +410,15 @@ class AudioOutput(AudioOutputInterface):
             # From here the file is open and nothing calls it a
             # recording.  Anybody who needs it finished waits on this.
             self._finalising.set()
+        return True
+
+    def finish_stopping_the_recording(self) -> None:
+        """Flush what was queued, close the file and write the sidecar.
+
+        The slow half, for whoever ``begin_stopping_the_recording`` gave
+        the recording to.  Whatever happens, the file stops being called
+        one that is closing, or shutdown would wait out its timeout.
+        """
         try:
             self._finish_the_recording()
         finally:

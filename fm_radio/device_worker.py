@@ -142,6 +142,11 @@ class DeviceWorker:
         self._waiting: collections.deque[Request] = collections.deque()
         self._gate: threading.Condition = threading.Condition()
         self._stopped: bool = False
+        # The request being written, from the moment the worker decides
+        # to write it.  That decision is made under _gate, which is what
+        # puts it either side of a stop rather than in the gap between
+        # leaving the queue and reaching the device.
+        self._writing: Request | None = None
         self._latest: Request | None = None
         self._latest_lock: threading.Lock = threading.Lock()
         self._thread: threading.Thread = threading.Thread(
@@ -224,6 +229,35 @@ class DeviceWorker:
             return self._waiting.popleft()
 
     def _carry_out(self, request: Request) -> None:
+        if not self._begin(request):
+            # Stopped between coming off the queue and starting.  It is
+            # no different from one still queued when the stop came, and
+            # is answered the same way: replaced, never written.
+            self.logger.debug(
+                "Not %s: the device worker stopped before it began",
+                request.what)
+            request._supersede()
+            return
+        try:
+            self._write(request)
+        finally:
+            with self._gate:
+                self._writing = None
+
+    def _begin(self, request: Request) -> bool:
+        """Take the request on, unless the stop got in first.
+
+        Under the same lock ``stop`` takes, so of the two exactly one
+        happens first and both agree which: either this sees the stop
+        and writes nothing, or the stop sees a write it must let finish.
+        """
+        with self._gate:
+            if self._stopped:
+                return False
+            self._writing = request
+            return True
+
+    def _write(self, request: Request) -> None:
         started = time.perf_counter()
         try:
             request._run()
@@ -247,14 +281,24 @@ class DeviceWorker:
 
         Anything still queued is dropped rather than written: shutdown
         has already decided the device is going, and a tune landing on
-        the way out helps nobody.  Whoever was waiting on one of those is
-        released rather than left there.  Safe to call more than once.
+        the way out helps nobody.  That includes one the worker has
+        already taken off the queue but not begun; it drops that itself,
+        having agreed with this under the same lock which of the two
+        came first.  A write that had begun is let finish - it is inside
+        the driver and taking it back is not on offer - and the join
+        below is what waits for it.  Whoever was waiting on a dropped
+        request is released rather than left there.  Safe to call more
+        than once.
         """
         with self._gate:
             self._stopped = True
             dropped = list(self._waiting)
             self._waiting.clear()
+            writing = self._writing
             self._gate.notify_all()
+        if writing is not None:
+            self.logger.debug(
+                "Waiting for %s, which had already begun", writing.what)
         for request in dropped:
             request._supersede()
         if self._thread.is_alive():

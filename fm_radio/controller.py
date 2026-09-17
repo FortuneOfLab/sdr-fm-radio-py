@@ -353,18 +353,42 @@ class FMReceiverController:
         should see a block from the old station tagged with the new one,
         which is what the generation on each block and the flush here are
         between them for.
+
+        The recordings stop taking samples before the frequency moves,
+        not after.  A recording is a file that claims a station, and the
+        SDR starts delivering the new one the moment the write lands -
+        stopping afterwards leaves however many blocks fell in the gap
+        recorded under the wrong name.  Stopping first can cost the last
+        fraction of a second of the old station, and if the write then
+        fails the recording has ended for a station the receiver never
+        left; a short file is a smaller harm than a wrong one.
         """
-        self.sdr_receiver.set_center_frequency(freq_hz)
-        self._flush_data_queue()
-        self.fm_demodulator.reset()
-        self.auto_gain.reset_counters()
-        self._close_the_recordings()
+        taken = self._stop_the_recordings_taking_samples()
+        try:
+            self.sdr_receiver.set_center_frequency(freq_hz)
+            self._flush_data_queue()
+            self.fm_demodulator.reset()
+            self.auto_gain.reset_counters()
+        finally:
+            self._close_the_recordings(taken)
 
-    def _close_the_recordings(self) -> None:
-        """End any recording, on a thread of its own.
+    def _stop_the_recordings_taking_samples(self) -> tuple[bool, bool]:
+        """Shut the door on both recordings, and come straight back.
 
-        A recording of one station should not run on into the next, but
-        closing one is a flush handshake with its worker and takes up to
+        A flag under a lock each; the flush, the close and the sidecar
+        are left for :meth:`_close_the_recordings`.
+
+        Returns:
+            Which of the two - audio, IQ - this call took, and therefore
+            which of them are owed a finish.
+        """
+        return (self.audio_output.begin_stopping_the_recording(),
+                self.sdr_receiver.begin_stopping_the_iq_recording())
+
+    def _close_the_recordings(self, taken: tuple[bool, bool]) -> None:
+        """Finish the recordings *taken* closed, on a thread of its own.
+
+        Closing one is a flush handshake with its worker and takes up to
         fifteen seconds.  That is not the device worker's to spend: every
         other write would queue behind it, and the gain the AGC wants
         next is not worth a quarter of a minute.
@@ -373,20 +397,34 @@ class FMReceiverController:
         finalising flags on the two recorders, which is what keeps a file
         from being left half written.
         """
-        if not (self.audio_output.recording or self.sdr_receiver.iq_recording):
+        if not any(taken):
             return
-        threading.Thread(target=self._close_the_recordings_now,
-                         name="RecordingClose", daemon=True).start()
-
-    def _close_the_recordings_now(self) -> None:
         try:
-            if self.audio_output.recording:
-                self.audio_output.stop_recording()
-            if self.sdr_receiver.iq_recording:
-                self.sdr_receiver.stop_iq_recording()
-        except Exception as e:                  # pragma: no cover - guard
-            self.logger.error("Could not close a recording after tuning: %s",
-                              e, exc_info=True)
+            threading.Thread(target=self._close_the_recordings_now,
+                             args=(taken,), name="RecordingClose",
+                             daemon=True).start()
+        except RuntimeError as e:               # pragma: no cover - guard
+            # No thread to be had.  Slow is better than a file left open
+            # and a finalising flag nobody will ever clear.
+            self.logger.error("Closing a recording on this thread: %s", e)
+            self._close_the_recordings_now(taken)
+
+    def _close_the_recordings_now(self, taken: tuple[bool, bool]) -> None:
+        audio, iq = taken
+        if audio:
+            try:
+                self.audio_output.finish_stopping_the_recording()
+            except Exception as e:              # pragma: no cover - guard
+                self.logger.error(
+                    "Could not close the recording after tuning: %s", e,
+                    exc_info=True)
+        if iq:
+            try:
+                self.sdr_receiver.finish_stopping_the_iq_recording()
+            except Exception as e:              # pragma: no cover - guard
+                self.logger.error(
+                    "Could not close the IQ recording after tuning: %s", e,
+                    exc_info=True)
 
     def get_frequency(self) -> float:
         """Return the current center frequency in Hz."""

@@ -300,3 +300,76 @@ def test_stopping_while_a_write_is_in_flight_still_releases_the_rest(worker):
     for request in queued:
         assert request.finished, "left somebody waiting on a dropped write"
         assert request.superseded
+
+
+def test_a_request_taken_but_not_begun_is_not_written_after_the_stop(worker):
+    """Off the queue is not yet at the device.
+
+    Between the two the worker holds a request that ``stop`` can no
+    longer find in the queue.  If that counted as begun, a write would
+    land on the device after shutdown had been told there would be no
+    more - which on the way out is a write to a handle that is being
+    closed underneath it.
+    """
+    # Hold the worker inside a write first, so the patch below is in
+    # place before it next looks at the queue.
+    release = threading.Event()
+    inside = threading.Event()
+    worker.submit(GAIN, "the one in flight", blocking(release, started=inside))
+    assert inside.wait(5), "the worker never started the first write"
+
+    taken = threading.Event()
+    go = threading.Event()
+    real_next = worker._next
+
+    def take_and_park():
+        request = real_next()
+        if request is not None:
+            taken.set()
+            go.wait(5)          # the stop happens in here
+        return request
+
+    worker._next = take_and_park
+
+    written = []
+    asked = worker.submit(TUNE, "Tuned to 80.0 MHz",
+                          lambda: written.append("Tuned to 80.0 MHz"))
+    release.set()
+    assert taken.wait(5), "the worker never took the request off the queue"
+
+    # Decided while the worker is parked with the request in hand, so
+    # the stop is certainly first.  The join times out; that is the
+    # point of the timeout.
+    worker.stop(timeout=0.1)
+    go.set()
+
+    assert asked.wait(5), "nobody ever answered for it"
+    assert asked.superseded, "answered as though it had been written"
+    assert not asked.failed
+    assert written == [], f"written to the device after the stop: {written}"
+
+
+def test_a_write_that_had_begun_is_let_finish(worker):
+    """The other side of the same boundary.
+
+    A write that is inside the driver cannot be taken back, and pulling
+    the handle out from under it is what this whole file exists to
+    avoid.  Stop waits for it instead.
+    """
+    release = threading.Event()
+    inside = threading.Event()
+    done = []
+    asked = worker.submit(TUNE, "Tuned to 80.0 MHz",
+                          blocking(release, done, "tune", started=inside))
+    assert inside.wait(5), "the write never started"
+
+    stopped = threading.Event()
+    threading.Thread(target=lambda: (worker.stop(timeout=5), stopped.set()),
+                     daemon=True).start()
+
+    assert not stopped.wait(0.2), "stop went past a write that was running"
+    release.set()
+
+    assert stopped.wait(5), "stop never returned"
+    assert done == ["tune"], "the write did not finish"
+    assert asked.finished and not asked.superseded and not asked.failed
