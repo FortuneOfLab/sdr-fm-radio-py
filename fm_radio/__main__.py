@@ -116,10 +116,13 @@ def main() -> None:
     log_level: int = logging.INFO
     log_file: str | None = None
     stations_path: str | None = None
+    use_gui: bool = False
 
     for i, arg in enumerate(sys.argv[1:], 1):
         if arg == '--light':
             light_mode = True
+        elif arg == '--gui':
+            use_gui = True
         elif arg == '--stations' and i + 1 < len(sys.argv):
             stations_path = sys.argv[i + 1]
         elif arg in ('--log', '--verbose', '-v'):
@@ -147,6 +150,22 @@ def main() -> None:
     try:
         controller = FMReceiverController(light=light_mode,
                                           stations_path=stations_path)
+        if use_gui:
+            # The window owns the main loop, so the receiver is started in
+            # the background and shut down when the window closes.
+            from fm_radio import gui
+            try:
+                # start_background() is inside the try: it starts the SDR
+                # thread before the processing thread, so a failure between
+                # the two leaves threads running that only cleanup() stops.
+                controller.start_background()
+                exit_code = gui.run(controller)
+            finally:
+                # The window sets quit_event when it closes, but it may
+                # never have opened; cleanup() sets it either way and waits
+                # for the threads before closing what they are using.
+                controller.cleanup()
+            sys.exit(exit_code)
         controller.start()
     except Exception as e:
         if enable_logging:

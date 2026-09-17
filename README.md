@@ -19,6 +19,7 @@ This project implements an **FM receiver system** using **Software-Defined Radio
 Ensure you have the following installed:
 
 - Python 3.9+ (3.11+ to use a `stations.toml` of your own)
+- PySide6, only for `--gui`
 - RTL-SDR device and its drivers
 
 ### Install Dependencies
@@ -38,6 +39,25 @@ pip install numpy scipy pyaudio samplerate pyrtlsdr numba
 ```bash
 python fm_receiver.py
 ```
+
+#### With the status window:
+
+```bash
+python fm_receiver.py --gui
+```
+
+The window shows what the receiver is doing — frequency and station, stereo
+state and pilot SNR, audio levels, gain, recording, and whether the
+processing thread is keeping up — and tunes, sets gain and starts recordings
+through the same controls the command line uses.
+
+It needs PySide6, which the receiver itself does not:
+
+```bash
+pip install PySide6
+```
+
+Without it, `--gui` says so and exits; everything else keeps working.
 
 #### Lightweight mode (optimized for lower CPU usage):
 
@@ -162,6 +182,8 @@ taken at face value — as a non-empty string it would otherwise mean `true`.
 
 - `fm_receiver.py` → Main script containing all functionality
 - `fm_radio/stations.py` → Station catalogue: bundled snapshot + user overrides
+- `fm_radio/telemetry.py` → Receiver state published for the GUI to read
+- `fm_radio/gui/` → PySide6 status window (optional)
 - `DeemphasisIIRFilter` → Implements FM **de-emphasis filtering**
 - `LowpassFilter`, `BandpassFilter` → Filter implementations for processing signals
 - `PLL` → Phase-Locked Loop for FM demodulation

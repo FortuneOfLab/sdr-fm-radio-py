@@ -62,6 +62,11 @@ _PROFILE_SUMMARY_INTERVAL_SEC: float = 60.0
 # Least time between warnings about a snapshot that will not build.  A
 # failure that persists is one problem, not one problem per block.
 _TELEMETRY_WARN_INTERVAL_SEC: float = 60.0
+# How long cleanup waits for a thread to notice it should stop.  The
+# processing thread blocks on the SDR queue for at most a second, so this
+# only has to outlast that; a thread that is still going after it is not
+# going to be waited for indefinitely.
+_THREAD_JOIN_TIMEOUT_SEC: float = 3.0
 
 
 class _BlockProfiler:
@@ -656,41 +661,54 @@ class FMReceiverController:
         finally:
             self.logger.info("Processing thread stopped")
 
+    def start_background(self) -> None:
+        """Start the SDR and processing threads and return.
+
+        Everything :meth:`start` does except run a user interface, so a front
+        end with its own event loop can take that part over.  The caller owns
+        :meth:`cleanup` from here on.
+        """
+        self.logger.info("Starting FM Receiver Controller")
+
+        # Pre-compile Numba / FFT paths before the SDR delivers samples so
+        # the first block does not stall the realtime path while JIT
+        # compilation runs.
+        self._prewarm_jit()
+
+        sdr_thread = threading.Thread(target=self.sdr_receiver.start, daemon=True)
+        sdr_thread.start()
+        self.threads.append(sdr_thread)
+
+        proc_thread = threading.Thread(target=self.processing_thread, daemon=True)
+        proc_thread.start()
+        self.threads.append(proc_thread)
+
+        self.logger.info("FM Receiver started successfully")
+
+    def _announce(self) -> None:
+        """Print the banner the command line starts with."""
+        if self.light:
+            print("FM Receiver (Light) started.")
+            print(f"SDR sample_rate: {self.sdr_receiver.sample_rate:.0f} Hz, Audio: {self.audio_output.output_rate} Hz")
+        else:
+            print(f"SDR sample_rate: {self.sdr_receiver.sample_rate:.0f} Hz, Composite: {self.fm_demodulator.composite_rate:.0f} Hz, Audio: {self.audio_output.output_rate} Hz")
+            station = self.current_station()
+            print(f"Default station: "
+                  f"{self.sdr_receiver.get_center_frequency()/1e6:.1f} MHz"
+                  + (f" ({station.name})" if station else ""))
+            print("Stereo demodulation enabled.")
+            print("Commands: q, list, <freq>, stereo on/off, record start/stop, iqrec start/stop, agc on/off, gain <value>, etc.")
+        print("Auto gain control: ON")
+
     def start(self) -> None:
-        """Start all threads and begin the main loop."""
+        """Start the receiver and run the command line until it quits."""
         try:
-            self.logger.info("Starting FM Receiver Controller")
-
-            # Pre-compile Numba / FFT paths before the SDR delivers
-            # samples so the first block does not stall the realtime
-            # path while JIT compilation runs.
-            self._prewarm_jit()
-
-            sdr_thread = threading.Thread(target=self.sdr_receiver.start, daemon=True)
-            sdr_thread.start()
-            self.threads.append(sdr_thread)
-
-            proc_thread = threading.Thread(target=self.processing_thread, daemon=True)
-            proc_thread.start()
-            self.threads.append(proc_thread)
-
-            if self.light:
-                print("FM Receiver (Light) started.")
-                print(f"SDR sample_rate: {self.sdr_receiver.sample_rate:.0f} Hz, Audio: {self.audio_output.output_rate} Hz")
-            else:
-                print(f"SDR sample_rate: {self.sdr_receiver.sample_rate:.0f} Hz, Composite: {self.fm_demodulator.composite_rate:.0f} Hz, Audio: {self.audio_output.output_rate} Hz")
-                station = self.current_station()
-                print(f"Default station: "
-                      f"{self.sdr_receiver.get_center_frequency()/1e6:.1f} MHz"
-                      + (f" ({station.name})" if station else ""))
-                print("Stereo demodulation enabled.")
-                print("Commands: q, list, <freq>, stereo on/off, record start/stop, iqrec start/stop, agc on/off, gain <value>, etc.")
-            print("Auto gain control: ON")
+            self.start_background()
+            self._announce()
 
             # Start CLI thread after startup messages to avoid interleaving
             self.cmd_interface.start()
-
-            self.logger.info("FM Receiver started successfully, entering main loop")
+            self.logger.info("Entering main loop")
 
             try:
                 while not self.quit_event.is_set():
@@ -705,14 +723,41 @@ class FMReceiverController:
             self.cleanup()
 
     def cleanup(self) -> None:
-        """Cleanup all resources."""
+        """Stop the receiver and release what it was using.
+
+        Sets ``quit_event`` first and waits for the threads it started: the
+        processing thread hands blocks to the audio output, and closing that
+        underneath it would be using a stream that has already gone.  Safe to
+        call twice, and safe to call on a receiver that never fully started.
+        """
         try:
             self.logger.info("Cleaning up FM Receiver Controller")
-            self.sdr_receiver.stop()
-            self.audio_output.cleanup()
+            # Whoever is shutting us down may not have asked the threads to
+            # stop - a window that failed to open, for one - and everything
+            # below is something they are still using.
+            self.quit_event.set()
+            # The gain worker writes to the SDR from its own thread, so it
+            # goes before the device it writes to.  Each resource also
+            # refuses use once closed, because a bounded join cannot promise
+            # that every thread has finished.
             self.auto_gain.stop()
+            self.sdr_receiver.stop()
+            self._join_threads()
+            self.audio_output.cleanup()
             self.logger.info("FM Receiver cleanup completed")
             print("Exiting FM Receiver.")
         except Exception as e:
             self.logger.error(f"Error during cleanup: {e}", exc_info=True)
             print("Error during cleanup - see log for details.")
+
+    def _join_threads(self) -> None:
+        """Wait for the started threads, warning about any that will not stop."""
+        for thread in self.threads:
+            if thread is threading.current_thread():
+                continue
+            thread.join(timeout=_THREAD_JOIN_TIMEOUT_SEC)
+            if thread.is_alive():
+                self.logger.warning(
+                    "%s did not stop within %.0f s; carrying on with cleanup",
+                    thread.name, _THREAD_JOIN_TIMEOUT_SEC)
+        self.threads = [t for t in self.threads if t.is_alive()]
