@@ -21,7 +21,6 @@ from fm_radio.telemetry import SILENCE_DBFS, StatusSnapshot
 pytest.importorskip("PySide6.QtWidgets", reason="the GUI is optional")
 
 from PySide6.QtCore import Qt                                  # noqa: E402
-from PySide6.QtWidgets import QApplication                     # noqa: E402
 
 from fm_radio.gui.main_window import (                         # noqa: E402
     METER_FLOOR_DBFS, REFRESH_INTERVAL_MS, ReceiverWindow, _level_percent,
@@ -138,19 +137,6 @@ def snapshot(**overrides) -> StatusSnapshot:
     )
     defaults.update(overrides)
     return StatusSnapshot(**defaults)
-
-
-@pytest.fixture(scope="session")
-def qt_app(tmp_path_factory):
-    """One offscreen QApplication for the session.
-
-    Qt allows only one, and destroying it between tests is fragile; the
-    windows are closed individually instead.
-    """
-    import os
-    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    app = QApplication.instance() or QApplication([])
-    yield app
 
 
 @pytest.fixture

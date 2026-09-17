@@ -9,6 +9,7 @@ must never touch real hardware even on a developer machine that has it.
 
 from __future__ import annotations
 
+import os
 import sys
 import threading
 import types
@@ -190,6 +191,22 @@ _install_fake_rtlsdr()
 # ----------------------------------------------------------------------
 # Common fixtures
 # ----------------------------------------------------------------------
+
+@pytest.fixture(scope="session")
+def qt_app():
+    """One offscreen QApplication for the session.
+
+    Qt allows only one, and the platform has to be chosen before it is
+    built: a runner with no display aborts the process rather than
+    failing a test, and the abort takes the whole run with it.  Shared
+    from here so that whichever test file reaches Qt first sets it up the
+    same way - a second file building its own found the platform already
+    chosen, and on CI that was the wrong one.
+    """
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    QApplication = pytest.importorskip("PySide6.QtWidgets").QApplication
+    yield QApplication.instance() or QApplication([])
+
 
 @pytest.fixture
 def stalling_samples():

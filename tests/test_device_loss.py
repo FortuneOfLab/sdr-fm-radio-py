@@ -167,13 +167,11 @@ class _FakeController:
         return False
 
 
-def test_the_window_says_why_it_stopped():
+def test_the_window_says_why_it_stopped(qt_app):
     """A window that keeps showing the last reading is a lie."""
-    pytest.importorskip("PySide6.QtWidgets")
     from fm_radio.gui.main_window import ReceiverWindow
-    from PySide6.QtWidgets import QApplication
 
-    app = QApplication.instance() or QApplication([])
+    app = qt_app
     controller = _FakeController()
     window = ReceiverWindow(controller)
     try:
@@ -364,17 +362,15 @@ def test_leaving_on_purpose_says_so(receiver, monkeypatch):
 # A device that goes before the window is built
 # ----------------------------------------------------------------------
 
-def test_the_window_opens_even_if_the_device_went_first():
+def test_the_window_opens_even_if_the_device_went_first(qt_app):
     """start_background() then an unplug, both before the window exists.
 
     The window is what is going to say why, so it has to survive being
     built into that situation.
     """
-    pytest.importorskip("PySide6.QtWidgets")
     from fm_radio.gui.main_window import ReceiverWindow
-    from PySide6.QtWidgets import QApplication
 
-    app = QApplication.instance() or QApplication([])
+    app = qt_app
     controller = _FakeController()
     controller.device_failure = "LIBUSB_ERROR_NOT_FOUND (-5)"
 
@@ -395,17 +391,15 @@ def test_the_window_opens_even_if_the_device_went_first():
 # What the window does about the recording that was running
 # ----------------------------------------------------------------------
 
-def test_the_window_frees_the_device_without_being_closed():
+def test_the_window_frees_the_device_without_being_closed(qt_app):
     """A recording must not sit half-written until somebody closes a window.
 
     The record buttons are disabled by then, so nothing else is going to
     end it, and the audio stream has nothing left to play.
     """
-    pytest.importorskip("PySide6.QtWidgets")
     from fm_radio.gui.main_window import ReceiverWindow
-    from PySide6.QtWidgets import QApplication
 
-    app = QApplication.instance() or QApplication([])
+    app = qt_app
     controller = _FakeController(recording=True)
     window = ReceiverWindow(controller)
     try:
@@ -422,13 +416,11 @@ def test_the_window_frees_the_device_without_being_closed():
         app.processEvents()
 
 
-def test_freeing_the_device_does_not_block_the_window():
+def test_freeing_the_device_does_not_block_the_window(qt_app):
     """cleanup() has bounded waits; a frozen window explains nothing."""
-    pytest.importorskip("PySide6.QtWidgets")
     from fm_radio.gui.main_window import ReceiverWindow
-    from PySide6.QtWidgets import QApplication
 
-    app = QApplication.instance() or QApplication([])
+    app = qt_app
     controller = _FakeController(recording=True)
     started = threading.Event()
     release = threading.Event()
@@ -457,13 +449,11 @@ def test_freeing_the_device_does_not_block_the_window():
         app.processEvents()
 
 
-def test_the_device_is_freed_once_however_often_refresh_runs():
+def test_the_device_is_freed_once_however_often_refresh_runs(qt_app):
     """refresh() is on a timer and is called after anything that changes."""
-    pytest.importorskip("PySide6.QtWidgets")
     from fm_radio.gui.main_window import ReceiverWindow
-    from PySide6.QtWidgets import QApplication
 
-    app = QApplication.instance() or QApplication([])
+    app = qt_app
     controller = _FakeController(recording=True)
     window = ReceiverWindow(controller)
     try:
@@ -586,18 +576,16 @@ def test_a_broken_log_does_not_stop_the_sdr_thread_either(unpluggable,
             assert not thread.is_alive(), f"{thread.name} outlived the device"
 
 
-def test_the_recording_line_does_not_outlive_the_recording():
+def test_the_recording_line_does_not_outlive_the_recording(qt_app):
     """A status line saying "recording audio" about a closed file.
 
     Observed on hardware: everything else went to "--" and the recording
     line kept its last sentence, because the disconnected view returns
     before refresh() gets to the recording.
     """
-    pytest.importorskip("PySide6.QtWidgets")
     from fm_radio.gui.main_window import ReceiverWindow
-    from PySide6.QtWidgets import QApplication
 
-    app = QApplication.instance() or QApplication([])
+    app = qt_app
     controller = _FakeController(recording=True)
     window = ReceiverWindow(controller)
     try:
@@ -623,13 +611,11 @@ def test_the_recording_line_does_not_outlive_the_recording():
         app.processEvents()
 
 
-def test_the_recording_line_says_so_while_the_file_is_still_closing():
+def test_the_recording_line_says_so_while_the_file_is_still_closing(qt_app):
     """For that moment there really is still a recording open."""
-    pytest.importorskip("PySide6.QtWidgets")
     from fm_radio.gui.main_window import ReceiverWindow
-    from PySide6.QtWidgets import QApplication
 
-    app = QApplication.instance() or QApplication([])
+    app = qt_app
     controller = _FakeController(recording=True)
     started = threading.Event()
     release = threading.Event()
@@ -663,13 +649,11 @@ def test_the_recording_line_says_so_while_the_file_is_still_closing():
         app.processEvents()
 
 
-def test_nothing_was_recording_and_the_window_goes_quiet_at_once():
+def test_nothing_was_recording_and_the_window_goes_quiet_at_once(qt_app):
     """No recording to follow out, so no reason to keep refreshing."""
-    pytest.importorskip("PySide6.QtWidgets")
     from fm_radio.gui.main_window import ReceiverWindow
-    from PySide6.QtWidgets import QApplication
 
-    app = QApplication.instance() or QApplication([])
+    app = qt_app
     controller = _FakeController()
     window = ReceiverWindow(controller)
     try:
