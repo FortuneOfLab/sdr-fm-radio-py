@@ -44,7 +44,10 @@ The rules, in short:
   close - so the pointer is never freed between a liveness check and the
   call that uses it.
 * A close asked for while the read is running cancels the read and waits
-  for it, bounded.
+  for it, bounded.  One asked for *by* the read - pyrtlsdr closing after a
+  failed read, or the SDR callback asking to stop - cannot wait for it, so
+  it only asks for the cancel and leaves the close to
+  :meth:`DeviceHandle.finished_reading`.
 * Every one of those waits can run out, and when it does the close is not
   made.  It is remembered, and the next operation to finish with the
   device makes it instead.
@@ -362,7 +365,9 @@ class DeviceHandle:
         from inside a control write or a failed async read, and what the
         receiver calls on the way out.  It waits - bounded - for each of
         the things that must be true first, because for all of those
-        callers the close is the point of the call.
+        callers the close is the point of the call.  The exception is a
+        call from the reading thread, which cannot wait for the read
+        without waiting for itself; see :meth:`_close_now`.
 
         :meth:`retry_pending_close` is the form that does not wait.
         """
@@ -372,17 +377,37 @@ class DeviceHandle:
         """Body of the close.  See :meth:`close`."""
         if self.closed.is_set():
             return
+        if not getattr(self.device, "device_opened", True):
+            # The driver closed it for us on the way out of a call that
+            # failed.  There is nothing left to free, and reaching for it
+            # would be reaching into memory that has been given back.
+            self.logger.warning(
+                "The driver has already closed the SDR; nothing to close")
+            self.note_closed_by_driver()
+            return
         # Somebody has decided the device is going: this caller, or
         # pyrtlsdr from inside a call that failed.  Either way nothing new
         # should reach it from here, whether or not the close itself lands
         # this time - a handle that has been freed is worse than one that
         # is merely on its way out.
         self.closing.set()
-        # A close from inside the read is a read that has already ended:
-        # that is why pyrtlsdr is closing.  Waiting for it here would be
-        # waiting for this thread.
-        if (threading.current_thread() is not self._reading_thread
-                and self.sampling_active.is_set()):
+        if threading.current_thread() is self._reading_thread:
+            # The request comes from inside the read: pyrtlsdr closing
+            # after rtlsdr_read_async returned an error, or something in
+            # the SDR callback asking to stop.  From out here those look
+            # the same, and only one of them is safe to act on, so neither
+            # is.  This thread is the one that has to return before the
+            # read can end, so it can neither wait for the read nor free a
+            # handle librtlsdr may still be inside: rtlsdr_close waits for
+            # the async read to finish, and the read cannot finish while
+            # its own callback is stuck in the close.
+            #
+            # Ask for the cancel and leave.  finished_reading() makes the
+            # close, once, when the read has actually returned.
+            self._ask_the_read_to_stop()
+            self._defer_close("the close was asked for from inside the read")
+            return
+        if self.sampling_active.is_set():
             if not wait:
                 self._defer_close("the async read is still running")
                 return
@@ -423,7 +448,12 @@ class DeviceHandle:
         """Remember a close that could not be made, and say so once."""
         if not self.close_pending:
             self.close_pending = True
-            self.logger.error(
+            # A warning rather than an error: the handle is intact, the
+            # request is kept, and the next operation to finish with the
+            # device makes good on it.  The errors in here are for the
+            # things that do not recover - a device that stops answering
+            # a cancel, a cancel that cannot be reached at all.
+            self.logger.warning(
                 "Not closing the SDR: %s. The handle stays open and valid; "
                 "the close is retried when the device is free, and the "
                 "process releases the handle on exit.", because)
