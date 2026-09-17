@@ -124,10 +124,19 @@ class ReceiverWindow(QMainWindow):
         # this window has been built and shown.
         # Started once when the device goes; see _free_the_device.
         self._releasing: threading.Thread | None = None
-        # The last device request whose outcome has been shown, and the
-        # frequency of a tune that has been asked for and not yet made.
-        self._last_outcome_shown: int = 0
+        # Where the tuner is going, which is not where it is: a write
+        # takes 60 ms and a step asked for during one has to start from
+        # the frequency the last step asked for, not from the one the
+        # receiver is still on.  None when nothing is on its way.
         self._tuning_to: float | None = None
+        # The writes this window has asked for and not yet reported on.
+        # Watching these rather than the worker's last finished request:
+        # that one can be somebody else's, and a gain landing between two
+        # refreshes would otherwise hide a tune that is still going.
+        self._asked_for: list = []
+        # Whether the notice on screen is one of ours about a tune in
+        # flight, which stops being worth showing the moment it lands.
+        self._saying_tuning: bool = False
         # Whether a recording was running when the device went.  Asked
         # once, before the release starts, because the release answers it
         # differently long before it is finished; see
@@ -265,16 +274,30 @@ class ReceiverWindow(QMainWindow):
 
         The write is 60 ms of USB on a device that is answering, so this
         does not wait for it: what went wrong, if anything did, arrives
-        on the next refresh through the worker's latest request.  Until
-        then the reading on screen is the station the receiver is still
-        on, which is the truth.
+        on a later refresh, through the request this keeps hold of.
+        Until then the reading on screen is the station the receiver is
+        still on, which is the truth.
         """
         self._tuning_to = freq_hz
-        self.controller.tune(freq_hz)
+        self._watch(self.controller.tune(freq_hz))
         self.refresh()
 
+    def _watch(self, request) -> None:
+        """Keep a request until there is something to say about it."""
+        if request is not None:
+            self._asked_for.append(request)
+
     def _step(self, delta_hz: float) -> None:
-        self._tune(self.controller.get_frequency() + delta_hz)
+        """Move by one step from wherever the tuner is heading.
+
+        Two clicks in the time one write takes are two steps, not one.
+        The receiver still reports the frequency it is on until the first
+        write lands, so stepping from that would ask for the same place
+        twice and end up half as far as the user asked to go.
+        """
+        from_hz = (self._tuning_to if self._tuning_to is not None
+                   else self.controller.get_frequency())
+        self._tune(from_hz + delta_hz)
 
     def _preset_chosen(self, index: int) -> None:
         freq_hz = self._presets.itemData(index)
@@ -283,7 +306,7 @@ class ReceiverWindow(QMainWindow):
         self._presets.setCurrentIndex(0)
 
     def _auto_gain_toggled(self, checked: bool) -> None:
-        self.controller.set_agc_mode(checked)
+        self._watch(self.controller.set_agc_mode(checked))
         self._gain_slider.setEnabled(not checked)
 
     def _gain_moved(self, value: int) -> None:
@@ -303,7 +326,7 @@ class ReceiverWindow(QMainWindow):
     def _apply_gain(self, value: int) -> None:
         if self._auto_gain.isChecked():
             return
-        self.controller.set_gain(value / _GAIN_SCALE)
+        self._watch(self.controller.set_gain(value / _GAIN_SCALE))
 
     def _audio_recording_toggled(self, checked: bool) -> None:
         if not checked:
@@ -472,28 +495,44 @@ class ReceiverWindow(QMainWindow):
         self._releasing.start()
 
     def _show_the_device_worker(self) -> None:
-        """Say what became of the last thing the window asked the SDR for.
+        """Say what became of the writes this window asked the SDR for.
+
+        Its own, not the worker's last finished request: that one may
+        have been asked for by the AGC, and a gain landing between two
+        refreshes would hide a tune that is still on its way - or worse,
+        answer for one that has not been made yet.
 
         Nothing waits for a device write any more, so this is where the
         answer turns up: a failure becomes a notice, and a tune that has
-        been asked for but not yet made says so rather than leaving the
+        been asked for and not yet made says so rather than leaving the
         window looking as though the button did nothing.
         """
-        worker = getattr(self.controller, "device_worker", None)
-        if worker is None:
-            return
-        latest = worker.latest
-        if latest is not None and latest.serial != self._last_outcome_shown:
-            self._last_outcome_shown = latest.serial
-            if latest.failed:
-                logger.error("%s failed: %s", latest.what, latest.error)
-                self._set_notice(f"{latest.what} failed: {latest.error}")
-        if self._tuning_to is not None:
-            if latest is not None and latest.kind == TUNE and latest.finished:
-                self._tuning_to = None
-            else:
-                self._set_notice(
-                    f"tuning to {self._tuning_to / 1e6:.1f} MHz...")
+        still_going = []
+        for request in self._asked_for:
+            if not request.finished:
+                still_going.append(request)
+                continue
+            if request.failed:
+                logger.error("%s failed: %s", request.what, request.error)
+                self._set_notice(f"{request.what} failed: {request.error}")
+                # Whatever is on the status line now, it is this, and it
+                # is worth its few seconds - the tuning line is not.
+                self._saying_tuning = False
+        self._asked_for = still_going
+
+        tuning = [r for r in still_going if r.kind == TUNE]
+        if tuning and self._tuning_to is not None:
+            self._set_notice(
+                f"tuning to {self._tuning_to / 1e6:.1f} MHz...")
+            self._saying_tuning = True
+        else:
+            self._tuning_to = None
+            if self._saying_tuning:
+                # "tuning to 80.1 MHz..." was true while it was; a notice
+                # normally sits for a few seconds so it can be read, and
+                # this one has nothing left to say the moment it lands.
+                self._saying_tuning = False
+                self._notice = None
 
     def _show_without_status(self) -> None:
         """Show what can be known without a snapshot: the tuner's own state."""

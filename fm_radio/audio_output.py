@@ -56,6 +56,12 @@ _RECORD_WORKER_SHUTDOWN = object()
 # on every callback, and the interesting part is that it is happening at
 # all, not each of the fifty a second.
 _UNDERRUN_LOG_INTERVAL_SEC: float = 5.0
+
+#: Longest shutdown waits for a recording that is being closed elsewhere.
+#: stop_recording is itself bounded at about fifteen seconds; past this
+#: something is wrong and the log should say so rather than the process
+#: hanging on the way out.
+_RECORDING_CLOSE_TIMEOUT_SEC: float = 20.0
 # Sentinel placed in the recording queue to mark the end of a session.
 # When the worker reaches it, every preceding chunk has been written;
 # stop_recording() can then safely close the wave file.
@@ -123,6 +129,12 @@ class AudioOutput(AudioOutputInterface):
         # matters; the lines are a sample of it.
         self._underrun_last_logged: float = 0.0
         self._underrun_logged_at: int = 0
+        # Set for as long as a recording is being closed: the flag above
+        # goes down first and the file stays open for the flush, the
+        # worker handshake, the close and the sidecar - up to fifteen
+        # seconds of a file that is still being written while nothing
+        # calls it a recording.  Shutdown waits for this, not for that.
+        self._finalising: threading.Event = threading.Event()
         # Set by cleanup().  A bounded join cannot promise that the thread
         # feeding us has stopped, so the stream defends itself rather than
         # trusting that nobody is left to call in.
@@ -377,6 +389,16 @@ class AudioOutput(AudioOutputInterface):
             # hold _enqueue_lock, any record() that has already passed
             # its flag check has also completed its put before us.
             self.recording = False
+            # From here the file is open and nothing calls it a
+            # recording.  Anybody who needs it finished waits on this.
+            self._finalising.set()
+        try:
+            self._finish_the_recording()
+        finally:
+            self._finalising.clear()
+
+    def _finish_the_recording(self) -> None:
+        """Flush what is queued, close the file and write the sidecar."""
 
         # Push a flush sentinel.  The worker writes every chunk before
         # the sentinel and then sets _flush_event.
@@ -585,6 +607,24 @@ class AudioOutput(AudioOutputInterface):
                     exc_info=True,
                 )
 
+    @property
+    def finalising(self) -> bool:
+        """True while a recording is being closed but is no longer one."""
+        return self._finalising.is_set()
+
+    def wait_for_the_recording_to_close(self, timeout: float) -> bool:
+        """Wait for a recording that is being closed somewhere else.
+
+        Returns False if it is still going by then, which is the caller's
+        cue to say so rather than to keep waiting.
+        """
+        deadline = time.monotonic() + timeout
+        while self._finalising.is_set():
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.01)
+        return True
+
     def cleanup(self) -> None:
         """Stop the audio stream and terminate PyAudio.
 
@@ -603,6 +643,19 @@ class AudioOutput(AudioOutputInterface):
             # than left behind with a worker that has already gone.  One
             # that starts after this is refused.
             with self._start_lock:
+                # A recording being closed somewhere else is still an
+                # open file: the flag went down when the closing started,
+                # not when it finished, so asking the flag would skip it
+                # and leave the file unfinished.
+                if self._finalising.is_set():
+                    self.logger.info(
+                        "Waiting for a recording that is still closing")
+                    if not self.wait_for_the_recording_to_close(
+                            _RECORDING_CLOSE_TIMEOUT_SEC):
+                        self.logger.error(
+                            "A recording has not finished closing after "
+                            "%.0f s; the file may be left unfinished",
+                            _RECORDING_CLOSE_TIMEOUT_SEC)
                 # Stop recording if active
                 if self.recording:
                     self.logger.info(

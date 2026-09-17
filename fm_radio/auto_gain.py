@@ -26,7 +26,7 @@ from fm_radio.constants import (
     AGC_WARMUP_SEC,
 )
 
-from fm_radio.device_worker import GAIN, GAIN_MODE, DeviceWorker
+from fm_radio.device_worker import GAIN, GAIN_MODE, DeviceWorker, Request
 
 if TYPE_CHECKING:
     from fm_radio.sdr_receiver import SDRReceiver
@@ -86,7 +86,7 @@ class AutoGainController:
     # Async USB worker (avoids blocking the processing thread)
     # ------------------------------------------------------------------
 
-    def _submit_async_gain(self, gain_db: float) -> None:
+    def _submit_async_gain(self, gain_db: float) -> "Request":
         """Ask the device worker for a gain change, and come back.
 
         The worker keeps only the newest request of each kind, so a burst
@@ -94,7 +94,7 @@ class AutoGainController:
         same coalescing this used to do for itself.
         """
         gain_db = float(gain_db)
-        self._worker.submit(
+        return self._worker.submit(
             GAIN, f"Auto gain applied {gain_db:.1f} dB",
             lambda: self._apply_gain(gain_db))
 
@@ -123,7 +123,7 @@ class AutoGainController:
         with self._lock:
             return self._enabled
 
-    def enable(self) -> None:
+    def enable(self) -> "Request":
         """Enable auto gain control (replaces hardware AGC).
 
         The desired gain is routed through ``_submit_async_gain`` so it
@@ -133,7 +133,7 @@ class AutoGainController:
         # Asked for rather than done here: this is called from the
         # window's own thread when somebody ticks Auto, and the write
         # costs 30 ms of USB on a device that is answering.
-        self._worker.submit(
+        asked = self._worker.submit(
             GAIN_MODE, "Gain mode set to manual",
             lambda: self._sdr.set_manual_gain_mode(True))
         with self._lock:
@@ -145,8 +145,11 @@ class AutoGainController:
             # and disable() — see notes there.
             self._submit_async_gain(AGC_GAIN_TABLE[self._gain_index] / 10.0)
         self.logger.info("Auto gain control enabled")
+        # The mode is what the user asked for; the gain that follows is
+        # this controller's own business.
+        return asked
 
-    def disable(self, manual_gain_db: float | None = None) -> None:
+    def disable(self, manual_gain_db: float | None = None) -> "Request":
         """Disable auto gain, optionally setting a fixed gain.
 
         After this call returns the device gain is pinned: any AGC
@@ -175,12 +178,13 @@ class AutoGainController:
             # earlier (update() also submits inside the same lock) —
             # the worker will therefore drain the AGC value and end
             # at final_gain.
-            self._submit_async_gain(final_gain)
+            asked = self._submit_async_gain(final_gain)
+        return asked
         self.logger.info(
             "Auto gain control disabled, gain pinned at %.1f dB", final_gain,
         )
 
-    def set_gain_manual(self, gain_db: float) -> None:
+    def set_gain_manual(self, gain_db: float) -> "Request | None":
         """Set gain explicitly (for CLI ``gain <value>`` command).
 
         Only effective when auto gain is disabled.  Updates the
@@ -191,7 +195,7 @@ class AutoGainController:
         """
         with self._lock:
             if self._enabled:
-                return
+                return None
             # Snap to nearest valid gain step
             gain_tenths = int(round(gain_db * 10))
             best_idx = 0
@@ -203,7 +207,7 @@ class AutoGainController:
                     best_idx = i
             self._gain_index = best_idx
             # Submit inside the lock to serialise with update() etc.
-            self._submit_async_gain(gain_db)
+            return self._submit_async_gain(gain_db)
 
     def reset_counters(self) -> None:
         """Reset gain to default and clear counters (e.g., after tuning).

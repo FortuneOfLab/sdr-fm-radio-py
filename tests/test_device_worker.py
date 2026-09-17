@@ -220,3 +220,83 @@ def test_a_wedged_write_does_not_hold_the_stop_for_ever(worker):
         assert elapsed < 3.0, f"stop took {elapsed:.1f} s"
     finally:
         wedged.set()
+
+
+def test_a_held_button_never_fills_the_queue(worker):
+    """Coalescing on the way in is what bounds it.
+
+    Coalescing only when the worker came back for more meant a burst
+    could fill the queue while it was busy, and the request the user
+    ended on - the only one worth making - was the one refused.
+    """
+    hold = a_worker_that_is_busy(worker)
+    try:
+        asked = [worker.submit(TUNE, f"tune {i}", lambda: None)
+                 for i in range(200)]
+
+        assert not any(r.failed for r in asked), (
+            "refused a request instead of replacing an older one")
+        assert all(r.superseded for r in asked[:-1])
+        assert not asked[-1].finished, "the last one should still be waiting"
+    finally:
+        hold.set()
+
+
+def test_only_one_of_each_kind_is_ever_waiting(worker):
+    """What the queue holds, rather than what comes out of it."""
+    hold = a_worker_that_is_busy(worker)
+    try:
+        for i in range(50):
+            worker.submit(TUNE, f"tune {i}", lambda: None)
+            worker.submit(GAIN, f"gain {i}", lambda: None)
+            worker.submit(GAIN_MODE, f"mode {i}", lambda: None)
+
+        with worker._gate:
+            waiting = list(worker._waiting)
+        assert len(waiting) == 3, [r.what for r in waiting]
+        assert {r.kind for r in waiting} == {TUNE, GAIN, GAIN_MODE}
+    finally:
+        hold.set()
+
+
+def test_asking_while_stopping_leaves_nobody_waiting(worker):
+    """The check and the queueing are one step with respect to stopping.
+
+    They were two, and a stop landing between them put the request into a
+    queue nothing would ever drain again - a caller who waited on it
+    waited for good.
+    """
+    asked: list = []
+    keep_going = threading.Event()
+    keep_going.set()
+
+    def ask_until_told_to_stop() -> None:
+        while keep_going.is_set():
+            asked.append(worker.submit(GAIN, "gain", lambda: None))
+
+    askers = [threading.Thread(target=ask_until_told_to_stop, daemon=True)
+              for _ in range(4)]
+    for thread in askers:
+        thread.start()
+    time.sleep(0.2)                     # let them get going
+
+    worker.stop()
+    keep_going.clear()
+    for thread in askers:
+        thread.join(timeout=10)
+
+    assert asked, "the askers never asked for anything"
+    unfinished = [r for r in asked if not r.finished]
+    assert not unfinished, f"{len(unfinished)} of {len(asked)} left waiting"
+
+
+def test_stopping_while_a_write_is_in_flight_still_releases_the_rest(worker):
+    hold = a_worker_that_is_busy(worker)
+    queued = [worker.submit(GAIN, f"gain {i}", lambda: None) for i in range(3)]
+
+    worker.stop(timeout=0.3)
+    hold.set()
+
+    for request in queued:
+        assert request.finished, "left somebody waiting on a dropped write"
+        assert request.superseded

@@ -358,10 +358,35 @@ class FMReceiverController:
         self._flush_data_queue()
         self.fm_demodulator.reset()
         self.auto_gain.reset_counters()
-        if self.audio_output.recording:
-            self.audio_output.stop_recording()
-        if self.sdr_receiver.iq_recording:
-            self.sdr_receiver.stop_iq_recording()
+        self._close_the_recordings()
+
+    def _close_the_recordings(self) -> None:
+        """End any recording, on a thread of its own.
+
+        A recording of one station should not run on into the next, but
+        closing one is a flush handshake with its worker and takes up to
+        fifteen seconds.  That is not the device worker's to spend: every
+        other write would queue behind it, and the gain the AGC wants
+        next is not worth a quarter of a minute.
+
+        Nobody waits for this here.  Shutdown does, through the
+        finalising flags on the two recorders, which is what keeps a file
+        from being left half written.
+        """
+        if not (self.audio_output.recording or self.sdr_receiver.iq_recording):
+            return
+        threading.Thread(target=self._close_the_recordings_now,
+                         name="RecordingClose", daemon=True).start()
+
+    def _close_the_recordings_now(self) -> None:
+        try:
+            if self.audio_output.recording:
+                self.audio_output.stop_recording()
+            if self.sdr_receiver.iq_recording:
+                self.sdr_receiver.stop_iq_recording()
+        except Exception as e:                  # pragma: no cover - guard
+            self.logger.error("Could not close a recording after tuning: %s",
+                              e, exc_info=True)
 
     def get_frequency(self) -> float:
         """Return the current center frequency in Hz."""
@@ -418,7 +443,7 @@ class FMReceiverController:
         """Return True if raw IQ recording is active."""
         return self.sdr_receiver.iq_recording
 
-    def set_agc_mode(self, enabled: bool) -> None:
+    def set_agc_mode(self, enabled: bool) -> "Request | None":
         """Enable or disable automatic gain control.
 
         When enabled, the auto gain controller monitors IQ peak
@@ -427,25 +452,32 @@ class FMReceiverController:
 
         Args:
             enabled: True to enable auto gain, False for manual mode.
+
+        Returns:
+            The device write this asked for, or None when it asked for
+            none.  The window watches it; nothing has to.
         """
         if enabled:
-            self.auto_gain.enable()
-        else:
-            self.auto_gain.disable()
+            return self.auto_gain.enable()
+        return self.auto_gain.disable()
 
     def get_gain(self) -> float:
         """Return the current gain value in dB."""
         return self.sdr_receiver.get_gain()
 
-    def set_gain(self, gain: float) -> None:
+    def set_gain(self, gain: float) -> "Request | None":
         """Set the manual gain value in dB.
 
         Only effective when auto gain is disabled.
 
         Args:
             gain: Gain value in dB.
+
+        Returns:
+            The device write this asked for, or None when auto gain is on
+            and the request was refused.
         """
-        self.auto_gain.set_gain_manual(gain)
+        return self.auto_gain.set_gain_manual(gain)
 
     def is_manual_gain(self) -> bool:
         """Return True if manual gain mode is active (auto gain disabled)."""

@@ -47,8 +47,8 @@ that way round.
 
 from __future__ import annotations
 
+import collections
 import logging
-import queue
 import threading
 import time
 from typing import Callable
@@ -67,8 +67,6 @@ _SLOW_WRITE_MS: float = 250.0
 #: How long the worker waits for something to do before looking at
 #: whether it has been asked to stop.
 _IDLE_TIMEOUT_SEC: float = 0.2
-
-_SHUTDOWN = object()
 
 
 class Request:
@@ -131,15 +129,19 @@ class DeviceWorker:
 
     Args:
         logger: Where the writes and their cost are reported.
-        queue_size: How many requests may be waiting.  Small on purpose:
-            they coalesce by kind, so a backlog means something is very
-            wrong rather than that the user is busy.
     """
 
-    def __init__(self, logger: logging.Logger, queue_size: int = 32) -> None:
+    def __init__(self, logger: logging.Logger) -> None:
         self.logger = logger
-        self._queue: queue.Queue[object] = queue.Queue(maxsize=queue_size)
-        self._stop: threading.Event = threading.Event()
+        # One lock over the whole queue, and over whether there is still
+        # a worker to drain it.  Coalescing happens on the way in rather
+        # than on the way out, which is what keeps the queue to at most
+        # one waiting request per kind however hard a button is held -
+        # and what stops a request being put in after the stop that was
+        # supposed to release everybody.
+        self._waiting: collections.deque[Request] = collections.deque()
+        self._gate: threading.Condition = threading.Condition()
+        self._stopped: bool = False
         self._latest: Request | None = None
         self._latest_lock: threading.Lock = threading.Lock()
         self._thread: threading.Thread = threading.Thread(
@@ -166,22 +168,29 @@ class DeviceWorker:
             The request, which the caller is free to ignore.
         """
         request = Request(kind, what, run)
-        if self._stop.is_set():
-            # Nothing is going to carry this out, and a caller that
-            # chooses to wait would wait for ever.
-            self.logger.debug("Not %s: the device worker has stopped", what)
-            request._supersede()
-            return request
-        try:
-            self._queue.put_nowait(request)
-        except queue.Full:
-            # Nothing is draining, which a coalescing queue should make
-            # impossible; say so rather than block the caller, which is
-            # the one thing this exists to avoid.
-            self.logger.error(
-                "Device request queue full; dropping %s", what)
-            request._finish(RuntimeError("the device worker is not keeping up"))
-            self._remember(request)
+        superseded = []
+        with self._gate:
+            if self._stopped:
+                # Nothing is going to carry this out, and a caller that
+                # chooses to wait would wait for ever.  Decided under the
+                # lock that stop() holds, so there is no moment between
+                # deciding and queueing for a stop to slip into.
+                self.logger.debug(
+                    "Not %s: the device worker has stopped", what)
+                request._supersede()
+                return request
+            # Anything of this kind still waiting was the same intent,
+            # expressed before the user changed their mind.  It goes, and
+            # the new one takes its place at the back - at the back, not
+            # in its place, so a gain asked for after a gain mode still
+            # happens after it.
+            for older in [r for r in self._waiting if r.kind == kind]:
+                self._waiting.remove(older)
+                superseded.append(older)
+            self._waiting.append(request)
+            self._gate.notify()
+        for older in superseded:
+            older._supersede()
         return request
 
     @property
@@ -199,66 +208,20 @@ class DeviceWorker:
     # ------------------------------------------------------------------
 
     def _loop(self) -> None:
-        while not self._stop.is_set():
-            batch = self._take_a_batch()
-            if batch is None:
-                continue
-            if batch is _SHUTDOWN:
-                break
-            for request in batch:
-                if self._stop.is_set():
-                    request._supersede()
-                    continue
-                self._carry_out(request)
-
-    def _take_a_batch(self):
-        """Wait for work, then take everything else already waiting.
-
-        Taking them together is what makes coalescing possible: five
-        tunes from a held button are in the queue at once, and only the
-        last of them is worth 60 ms of USB.
-        """
-        try:
-            first = self._queue.get(timeout=_IDLE_TIMEOUT_SEC)
-        except queue.Empty:
-            return None
-        if first is _SHUTDOWN:
-            return _SHUTDOWN
-        waiting = [first]
         while True:
-            try:
-                item = self._queue.get_nowait()
-            except queue.Empty:
-                break
-            if item is _SHUTDOWN:
-                self._drop(waiting)
-                return _SHUTDOWN
-            waiting.append(item)
-        return self._newest_of_each_kind(waiting)
+            request = self._next()
+            if request is None:
+                return
+            self._carry_out(request)
 
-    @staticmethod
-    def _newest_of_each_kind(waiting: list) -> list:
-        """Drop every request a later one of the same kind replaces.
-
-        The survivors keep the order of those later requests, so a gain
-        mode asked for before a gain still happens before it.
-        """
-        newest: dict[str, Request] = {}
-        for request in waiting:
-            newest[request.kind] = request
-        keep = set(id(request) for request in newest.values())
-        out = []
-        for request in waiting:
-            if id(request) in keep:
-                out.append(request)
-            else:
-                request._supersede()
-        return out
-
-    @staticmethod
-    def _drop(waiting: list) -> None:
-        for request in waiting:
-            request._supersede()
+    def _next(self) -> "Request | None":
+        """Wait for the next request, or None once there will be no more."""
+        with self._gate:
+            while not self._waiting and not self._stopped:
+                self._gate.wait(_IDLE_TIMEOUT_SEC)
+            if self._stopped:
+                return None
+            return self._waiting.popleft()
 
     def _carry_out(self, request: Request) -> None:
         started = time.perf_counter()
@@ -284,28 +247,21 @@ class DeviceWorker:
 
         Anything still queued is dropped rather than written: shutdown
         has already decided the device is going, and a tune landing on
-        the way out helps nobody.  Safe to call more than once.
+        the way out helps nobody.  Whoever was waiting on one of those is
+        released rather than left there.  Safe to call more than once.
         """
-        self._stop.set()
-        try:
-            self._queue.put_nowait(_SHUTDOWN)
-        except queue.Full:
-            pass
+        with self._gate:
+            self._stopped = True
+            dropped = list(self._waiting)
+            self._waiting.clear()
+            self._gate.notify_all()
+        for request in dropped:
+            request._supersede()
         if self._thread.is_alive():
             self._thread.join(timeout=timeout)
-        self._drain()
-
-    def _drain(self) -> None:
-        """Release anybody waiting on a request that will never be made."""
-        while True:
-            try:
-                item = self._queue.get_nowait()
-            except queue.Empty:
-                return
-            if isinstance(item, Request):
-                item._supersede()
 
     @property
     def running(self) -> bool:
         """True while the worker is still able to carry anything out."""
-        return self._thread.is_alive() and not self._stop.is_set()
+        with self._gate:
+            return self._thread.is_alive() and not self._stopped

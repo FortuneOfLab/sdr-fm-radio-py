@@ -2101,3 +2101,104 @@ def test_a_stop_from_the_callback_closes_once_however_often_it_is_asked(
 
     assert device.calls.count("close") == 1, device.calls
     assert "close during read" not in device.calls, device.calls
+
+
+# ----------------------------------------------------------------------
+# A recording being closed while shutdown goes past
+# ----------------------------------------------------------------------
+
+def test_cleanup_waits_for_a_recording_that_is_still_closing(receiver,
+                                                             tmp_path):
+    """Tuning ends a recording; shutdown must not overtake the ending.
+
+    stop_recording clears its flag first and then flushes, closes the
+    file and writes the sidecar.  cleanup asked the flag, saw no
+    recording, and came back with the file still open - the process then
+    went, leaving a WAV nothing had finished.
+    """
+    audio = receiver.audio_output
+    audio.start_recording(str(tmp_path / "left_open.wav"))
+    audio.record(np.zeros((2048, 2), dtype=np.float32))
+
+    closing = threading.Event()
+    finish = threading.Event()
+    real_wait = audio._flush_event.wait
+
+    def slow_flush(timeout=None):
+        closing.set()
+        finish.wait(10)
+        return real_wait(0)
+
+    audio._flush_event.wait = slow_flush
+    threading.Thread(target=audio.stop_recording, daemon=True).start()
+    assert closing.wait(5), "the recording never started closing"
+    assert not audio.recording, "the flag is meant to be down by now"
+    assert audio.finalising, "and the file still open"
+
+    done = threading.Event()
+    threading.Thread(target=lambda: (receiver.cleanup(), done.set()),
+                     daemon=True).start()
+    time.sleep(0.3)
+
+    assert not done.is_set(), "cleanup went past a file that was still open"
+
+    finish.set()
+
+    assert done.wait(20), "cleanup never finished"
+    assert audio.record_wave is None, "the file was left open"
+
+
+def test_cleanup_does_not_wait_for_ever_on_a_recording(receiver, tmp_path,
+                                                       monkeypatch):
+    """Bounded, like every other wait on the way out."""
+    monkeypatch.setattr("fm_radio.audio_output._RECORDING_CLOSE_TIMEOUT_SEC",
+                        0.3)
+    audio = receiver.audio_output
+    audio.start_recording(str(tmp_path / "stuck.wav"))
+
+    stuck = threading.Event()
+    audio._finalising.set()             # as though a close were under way
+
+    try:
+        started = time.monotonic()
+        receiver.cleanup()
+        elapsed = time.monotonic() - started
+
+        assert elapsed < 10.0, f"cleanup took {elapsed:.1f} s"
+    finally:
+        stuck.set()
+        audio._finalising.clear()
+
+
+def test_tuning_does_not_put_the_recording_close_on_the_device_worker(
+        receiver, tmp_path):
+    """Fifteen seconds of flush is not the device worker's to spend.
+
+    Every other write queues behind it, and the gain the AGC wants next
+    is not worth a quarter of a minute.
+    """
+    audio = receiver.audio_output
+    audio.start_recording(str(tmp_path / "while_tuning.wav"))
+
+    closing = threading.Event()
+    finish = threading.Event()
+    real_wait = audio._flush_event.wait
+
+    def slow_flush(timeout=None):
+        closing.set()
+        finish.wait(10)
+        return real_wait(0)
+
+    audio._flush_event.wait = slow_flush
+
+    try:
+        tuned = receiver.tune(81.3e6)
+        assert tuned.wait(5), "the tune waited for the recording to close"
+        assert closing.wait(5), "the recording was never closed"
+
+        # The worker is free while that goes on.
+        after = receiver.set_gain(20.0)
+        if after is not None:
+            assert after.wait(5), "a later write queued behind the recording"
+    finally:
+        finish.set()

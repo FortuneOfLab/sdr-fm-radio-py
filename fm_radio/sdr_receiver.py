@@ -52,6 +52,11 @@ from fm_radio.constants import (
 _IQ_RECORD_WORKER_SHUTDOWN = object()
 _IQ_RECORD_FLUSH_SENTINEL = object()
 
+#: Longest shutdown waits for an IQ recording that is being closed
+#: elsewhere.  stop_iq_recording is itself bounded at about fifteen
+#: seconds; past this something is wrong and the log should say so.
+_IQ_CLOSE_TIMEOUT_SEC: float = 20.0
+
 
 
 class SDRReceiver(SDRReceiverInterface):
@@ -90,6 +95,12 @@ class SDRReceiver(SDRReceiverInterface):
         # however many times cleanup runs.
         self._stop_lock: threading.Lock = threading.Lock()
         self.iq_recording: bool = False
+        # Set for as long as a recording is being closed: the flag above
+        # goes down first and the file stays open for the flush, the
+        # worker handshake, the close and the sidecar - up to fifteen
+        # seconds of a file that is still being written while nothing
+        # calls it a recording.  Shutdown waits for this, not for that.
+        self._iq_finalising: threading.Event = threading.Event()
         self.iq_record_wave: wave.Wave_write | None = None
         # ``iq_record_lock`` guards self.iq_record_wave (file open/close vs
         # in-flight writeframes inside the worker).  ``_iq_enqueue_lock``
@@ -459,6 +470,16 @@ class SDRReceiver(SDRReceiverInterface):
             # hold _iq_enqueue_lock, any callback that already passed
             # the flag check has also completed its put before us.
             self.iq_recording = False
+            # From here the file is open and nothing calls it a
+            # recording.  Anybody who needs it finished waits on this.
+            self._iq_finalising.set()
+        try:
+            self._finish_the_iq_recording()
+        finally:
+            self._iq_finalising.clear()
+
+    def _finish_the_iq_recording(self) -> None:
+        """Flush what is queued, close the file and write the sidecar."""
 
         # Push a flush sentinel.  The worker writes every block before
         # the sentinel and only then sets _iq_flush_event.
@@ -688,10 +709,35 @@ class SDRReceiver(SDRReceiverInterface):
             # already gone.  One that starts after this finds the handle
             # no longer usable and never opens a file at all.
             with self._iq_start_lock:
+                # A recording being closed somewhere else is still an
+                # open file; the flag went down when the closing started.
+                if self._iq_finalising.is_set():
+                    self.logger.info(
+                        "Waiting for an IQ recording that is still closing")
+                    if not self.wait_for_the_iq_recording_to_close(
+                            _IQ_CLOSE_TIMEOUT_SEC):
+                        self.logger.error(
+                            "An IQ recording has not finished closing after "
+                            "%.0f s; the file may be left unfinished",
+                            _IQ_CLOSE_TIMEOUT_SEC)
                 self.stop_iq_recording()
                 self._stop_iq_record_worker()
 
             self.handle.close()
+
+    @property
+    def iq_finalising(self) -> bool:
+        """True while an IQ recording is being closed but is no longer one."""
+        return self._iq_finalising.is_set()
+
+    def wait_for_the_iq_recording_to_close(self, timeout: float) -> bool:
+        """Wait for an IQ recording that is being closed somewhere else."""
+        deadline = time.monotonic() + timeout
+        while self._iq_finalising.is_set():
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.01)
+        return True
 
     def _stop_iq_record_worker(self) -> None:
         """Wake the IQ-recording worker and wait briefly for it to exit."""
