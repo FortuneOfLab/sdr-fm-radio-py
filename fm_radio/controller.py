@@ -768,8 +768,11 @@ class FMReceiverController:
           takes most of these, but a callback that had already read the
           old generation can put one in afterwards.  It is the old
           station and it is dropped - before anything below, because a
-          stale block must never be the one the new generation is
-          started on.
+          block that is not going to be processed has no business
+          changing the demodulator.  Asking the other question first
+          would reset for it and then throw it away, leaving
+          ``_generation_in_hand`` naming a tuning no block of which was
+          ever demodulated.
         * The first block of the new tuning.  The demodulator still has
           the last station's filter, PLL and resampler state in it, and
           that has to go before this block is processed, or the new
