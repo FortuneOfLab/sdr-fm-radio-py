@@ -32,11 +32,13 @@ input (station number / frequency) are handled via fallback logic.
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 import threading
 from typing import TYPE_CHECKING, Callable
 
+from fm_radio.console_input import ConsoleReader, console_reader
 from fm_radio.constants import RECORDINGS_DIR
 from fm_radio.exceptions import RecordingError
 
@@ -76,9 +78,16 @@ class CommandLineInterface(threading.Thread):
     ``_cmd_*`` method, keeping the main loop minimal.
     """
 
-    def __init__(self, controller: FMReceiverController) -> None:
+    def __init__(self, controller: FMReceiverController,
+                 reader: "ConsoleReader | None" = None) -> None:
         super().__init__(daemon=True)
         self.controller: FMReceiverController = controller
+        self.logger = logging.getLogger(__name__)
+        # How the next line is waited for.  Not plain input(): a thread
+        # blocked in that cannot be woken, and shutdown then has nothing
+        # to do but take the process down under it.  See
+        # fm_radio.console_input.
+        self.reader: ConsoleReader = reader or console_reader(self.logger)
 
         # Dispatch table: exact command string -> handler method.
         # Each handler receives the raw command string and returns
@@ -101,11 +110,32 @@ class CommandLineInterface(threading.Thread):
     # ------------------------------------------------------------------
 
     def run(self) -> None:
-        while not self.controller.quit_event.is_set():
-            self._print_help()
-            cmd = input().strip()
-            if not self._dispatch(cmd):
-                break
+        """Take commands until one of them - or shutdown - says stop.
+
+        A line of None means there is not one coming: stdin ended, or
+        :meth:`stop_reading` was called.  Either way this thread is
+        finished, and shutdown no longer has to leave it behind.
+        """
+        try:
+            while not self.controller.quit_event.is_set():
+                self._print_help()
+                cmd = self.reader.read_line()
+                if cmd is None:
+                    break
+                if not self._dispatch(cmd.strip()):
+                    break
+        finally:
+            self.reader.close()
+
+    def stop_reading(self) -> None:
+        """End the wait for a command that is not coming.
+
+        Called from shutdown, on another thread.  Whether it can
+        actually end a read that is already under way is
+        ``reader.can_be_stopped``; where it cannot, the caller needs
+        something blunter.
+        """
+        self.reader.stop()
 
     # ------------------------------------------------------------------
     # Dispatch

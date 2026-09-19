@@ -175,6 +175,12 @@ class _BlockProfiler:
             self._win_q_max = 0
 
 
+#: How long the command line is given to notice that it has been asked
+#: to stop.  Both ways of ending the wait are immediate - a byte down a
+#: pipe, a Return into the console's own buffer - so this is only how
+#: long to wait before concluding that neither was available.
+READER_STOP_TIMEOUT_SEC: float = 1.0
+
 #: How long a recording that is starting waits for a tuner that is in
 #: the middle of moving.  A healthy write is 60 ms; past this the device
 #: is not answering, and refusing the recording is better than freezing
@@ -1072,25 +1078,39 @@ class FMReceiverController:
             self._leave_past_the_blocked_reader()
 
     def _leave_past_the_blocked_reader(self) -> None:
-        """Go without waiting for a command that is never coming.
+        """End the wait for a command that is never coming, and go.
 
-        The command thread spends its life inside input(), and there is no
-        portable way to wake one blocked on a console.  Letting the
-        interpreter finalise around it aborts the process with
-        "_enter_buffered_busy: could not acquire lock for <stdin>" - after
-        a clean shutdown, which makes the shutdown look like it failed.
-        A person who has just unplugged their radio should not be shown a
-        fatal error for it.
+        The command thread spends its life waiting for a line.  Where
+        that wait can be ended - a POSIX stdin, a Windows console - it
+        is ended here, the thread returns, and the process leaves the
+        ordinary way, through the end of main().
 
-        cleanup() has already run, so Python's own finalisation has
-        nothing left to do for us: the device is closed, the audio stream
-        is closed, and every recording has been flushed and closed.  The
-        status says whether the receiver was asked to stop or stopped
-        because the device went - and so does the entry point, for the
-        times the command thread has already gone and this does nothing.
+        Where it cannot, the thread is still inside a read that nothing
+        can interrupt, and letting the interpreter finalise around it
+        aborts the process with "_enter_buffered_busy: could not acquire
+        lock for <stdin>" - after a clean shutdown, which makes the
+        shutdown look like it failed.  A person who has just unplugged
+        their radio should not be shown a fatal error for it.  So that
+        case, and only that case, still ends in os._exit.
+
+        cleanup() has already run either way, so Python's own
+        finalisation has nothing left to do for us: the device is
+        closed, the audio stream is closed, and every recording has been
+        flushed and closed.  The status says whether the receiver was
+        asked to stop or stopped because the device went - and so does
+        the entry point, for the times the command thread has already
+        gone and this does nothing.
         """
         if not self.cmd_interface.is_alive():
             return
+        self.cmd_interface.stop_reading()
+        self.cmd_interface.join(timeout=READER_STOP_TIMEOUT_SEC)
+        if not self.cmd_interface.is_alive():
+            self.logger.debug("The command line stopped when it was asked to")
+            return
+        self.logger.warning(
+            "The command line is still waiting for input that cannot be "
+            "interrupted; leaving without it")
         # Every one of these can fail on a closed pipe, and none of them is
         # a reason to stay.
         for flush in (sys.stdout.flush, sys.stderr.flush,
