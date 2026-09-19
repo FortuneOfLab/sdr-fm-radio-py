@@ -62,6 +62,13 @@ _UNDERRUN_LOG_INTERVAL_SEC: float = 5.0
 #: something is wrong and the log should say so rather than the process
 #: hanging on the way out.
 _RECORDING_CLOSE_TIMEOUT_SEC: float = 20.0
+
+#: Longest a new recording waits for the one before it to finish
+#: closing.  Shutdown can afford the twenty seconds above; this wait
+#: falls on whichever thread pressed the button, so past this, refusing
+#: says more than freezing.  A close that is going normally is over in
+#: the time it takes to write what is queued.
+_PREVIOUS_CLOSE_WAIT_SEC: float = 2.0
 # Sentinel placed in the recording queue to mark the end of a session.
 # When the worker reaches it, every preceding chunk has been written;
 # stop_recording() can then safely close the wave file.
@@ -330,6 +337,8 @@ class AudioOutput(AudioOutputInterface):
                 )
                 return
 
+            self._let_the_last_recording_go(filename)
+
             try:
                 wf = wave.open(filename, 'wb')
                 wf.setnchannels(channels)
@@ -370,6 +379,35 @@ class AudioOutput(AudioOutputInterface):
                 filename, self._record_meta, self.logger,
             )
             self.logger.info(f"Recording started: {filename}")
+
+    def _let_the_last_recording_go(self, filename: str) -> None:
+        """Wait for a recording that is still closing, or refuse this one.
+
+        A recording being closed is no longer a recording, but it still
+        owns the wave handle and the queue: it closes whatever is
+        installed by the time it reaches them, which would be the one
+        about to be started here.  Tuning starts that close on a thread
+        of its own, so the two can easily be a button press apart.
+
+        Args:
+            filename: What is being started, for the log.
+
+        Raises:
+            RecordingError: The last one is still closing after
+                ``_PREVIOUS_CLOSE_WAIT_SEC``.
+        """
+        if not self._finalising.is_set():
+            return
+        self.logger.info(
+            "Waiting for the previous recording to finish closing before "
+            "starting %s", filename)
+        if self.wait_for_the_recording_to_close(_PREVIOUS_CLOSE_WAIT_SEC):
+            return
+        self.logger.error(
+            "Refusing to start %s: the previous recording has been closing "
+            "for %.0f s", filename, _PREVIOUS_CLOSE_WAIT_SEC)
+        raise RecordingError(
+            "Cannot start recording: the previous recording is still closing")
 
     def stop_recording(self) -> None:
         """Stop recording, flush pending writes, and close the file.

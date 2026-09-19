@@ -57,6 +57,11 @@ _IQ_RECORD_FLUSH_SENTINEL = object()
 #: seconds; past this something is wrong and the log should say so.
 _IQ_CLOSE_TIMEOUT_SEC: float = 20.0
 
+#: Longest a new IQ recording waits for the one before it to finish
+#: closing; see AudioOutput._PREVIOUS_CLOSE_WAIT_SEC.  The wait is on
+#: whichever thread pressed the button, so it is short.
+_PREVIOUS_IQ_CLOSE_WAIT_SEC: float = 2.0
+
 
 
 class SDRReceiver(SDRReceiverInterface):
@@ -407,6 +412,8 @@ class SDRReceiver(SDRReceiverInterface):
                 )
                 return
 
+            self._let_the_last_iq_recording_go(filename)
+
             try:
                 wf = wave.open(filename, 'wb')
                 wf.setnchannels(2)           # I/Q
@@ -451,6 +458,32 @@ class SDRReceiver(SDRReceiverInterface):
                 filename, self._iq_record_meta, self.logger,
             )
             self.logger.info(f"IQ recording started: {filename}")
+
+    def _let_the_last_iq_recording_go(self, filename: str) -> None:
+        """Wait for an IQ recording that is still closing, or refuse this.
+
+        Mirrors AudioOutput._let_the_last_recording_go: one that is
+        being closed still owns the wave handle, and would close this
+        one instead of its own.
+
+        Raises:
+            RecordingError: The last one is still closing after
+                ``_PREVIOUS_IQ_CLOSE_WAIT_SEC``.
+        """
+        if not self._iq_finalising.is_set():
+            return
+        self.logger.info(
+            "Waiting for the previous IQ recording to finish closing before "
+            "starting %s", filename)
+        if self.wait_for_the_iq_recording_to_close(
+                _PREVIOUS_IQ_CLOSE_WAIT_SEC):
+            return
+        self.logger.error(
+            "Refusing to start %s: the previous IQ recording has been "
+            "closing for %.0f s", filename, _PREVIOUS_IQ_CLOSE_WAIT_SEC)
+        raise RecordingError(
+            "Cannot start IQ recording: the previous recording is still "
+            "closing")
 
     def stop_iq_recording(self) -> None:
         """Stop IQ recording, flush pending writes, and close the file.

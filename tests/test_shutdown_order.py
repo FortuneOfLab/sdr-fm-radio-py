@@ -2525,3 +2525,165 @@ def test_naming_and_starting_a_recording_can_be_one_step(receiver, tmp_path):
     assert receiver.audio_output.recording, "the recording never started"
     assert receiver.audio_output._record_meta["center_freq_hz"] == \
         pytest.approx(mhz * 1e6)
+
+
+def a_close_held_at_the_door(receiver):
+    """Hold the thread that finishes a recording, and hand back the key."""
+    let_it_close = threading.Event()
+    real_close = receiver._close_the_recordings_now
+
+    def held_close(*shut):
+        assert let_it_close.wait(10), "the test never let the close start"
+        return real_close(*shut)
+
+    receiver._close_the_recordings_now = held_close
+    return let_it_close
+
+
+def a_start_that_says_when_it_asks(owner, name):
+    """Note when a start asks whether the last recording is still closing.
+
+    That question is the whole fix, and it is asked before the new file
+    is opened - so a test that waits for it knows the starter is still
+    outside, whatever the scheduler is doing.
+    """
+    asked = threading.Event()
+    real = getattr(owner, name)
+
+    def watched(timeout):
+        asked.set()
+        return real(timeout)
+
+    setattr(owner, name, watched)
+    return asked
+
+
+def test_a_recording_that_is_closing_does_not_close_the_next_one(receiver,
+                                                                 tmp_path):
+    """The handle belongs to the close until the close has finished.
+
+    Tuning hands the flush and the close to a thread.  While that runs
+    the flag is down and nothing calls it a recording, so a new one
+    could be started - into the same handle field.  The old close then
+    reached it and closed the new recording's file, leaving a window
+    that still said "recording" and a WAV with nothing in it.
+    """
+    audio = receiver.audio_output
+    first = tmp_path / "first.wav"
+    second = tmp_path / "second.wav"
+    audio.start_recording(str(first))
+    audio.record(np.zeros((2048, 2), dtype=np.float32))
+
+    let_it_close = a_close_held_at_the_door(receiver)
+
+    tuned = receiver.tune(81.3e6)
+    assert tuned.wait(5), "the tune never landed"
+    assert not audio.recording and audio.finalising, \
+        "the first recording is meant to be closing"
+
+    asked = a_start_that_says_when_it_asks(
+        audio, "wait_for_the_recording_to_close")
+    starting = threading.Thread(target=receiver.start_recording,
+                                args=(str(second),), daemon=True)
+    starting.start()
+
+    assert asked.wait(5), \
+        "the start never asked whether the last recording was still closing"
+    assert not audio.recording, \
+        "the second recording was installed under the first one's close"
+
+    let_it_close.set()
+    starting.join(10)
+    assert not starting.is_alive(), "the second recording never started"
+
+    assert audio.recording, "the second recording is not running"
+    assert audio.record_wave is not None, \
+        "the first recording's close took the second one's file"
+
+    audio.record(np.ones((2048, 2), dtype=np.float32))
+    audio.stop_recording()
+
+    with wave.open(str(second), "rb") as f:
+        assert f.getnframes() == 2048, "nothing was written to the second file"
+    with wave.open(str(first), "rb") as f:
+        assert f.getnframes() == 2048, "the first file lost what was in it"
+
+
+def test_an_iq_recording_that_is_closing_does_not_close_the_next_one(
+        receiver, tmp_path):
+    """The IQ side shares a handle field the same way."""
+    sdr = receiver.sdr_receiver
+    first = tmp_path / "first_iq.wav"
+    second = tmp_path / "second_iq.wav"
+    sdr.start_iq_recording(str(first))
+
+    let_it_close = a_close_held_at_the_door(receiver)
+
+    tuned = receiver.tune(81.3e6)
+    assert tuned.wait(5), "the tune never landed"
+    assert not sdr.iq_recording and sdr.iq_finalising, \
+        "the first IQ recording is meant to be closing"
+
+    asked = a_start_that_says_when_it_asks(
+        sdr, "wait_for_the_iq_recording_to_close")
+    starting = threading.Thread(target=receiver.start_iq_recording,
+                                args=(str(second),), daemon=True)
+    starting.start()
+
+    assert asked.wait(5), \
+        "the start never asked whether the last one was still closing"
+    assert not sdr.iq_recording, \
+        "the second IQ recording was installed under the first one's close"
+
+    let_it_close.set()
+    starting.join(10)
+    assert not starting.is_alive(), "the second IQ recording never started"
+
+    assert sdr.iq_recording, "the second IQ recording is not running"
+    assert sdr.iq_record_wave is not None, \
+        "the first recording's close took the second one's file"
+
+
+def test_a_recording_is_refused_when_the_last_one_will_not_finish_closing(
+        receiver, tmp_path, monkeypatch):
+    """The wait is on the thread that pressed the button, so it is bounded."""
+    monkeypatch.setattr("fm_radio.audio_output._PREVIOUS_CLOSE_WAIT_SEC", 0.2)
+    audio = receiver.audio_output
+    audio.start_recording(str(tmp_path / "will_not_close.wav"))
+
+    let_it_close = a_close_held_at_the_door(receiver)
+
+    try:
+        assert receiver.tune(81.3e6).wait(5), "the tune never landed"
+        assert audio.finalising
+
+        started = time.monotonic()
+        with pytest.raises(RecordingError):
+            receiver.start_recording(str(tmp_path / "refused.wav"))
+        waited = time.monotonic() - started
+
+        assert waited < 5.0, f"the button was held for {waited:.1f} s"
+        assert audio.record_wave is not None, \
+            "the refused recording took the closing one's handle"
+    finally:
+        let_it_close.set()
+
+
+def test_an_iq_recording_is_refused_when_the_last_one_will_not_close(
+        receiver, tmp_path, monkeypatch):
+    """The same for IQ."""
+    monkeypatch.setattr("fm_radio.sdr_receiver._PREVIOUS_IQ_CLOSE_WAIT_SEC",
+                        0.2)
+    sdr = receiver.sdr_receiver
+    sdr.start_iq_recording(str(tmp_path / "will_not_close_iq.wav"))
+
+    let_it_close = a_close_held_at_the_door(receiver)
+
+    try:
+        assert receiver.tune(81.3e6).wait(5), "the tune never landed"
+        assert sdr.iq_finalising
+
+        with pytest.raises(RecordingError):
+            receiver.start_iq_recording(str(tmp_path / "refused_iq.wav"))
+    finally:
+        let_it_close.set()
