@@ -272,6 +272,13 @@ class FMReceiverController:
         # left.  Reentrant so that a caller which has already taken it
         # to choose the name can go on to start_recording.
         self._tuner_lock: threading.RLock = threading.RLock()
+        # Blocks dropped because the receiver had already moved on from
+        # the tuning they were captured under.  A handful per tune is
+        # ordinary; a stream of them would not be.
+        self._stale_blocks: int = 0
+        # Which tuning the demodulator is set up for, as the processing
+        # thread sees it; see _block_is_still_wanted.
+        self._generation_in_hand: int | None = None
         # Nationwide catalogue (bundled snapshot + the user's stations.toml)
         # and the short preset list the CLI tunes by number.  Loading
         # problems are printed as well as logged: logging is off unless
@@ -442,6 +449,13 @@ class FMReceiverController:
         fraction of a second of the old station, and if the write then
         fails the recording has ended for a station the receiver never
         left; a short file is a smaller harm than a wrong one.
+
+        The demodulator is not reset here.  Its state belongs to the
+        processing thread, which may be half way through a block that is
+        using it, and clearing the resampler history underneath that is
+        what "Resampler history no longer covers pending output" means.
+        The generation on each block tells that thread when the station
+        has changed; it resets its own demodulator then.
         """
         shut = RecordingsShut(self.audio_output, self.sdr_receiver,
                               self.logger)
@@ -453,7 +467,6 @@ class FMReceiverController:
                 shut.take()
                 self.sdr_receiver.set_center_frequency(freq_hz)
             self._flush_data_queue()
-            self.fm_demodulator.reset()
             self.auto_gain.reset_counters()
         finally:
             self._close_the_recordings(shut)
@@ -744,8 +757,54 @@ class FMReceiverController:
             timestamp=now,
         )
 
+    def _block_is_still_wanted(self, generation: int) -> bool:
+        """Decide what a block from *generation* is: stale, new, or more.
+
+        Runs on the processing thread, which owns the demodulator.  Three
+        things can come out of the queue after a tune, and they have to
+        be dealt with in this order:
+
+        * A block from before the retune.  The flush in :meth:`_tune_now`
+          takes most of these, but a callback that had already read the
+          old generation can put one in afterwards.  It is the old
+          station and it is dropped - before anything below, because a
+          stale block must never be the one the new generation is
+          started on.
+        * The first block of the new tuning.  The demodulator still has
+          the last station's filter, PLL and resampler state in it, and
+          that has to go before this block is processed, or the new
+          station arrives mixed with the tail of the old one.  Resetting
+          here rather than in :meth:`_tune_now` is the point: on this
+          thread there is no block in flight to pull the resampler
+          history out from under.
+        * Any block after that, which is just the next one.
+
+        Args:
+            generation: The tuning the block was captured under.
+
+        Returns:
+            True when the block should be processed.
+        """
+        if generation != self.sdr_receiver.tuning_generation:
+            self._stale_blocks += 1
+            self.logger.debug(
+                "Dropping a block from tuning %d; the receiver is on %d",
+                generation, self.sdr_receiver.tuning_generation)
+            return False
+        if generation != self._generation_in_hand:
+            self.fm_demodulator.reset()
+            self._generation_in_hand = generation
+            self.logger.debug("Demodulator reset for tuning %d", generation)
+        return True
+
     def _flush_data_queue(self) -> None:
-        """Clear any unprocessed samples from the SDR data queue."""
+        """Clear any unprocessed samples from the SDR data queue.
+
+        A best effort, not a guarantee: a callback that read the old
+        generation before the bump can still put its block in after
+        this.  The processing thread drops whatever this misses, by the
+        generation the block carries.
+        """
         while not self.sdr_receiver.data_queue.empty():
             try:
                 self.sdr_receiver.data_queue.get_nowait()
@@ -797,6 +856,11 @@ class FMReceiverController:
         profiler = _BlockProfiler(
             self.logger, self.sdr_receiver.data_queue.maxsize,
         )
+        # Cleared on entry as well as in __init__: a thread that is
+        # started a second time has a demodulator somebody else has been
+        # using.  None until the first block, which resets one that has
+        # nothing in it yet and costs nothing.
+        self._generation_in_hand = None
         try:
             while not self.quit_event.is_set():
                 try:
@@ -809,6 +873,9 @@ class FMReceiverController:
                     continue
                 except Exception as e:
                     self.logger.error(f"Error getting IQ samples from queue: {e}")
+                    continue
+
+                if not self._block_is_still_wanted(generation):
                     continue
 
                 # Snapshot queue depth at the moment we pulled this block.
