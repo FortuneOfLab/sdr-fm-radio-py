@@ -22,23 +22,41 @@ from fm_radio.console_input import (
 )
 
 
-def reading(reader):
-    """Start a read on its own thread and hand back what it produced.
+def reading(reader, waiting):
+    """Start a read and come back once it is actually waiting.
 
-    The list stays empty until the read returns, which is what the tests
-    wait on.
+    *waiting* has to be set from inside the wait itself, not from around
+    the call: a test that stops the reader before the read has got that
+    far is answered by the check at the top of read_line, and never asks
+    whether the waking works at all.
     """
     got: list = []
-    inside = threading.Event()
 
     def read():
-        inside.set()
         got.append(reader.read_line())
 
     thread = threading.Thread(target=read, name="Reading", daemon=True)
     thread.start()
-    assert inside.wait(5), "the read never started"
+    assert waiting.wait(5), "the read never reached the wait"
     return thread, got
+
+
+def waits_are_announced(reader):
+    """Make *reader* say when it is inside the wait, and hand back the event.
+
+    Wrapping the wait rather than the read: the point is the moment
+    after the reader has decided there is nothing to hand back and
+    before anything has woken it.
+    """
+    waiting = threading.Event()
+    real = reader._wait_for_something
+
+    def announced():
+        waiting.set()
+        return real()
+
+    reader._wait_for_something = announced
+    return waiting
 
 
 # ----------------------------------------------------------------------
@@ -71,15 +89,36 @@ def test_a_line_that_arrives_is_returned(pipe_reader):
 
 
 def test_a_read_that_is_stopped_comes_back_with_nothing(pipe_reader):
-    """The whole reason this module exists."""
+    """The whole reason this module exists.
+
+    The read is known to be inside the wait before the stop, so what
+    this measures is the waking, not the check on the way in.
+    """
     reader, _write_fd = pipe_reader
-    thread, got = reading(reader)
+    waiting = waits_are_announced(reader)
+    thread, got = reading(reader, waiting)
 
     reader.stop()
     thread.join(timeout=5)
 
     assert not thread.is_alive(), "the read never came back"
     assert got == [None]
+
+
+def test_a_line_left_over_is_not_handed_out_after_a_stop(pipe_reader):
+    """A stop during shutdown must not dispatch what was already typed.
+
+    Two commands can arrive in one chunk.  Returning the second after
+    the receiver has been told to stop runs it against a receiver that
+    is being taken apart.
+    """
+    reader, write_fd = pipe_reader
+    os.write(write_fd, b"stereo off\nrecord start\n")
+    assert reader.read_line() == "stereo off"
+
+    reader.stop()
+
+    assert reader.read_line() is None, "a queued command was still handed out"
 
 
 def test_a_stopped_reader_does_not_start_another_read(pipe_reader):
@@ -192,6 +231,23 @@ def test_one_chunk_can_hold_more_than_one_line(fed_by_hand):
     assert reader._take_a_line() is None
 
 
+def test_a_line_already_in_the_buffer_is_dropped_on_a_stop(fed_by_hand):
+    """The same as the pipe test above, where select cannot go.
+
+    Two commands can arrive in one chunk.  Handing the second one out
+    after the receiver has been told to stop runs it against a receiver
+    that is being taken apart.
+    """
+    reader, feed = fed_by_hand
+    feed(b"stereo off\nrecord start\n")
+
+    assert reader.read_line() == "stereo off"
+
+    reader.stop()
+
+    assert reader.read_line() is None, "a queued command was still handed out"
+
+
 def test_a_line_split_across_two_reads_is_one_line(fed_by_hand):
     reader, feed = fed_by_hand
     feed(b"rec")
@@ -237,9 +293,13 @@ def console_wake(monkeypatch):
     one does; the test never has to guess at timing.
     """
     key_pressed = threading.Event()
+    waiting = threading.Event()
     written: list[str] = []
 
     def fake_input(prompt=""):
+        # Set from inside the read, so a test knows the reader is
+        # really parked there before it asks for a stop.
+        waiting.set()
         assert key_pressed.wait(5), "nothing woke the read"
         return ""
 
@@ -249,12 +309,12 @@ def console_wake(monkeypatch):
 
     monkeypatch.setattr(builtins, "input", fake_input)
     reader = ConsoleWakeReader(write_a_return=write_a_return)
-    return reader, written, key_pressed
+    return reader, written, waiting
 
 
 def test_the_console_read_is_woken_by_a_return(console_wake):
-    reader, written, _key = console_wake
-    thread, got = reading(reader)
+    reader, written, waiting = console_wake
+    thread, got = reading(reader, waiting)
 
     reader.stop()
     thread.join(timeout=5)
@@ -455,3 +515,78 @@ def test_the_command_line_runs_what_it_is_given(light_controller):
 
     assert not cli.is_alive(), "'q' did not end the command line"
     assert light_controller.quit_event.is_set()
+
+
+# ----------------------------------------------------------------------
+# A pipe is a pipe, whoever ends up not using it
+# ----------------------------------------------------------------------
+
+def a_select_reader():
+    """A SelectReader and the fds to close after it."""
+    read_fd, write_fd = os.pipe()
+    return SelectReader(read_fd), (read_fd, write_fd)
+
+
+def test_the_command_line_makes_no_reader_until_it_runs(light_controller):
+    """A window builds a controller and never starts this thread.
+
+    Making the reader in __init__ took a pipe for a command line
+    nobody was going to type at, and nothing ever closed it.
+    """
+    assert light_controller.cmd_interface.reader is None
+
+
+def test_a_reader_that_was_never_used_is_closed_by_cleanup(light_controller):
+    """The window's case: built, never run, and then shut down."""
+    reader, fds = a_select_reader()
+    light_controller.cmd_interface.reader = reader
+
+    light_controller.cleanup()
+
+    try:
+        assert reader.closed, "the reader's pipe was left open"
+    finally:
+        for fd in fds:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+def test_a_reader_in_use_is_left_to_close_itself(light_controller):
+    """Closing it under the thread reading from it would be worse.
+
+    run() closes its own on the way out; this is only for the times
+    there is no thread.
+    """
+    reader = _ScriptedReader([])
+    cli = light_controller.cmd_interface
+    cli.reader = reader
+
+    cli.start()
+    try:
+        assert reader.waiting.wait(5), "the command line never waited"
+        cli.close_reader()
+
+        assert not reader.closed, "closed under the thread using it"
+    finally:
+        cli.stop_reading()
+        cli.join(timeout=5)
+
+    assert reader.closed, "run() did not close it on the way out"
+
+
+def test_closing_a_reader_twice_is_allowed(light_controller):
+    reader, fds = a_select_reader()
+    light_controller.cmd_interface.reader = reader
+    try:
+        light_controller.cmd_interface.close_reader()
+        light_controller.cmd_interface.close_reader()
+
+        assert reader.closed
+    finally:
+        for fd in fds:
+            try:
+                os.close(fd)
+            except OSError:
+                pass

@@ -1151,6 +1151,13 @@ class FMReceiverController:
             self.sdr_receiver.stop()
             self._join_threads()
             self.audio_output.cleanup()
+            # The command line holds a pipe for waking its own read.
+            # The window never starts that thread, and a start that
+            # failed never got there either, so the pipe would be left
+            # open behind a controller nobody is using any more.  A
+            # thread that is still running closes its own on the way
+            # out; this is for the times there is no thread.
+            self.cmd_interface.close_reader()
             self.logger.info("FM Receiver cleanup completed")
             print("Exiting FM Receiver.")
         except Exception as e:

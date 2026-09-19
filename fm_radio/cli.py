@@ -87,7 +87,15 @@ class CommandLineInterface(threading.Thread):
         # blocked in that cannot be woken, and shutdown then has nothing
         # to do but take the process down under it.  See
         # fm_radio.console_input.
-        self.reader: ConsoleReader = reader or console_reader(self.logger)
+        #
+        # None until run() needs one, because making one takes a pipe
+        # and the window never runs this thread at all - a controller
+        # built for the GUI would otherwise hold two file descriptors
+        # for a command line nobody was going to type at.
+        self.reader: ConsoleReader | None = reader
+        # Between run() installing a reader and shutdown asking it to
+        # stop, on two different threads.
+        self._reader_lock: threading.Lock = threading.Lock()
 
         # Dispatch table: exact command string -> handler method.
         # Each handler receives the raw command string and returns
@@ -116,16 +124,28 @@ class CommandLineInterface(threading.Thread):
         :meth:`stop_reading` was called.  Either way this thread is
         finished, and shutdown no longer has to leave it behind.
         """
+        reader = self._the_reader()
         try:
             while not self.controller.quit_event.is_set():
                 self._print_help()
-                cmd = self.reader.read_line()
+                cmd = reader.read_line()
                 if cmd is None:
+                    break
+                if self.controller.quit_event.is_set():
+                    # Asked to quit while this line was being typed.  A
+                    # command that arrives after that is not one to run.
                     break
                 if not self._dispatch(cmd.strip()):
                     break
         finally:
-            self.reader.close()
+            reader.close()
+
+    def _the_reader(self) -> ConsoleReader:
+        """The reader this thread will use, made if there is not one yet."""
+        with self._reader_lock:
+            if self.reader is None:
+                self.reader = console_reader(self.logger)
+            return self.reader
 
     def stop_reading(self) -> None:
         """End the wait for a command that is not coming.
@@ -133,9 +153,28 @@ class CommandLineInterface(threading.Thread):
         Called from shutdown, on another thread.  Whether it can
         actually end a read that is already under way is
         ``reader.can_be_stopped``; where it cannot, the caller needs
-        something blunter.
+        something blunter.  A reader that was never made is a thread
+        that never ran, and there is nothing to stop.
         """
-        self.reader.stop()
+        with self._reader_lock:
+            reader = self.reader
+        if reader is not None:
+            reader.stop()
+
+    def close_reader(self) -> None:
+        """Let go of a reader this thread is not going to use.
+
+        A reader holds a pipe.  ``run`` closes its own on the way out,
+        so this is for the times run never happened - the window, which
+        builds a controller and never starts this thread, and a startup
+        that failed before it could.
+        """
+        if self.is_alive():
+            return                      # run() closes its own
+        with self._reader_lock:
+            reader, self.reader = self.reader, None
+        if reader is not None:
+            reader.close()
 
     # ------------------------------------------------------------------
     # Dispatch

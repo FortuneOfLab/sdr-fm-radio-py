@@ -75,11 +75,17 @@ class ConsoleReader:
     def __init__(self, logger: logging.Logger | None = None) -> None:
         self.logger = logger or logging.getLogger(__name__)
         self._stopped: threading.Event = threading.Event()
+        self._closed: threading.Event = threading.Event()
 
     @property
     def stopped(self) -> bool:
         """True once :meth:`stop` has been called."""
         return self._stopped.is_set()
+
+    @property
+    def closed(self) -> bool:
+        """True once :meth:`close` has been called."""
+        return self._closed.is_set()
 
     def read_line(self) -> str | None:       # pragma: no cover - interface
         raise NotImplementedError
@@ -90,6 +96,7 @@ class ConsoleReader:
 
     def close(self) -> None:
         """Release whatever the reader is holding.  Safe to call twice."""
+        self._closed.set()
 
 
 class PlainReader(ConsoleReader):
@@ -141,29 +148,55 @@ class SelectReader(ConsoleReader):
         self._pending: bytes = b""
         self._at_the_end: bool = False
         self._wake_r, self._wake_w = os.pipe()
-        self._closed: threading.Event = threading.Event()
 
     def read_line(self) -> str | None:
-        import select
-
         while True:
+            # Before the buffer, not after it: a line that arrived in
+            # the same chunk as the one just returned is still a command
+            # nobody is going to run, and handing it back after a stop
+            # is how a command gets dispatched during shutdown.
+            if self.stopped or self._closed.is_set():
+                return None
             line = self._take_a_line()
             if line is not None:
                 return line
-            if self._at_the_end or self.stopped or self._closed.is_set():
+            if self._at_the_end:
                 return None
-            try:
-                ready, _, _ = select.select([self._fd, self._wake_r], [], [])
-            except (OSError, ValueError):
-                # stdin or the pipe has gone; either way there is no
-                # line coming.
-                return None
-            if self.stopped:
-                return None
-            if self._fd not in ready:
+            if not self._wait_for_something():
+                # Either the wake pipe went off, which only happens on a
+                # stop, or the wait itself failed.  The top of the loop
+                # tells those apart.
                 continue
-            if not self._take_what_is_there():
-                return self._take_a_line()      # whatever was left, or None
+            self._take_what_is_there()
+
+    def _wait_for_something(self) -> bool:
+        """Wait until stdin has something, or somebody says to stop.
+
+        Returns:
+            True when it is stdin that is ready, so there is something
+            to read.  False for every other way out - the wake pipe, a
+            select that failed - which the caller sorts out by looking
+            at the flags again.
+        """
+        import select
+
+        try:
+            ready, _, _ = select.select([self._fd, self._wake_r], [], [])
+        except (OSError, ValueError):
+            # stdin or the pipe has gone.  Either way there is no line
+            # coming, and saying so here is what stops the caller's loop
+            # going round again.
+            self._closed.set()
+            return False
+        if self._wake_r in ready:
+            # Taken out so a wake cannot be seen twice.  Only stop()
+            # writes here, and it sets the flag before it does, so the
+            # caller finds the flag set when it looks.
+            try:
+                os.read(self._wake_r, 64)
+            except OSError:             # pragma: no cover - best effort
+                pass
+        return self._fd in ready
 
     def _take_a_line(self) -> str | None:
         """The next complete line in hand, or None when there is not one."""
@@ -201,9 +234,10 @@ class SelectReader(ConsoleReader):
             self.logger.debug("Could not wake the console reader: %s", e)
 
     def close(self) -> None:
+        """Let go of the wake pipe.  Safe to call twice."""
         if self._closed.is_set():
             return
-        self._closed.set()
+        super().close()
         for fd in (self._wake_r, self._wake_w):
             try:
                 os.close(fd)
