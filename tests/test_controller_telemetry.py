@@ -8,6 +8,7 @@ the DSP.
 
 from __future__ import annotations
 
+import contextlib
 import threading
 import time
 
@@ -46,6 +47,19 @@ def enqueue(controller, block, generation: int | None = None) -> None:
     controller.sdr_receiver.data_queue.put((generation, block))
 
 
+def tuned(controller, freq_hz: float, timeout: float = 5.0) -> None:
+    """Tune, and wait for the write to have happened.
+
+    ``tune()`` hands the write to the device worker and comes back at
+    once, so anything that depends on the tuner having moved - the
+    generation, what the next block counts as - has to wait for the
+    request rather than for the call.
+    """
+    asked = controller.tune(freq_hz)
+    assert asked.wait(timeout), f"the tune to {freq_hz / 1e6:.1f} MHz never landed"
+    assert not asked.failed, f"the tune failed: {asked.error}"
+
+
 def run_blocks(controller, count: int, timeout: float = 10.0) -> None:
     """Feed *count* IQ blocks through the real processing loop."""
     block = iq_block(controller)
@@ -82,7 +96,7 @@ def test_a_snapshot_appears_once_blocks_are_processed(receiver):
 
 
 def test_the_snapshot_names_the_tuned_station(receiver):
-    receiver.tune(80.0e6)
+    tuned(receiver, 80.0e6)
     run_blocks(receiver, 4)
     assert receiver.get_status().station == "TOKYO FM"
 
@@ -369,26 +383,35 @@ def test_a_block_captured_before_a_retune_is_never_published(receiver):
     landing in that window tagged the old station's samples as belonging to
     the new one, and the snapshot went out with the new frequency against
     the old station's IQ peak.
+
+    Such a block is now dropped where it comes off the queue rather than
+    demodulated and then kept off the display: it is the old station's
+    audio, and there is nothing to be done with it.
     """
-    receiver.tune(80.0e6)
+    # Waited for, both of them: tune() asks the device worker and comes
+    # straight back, so reading the generation or queueing a block
+    # without waiting races the write and the bump that follows it.
+    tuned(receiver, 80.0e6)
     stale_generation = receiver.sdr_receiver.tuning_generation
 
     # tune() flushes the queue, so the block that matters is the one still in
     # flight in the SDR when the frequency changed: it lands after the flush,
     # carrying the tuning it was captured under.
-    receiver.tune(81.3e6)
+    tuned(receiver, 81.3e6)
+    assert receiver.sdr_receiver.tuning_generation != stale_generation
     enqueue(receiver, iq_block(receiver), stale_generation)
 
     receiver.telemetry.interval_sec = 0.0
     run_blocks(receiver, 0)                     # drain what is queued
 
-    assert receiver.telemetry.published_count == 1
+    assert receiver._stale_blocks == 1, "the pre-retune block was processed"
+    assert receiver.telemetry.published_count == 0
     assert receiver.get_status() is None, "the pre-retune block was published"
 
 
 def test_a_block_captured_after_a_retune_is_published(receiver):
-    receiver.tune(80.0e6)
-    receiver.tune(81.3e6)
+    tuned(receiver, 80.0e6)
+    tuned(receiver, 81.3e6)
     receiver.telemetry.interval_sec = 0.0
     run_blocks(receiver, 2)
 
@@ -414,7 +437,7 @@ def test_a_retune_while_a_block_is_in_flight_hides_its_snapshot(receiver):
         retuned.wait(5)                     # the tuner moves meanwhile
         return snapshot
 
-    receiver.tune(80.0e6)
+    tuned(receiver, 80.0e6)
     receiver._build_snapshot = stalled
     enqueue(receiver, iq_block(receiver))
     receiver.quit_event.clear()
@@ -422,7 +445,7 @@ def test_a_retune_while_a_block_is_in_flight_hides_its_snapshot(receiver):
     thread.start()
     try:
         assert built.wait(10), "the snapshot was never built"
-        receiver.tune(81.3e6)
+        tuned(receiver, 81.3e6)
         retuned.set()
         deadline = time.monotonic() + 5
         while (receiver.telemetry.published_count == 0
@@ -466,11 +489,11 @@ def test_the_station_lookup_is_not_repeated_per_snapshot(receiver, monkeypatch):
 def test_retuning_refreshes_the_cached_station_name(receiver):
     # Retuning no longer re-arms the deadline, so publish on every block.
     receiver.telemetry.interval_sec = 0.0
-    receiver.tune(80.0e6)
+    tuned(receiver, 80.0e6)
     run_blocks(receiver, 2)
     assert receiver.get_status().station == "TOKYO FM"
 
-    receiver.tune(81.3e6)
+    tuned(receiver, 81.3e6)
     run_blocks(receiver, 2)
     assert receiver.get_status().station == "J-WAVE"
 
@@ -483,7 +506,8 @@ def test_a_retune_during_the_sdr_callback_does_not_publish_the_old_station(
     stamping the wrong one. Here the retune lands inside the conversion the
     callback does, which is where the samples get their generation.
     """
-    receiver.tune(80.0e6)
+    tuned(receiver, 80.0e6)
+    was_on = receiver.sdr_receiver.tuning_generation
     receiver.telemetry.interval_sec = 0.0
     samples = stalling_samples(iq_block(receiver).astype(np.complex128))
 
@@ -492,7 +516,13 @@ def test_a_retune_during_the_sdr_callback_does_not_publish_the_old_station(
     thread.start()
     try:
         assert samples.converting.wait(5), "the callback never started converting"
-        receiver.tune(81.3e6)           # flushes, then this block lands
+        # Released only once the retune has actually happened.  tune()
+        # hands the write to the device worker and returns, so letting
+        # the callback go on the strength of the call alone lets the
+        # block through before the generation has moved - and then
+        # there is nothing stale about it.
+        tuned(receiver, 81.3e6)         # flushes, then this block lands
+        assert receiver.sdr_receiver.tuning_generation != was_on
         samples.retuned.set()
     finally:
         thread.join(timeout=5)
@@ -503,5 +533,158 @@ def test_a_retune_during_the_sdr_callback_does_not_publish_the_old_station(
     assert receiver.sdr_receiver.data_queue.qsize() == 1
     run_blocks(receiver, 0)             # process what the callback queued
 
-    assert receiver.telemetry.published_count == 1
+    assert receiver._stale_blocks == 1, "the pre-retune block was processed"
+    assert receiver.telemetry.published_count == 0
     assert receiver.get_status() is None, "the pre-retune block was published"
+
+
+# ----------------------------------------------------------------------
+# Resetting the demodulator: which thread, and in what order
+# ----------------------------------------------------------------------
+
+class WatchedDemodulator:
+    """Records resets and processed blocks, and says when enough happened.
+
+    Both calls are made on the processing thread, so the list is the
+    order that thread saw them in - which is the thing being pinned.
+    """
+
+    def __init__(self, demodulator):
+        self.events: list[tuple[str, str]] = []
+        self._want: int | None = None
+        self._enough = threading.Event()
+        self._real_reset = demodulator.reset
+        self._real_process = demodulator.process_iq_samples
+        demodulator.reset = self._reset
+        demodulator.process_iq_samples = self._process
+
+    def _note(self, what: str) -> None:
+        self.events.append((what, threading.current_thread().name))
+        if self._want is not None and len(self.events) >= self._want:
+            self._enough.set()
+
+    def _reset(self):
+        self._note("reset")
+        return self._real_reset()
+
+    def _process(self, iq_samples):
+        self._note("process")
+        return self._real_process(iq_samples)
+
+    def expect(self, count: int) -> None:
+        """Arm for *count* events from here on.  Call before causing them."""
+        self.events = []
+        self._want = count
+        self._enough.clear()
+
+    def wait(self, timeout: float = 10.0) -> None:
+        assert self._enough.wait(timeout), \
+            f"only {len(self.events)} of {self._want}: {self.kinds}"
+
+    @property
+    def kinds(self) -> list[str]:
+        return [what for what, _who in self.events]
+
+    @property
+    def threads(self) -> set[str]:
+        return {who for _what, who in self.events}
+
+
+@contextlib.contextmanager
+def the_loop_running(controller, timeout: float = 10.0):
+    """Run the real processing loop for the body of the with-statement."""
+    controller.quit_event.clear()
+    thread = threading.Thread(target=controller.processing_thread,
+                              name="Processing", daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        controller.quit_event.set()
+        thread.join(timeout=timeout)
+        assert not thread.is_alive(), "processing thread did not stop"
+
+
+def test_tuning_does_not_reset_the_demodulator_from_the_device_worker(
+        receiver):
+    """That state belongs to the thread that is using it.
+
+    A reset from the worker lands in the middle of whatever block the
+    processing thread has in hand: it clears the resampler history that
+    the pending output of that block is measured against, and the block
+    dies with "Resampler history no longer covers pending output".
+    """
+    watched = WatchedDemodulator(receiver.fm_demodulator)
+
+    tuned(receiver, 81.3e6)
+
+    assert watched.events == [], \
+        f"the tune touched the demodulator: {watched.events}"
+
+
+def test_the_first_block_of_a_new_tuning_is_reset_before_it_is_processed(
+        receiver):
+    """And the reset is on the processing thread, where it is safe."""
+    tuned(receiver, 80.0e6)
+    watched = WatchedDemodulator(receiver.fm_demodulator)
+
+    with the_loop_running(receiver):
+        watched.expect(2)                       # the loop's own first block
+        enqueue(receiver, iq_block(receiver))
+        watched.wait()
+
+        tuned(receiver, 81.3e6)
+        watched.expect(2)
+        enqueue(receiver, iq_block(receiver))
+        watched.wait()
+
+    assert watched.kinds == ["reset", "process"], watched.kinds
+    assert watched.threads == {"Processing"}, watched.threads
+
+
+def test_the_blocks_after_the_first_are_not_reset_again(receiver):
+    """One reset per tuning, not one per block."""
+    tuned(receiver, 80.0e6)
+    watched = WatchedDemodulator(receiver.fm_demodulator)
+
+    with the_loop_running(receiver):
+        watched.expect(2)
+        enqueue(receiver, iq_block(receiver))
+        watched.wait()
+
+        watched.expect(4)
+        for _ in range(4):
+            enqueue(receiver, iq_block(receiver))
+        watched.wait()
+
+    assert watched.kinds == ["process"] * 4, watched.kinds
+
+
+def test_a_stale_block_is_dropped_before_the_new_tuning_is_started(receiver):
+    """The order, and what asking the other question first would cost.
+
+    A block from before the retune is going to be thrown away, so it
+    should not touch the demodulator on its way out.  Resetting for it
+    first costs a reset that nothing uses, and leaves
+    ``_generation_in_hand`` naming a tuning no block of which was ever
+    demodulated - the real first block of the new station then resets
+    again.  Two resets and a lie about which tuning the demodulator is
+    set up for, in place of one reset and the truth.
+    """
+    tuned(receiver, 80.0e6)
+    stale = receiver.sdr_receiver.tuning_generation
+    tuned(receiver, 81.3e6)
+    fresh = receiver.sdr_receiver.tuning_generation
+    assert fresh != stale, "the two tunes were the same generation"
+
+    watched = WatchedDemodulator(receiver.fm_demodulator)
+    watched.expect(2)
+    enqueue(receiver, iq_block(receiver), stale)    # the straggler
+    enqueue(receiver, iq_block(receiver), fresh)    # the new station
+
+    with the_loop_running(receiver):
+        watched.wait()
+
+    assert watched.kinds == ["reset", "process"], \
+        f"the stale block reached the demodulator: {watched.kinds}"
+    assert receiver._stale_blocks == 1
