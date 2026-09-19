@@ -147,6 +147,11 @@ class SelectReader(ConsoleReader):
         self._fd = fd
         self._pending: bytes = b""
         self._at_the_end: bool = False
+        # Set when the wait itself fails - a stdin that has gone, a
+        # handle select will not take.  It means no line is ever coming
+        # again; it does not mean the pipe below has been let go, which
+        # is what ``closed`` means, and only close() may say that.
+        self._gave_up: bool = False
         self._wake_r, self._wake_w = os.pipe()
 
     def read_line(self) -> str | None:
@@ -155,7 +160,7 @@ class SelectReader(ConsoleReader):
             # the same chunk as the one just returned is still a command
             # nobody is going to run, and handing it back after a stop
             # is how a command gets dispatched during shutdown.
-            if self.stopped or self._closed.is_set():
+            if self.stopped or self.closed or self._gave_up:
                 return None
             line = self._take_a_line()
             if line is not None:
@@ -182,11 +187,14 @@ class SelectReader(ConsoleReader):
 
         try:
             ready, _, _ = select.select([self._fd, self._wake_r], [], [])
-        except (OSError, ValueError):
-            # stdin or the pipe has gone.  Either way there is no line
-            # coming, and saying so here is what stops the caller's loop
-            # going round again.
-            self._closed.set()
+        except (OSError, ValueError) as e:
+            # stdin or the pipe has gone.  There is no line coming
+            # again, and saying so here is what stops the caller's loop
+            # going round for ever.  Not "closed", though: the pipe is
+            # still open and still has to be handed back, which close()
+            # does and only close() does.
+            self.logger.debug("The console wait failed: %s", e)
+            self._gave_up = True
             return False
         if self._wake_r in ready:
             # Taken out so a wake cannot be seen twice.  Only stop()
@@ -234,7 +242,12 @@ class SelectReader(ConsoleReader):
             self.logger.debug("Could not wake the console reader: %s", e)
 
     def close(self) -> None:
-        """Let go of the wake pipe.  Safe to call twice."""
+        """Let go of the wake pipe.  Safe to call twice.
+
+        The only thing that sets ``closed``, because ``closed`` is the
+        question "have the file descriptors been handed back", and
+        answering it anywhere else is how they get left open.
+        """
         if self._closed.is_set():
             return
         super().close()

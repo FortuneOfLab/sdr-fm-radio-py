@@ -527,6 +527,101 @@ def a_select_reader():
     return SelectReader(read_fd), (read_fd, write_fd)
 
 
+def descriptors_handed_back(monkeypatch):
+    """Record every close, so a test can ask which fds really went.
+
+    Asking ``reader.closed`` only asks whether something set a flag.
+    The point of closing is the two file descriptors, and a flag can be
+    set without them going anywhere.
+    """
+    given_back: list[int] = []
+    real_close = os.close
+
+    def watched(fd):
+        given_back.append(fd)
+        return real_close(fd)
+
+    monkeypatch.setattr("fm_radio.console_input.os.close", watched)
+    return given_back
+
+
+def test_closing_hands_back_both_ends_of_the_wake_pipe(monkeypatch):
+    reader, fds = a_select_reader()
+    wake = (reader._wake_r, reader._wake_w)
+    given_back = descriptors_handed_back(monkeypatch)
+
+    reader.close()
+
+    try:
+        assert set(wake) <= set(given_back), \
+            f"the wake pipe was not handed back: {given_back}"
+    finally:
+        for fd in fds:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+def test_a_wait_that_fails_still_hands_the_pipe_back(monkeypatch):
+    """Giving up on the wait is not the same as having let go.
+
+    select can fail - a stdin whose descriptor has been closed under
+    it, a handle it will not take.  There is no line coming after that,
+    but the pipe is still ours until close() says otherwise, and a
+    reader that called itself closed on the way past would take the
+    early return in close() and keep both descriptors for good.
+    """
+    reader, fds = a_select_reader()
+    wake = (reader._wake_r, reader._wake_w)
+
+    def refuse(*args, **kwargs):
+        raise OSError(9, "Bad file descriptor")
+
+    monkeypatch.setattr("select.select", refuse)
+
+    assert reader.read_line() is None, "a failed wait produced a line"
+    assert not reader.closed, "it called itself closed without closing"
+
+    given_back = descriptors_handed_back(monkeypatch)
+    reader.close()
+
+    try:
+        assert set(wake) <= set(given_back), \
+            f"the wake pipe was left open after a failed wait: {given_back}"
+        assert reader.closed
+    finally:
+        for fd in fds:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+def test_a_failed_wait_does_not_spin(monkeypatch):
+    """It has to end the read, not go round again for ever."""
+    reader, fds = a_select_reader()
+    tries: list[int] = []
+
+    def refuse(*args, **kwargs):
+        tries.append(1)
+        raise OSError(9, "Bad file descriptor")
+
+    monkeypatch.setattr("select.select", refuse)
+    try:
+        assert reader.read_line() is None
+        assert reader.read_line() is None, "it tried again after giving up"
+
+        assert len(tries) == 1, f"the wait was attempted {len(tries)} times"
+    finally:
+        reader.close()
+        for fd in fds:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
 def test_the_command_line_makes_no_reader_until_it_runs(light_controller):
     """A window builds a controller and never starts this thread.
 
@@ -536,15 +631,19 @@ def test_the_command_line_makes_no_reader_until_it_runs(light_controller):
     assert light_controller.cmd_interface.reader is None
 
 
-def test_a_reader_that_was_never_used_is_closed_by_cleanup(light_controller):
+def test_a_reader_that_was_never_used_is_closed_by_cleanup(light_controller,
+                                                           monkeypatch):
     """The window's case: built, never run, and then shut down."""
     reader, fds = a_select_reader()
+    wake = (reader._wake_r, reader._wake_w)
     light_controller.cmd_interface.reader = reader
 
+    given_back = descriptors_handed_back(monkeypatch)
     light_controller.cleanup()
 
     try:
-        assert reader.closed, "the reader's pipe was left open"
+        assert set(wake) <= set(given_back), \
+            f"the reader's pipe was left open: {given_back}"
     finally:
         for fd in fds:
             try:
@@ -576,14 +675,19 @@ def test_a_reader_in_use_is_left_to_close_itself(light_controller):
     assert reader.closed, "run() did not close it on the way out"
 
 
-def test_closing_a_reader_twice_is_allowed(light_controller):
+def test_closing_a_reader_twice_hands_each_end_back_once(light_controller,
+                                                          monkeypatch):
     reader, fds = a_select_reader()
+    wake = (reader._wake_r, reader._wake_w)
     light_controller.cmd_interface.reader = reader
+    given_back = descriptors_handed_back(monkeypatch)
     try:
         light_controller.cmd_interface.close_reader()
         light_controller.cmd_interface.close_reader()
 
-        assert reader.closed
+        mine = [fd for fd in given_back if fd in wake]
+        assert sorted(mine) == sorted(wake), \
+            f"each end should go exactly once: {mine}"
     finally:
         for fd in fds:
             try:
