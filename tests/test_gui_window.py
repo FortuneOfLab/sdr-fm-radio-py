@@ -10,6 +10,11 @@ Qt runs offscreen (see the ``qt_app`` fixture), so these need no display.
 
 from __future__ import annotations
 
+import contextlib
+import logging
+import threading
+import time
+
 import pytest
 
 from fm_radio.telemetry import SILENCE_DBFS, StatusSnapshot
@@ -22,6 +27,13 @@ pytest.importorskip("PySide6.QtWidgets", reason="the GUI is optional")
 
 from PySide6.QtCore import Qt                                  # noqa: E402
 
+from fm_radio.controller import (                         # noqa: E402
+    _TUNER_SETTLE_TIMEOUT_SEC,
+)
+from fm_radio.device_worker import (                      # noqa: E402
+    GAIN, GAIN_MODE, TUNE, DeviceWorker,
+)
+from fm_radio.exceptions import RecordingError            # noqa: E402
 from fm_radio.gui.main_window import (                         # noqa: E402
     METER_FLOOR_DBFS, REFRESH_INTERVAL_MS, ReceiverWindow, _level_percent,
 )
@@ -36,6 +48,13 @@ class FakeController:
 
     def __init__(self, status: StatusSnapshot | None = None) -> None:
         self.status = status
+        # The real controller owns one of these; the window reads it to
+        # find out how the writes it asked for went.
+        self.device_worker = DeviceWorker(logging.getLogger("test.gui"))
+        self.last_tune = None
+        self.last_write = None
+        self.gain_error = None
+        self.mode_error = None
         self.frequency = 80.0e6
         self.gain = 28.0
         self.auto_gain = True
@@ -47,6 +66,9 @@ class FakeController:
         self.presets = [("TOKYO FM", 80.0e6), ("J-WAVE", 81.3e6)]
         self.tune_error: Exception | None = None
         self.record_error: Exception | None = None
+        # As in the controller: held while the frequency is being
+        # written, and by anything naming or installing a recording.
+        self._tuner_lock = threading.RLock()
 
     # --- reading ---
     def get_status(self):
@@ -73,20 +95,96 @@ class FakeController:
     def get_stations_list(self):
         return list(self.presets)
 
+    def tuned(self, timeout: float = 5.0) -> None:
+        """Wait for the tune that was asked for, as a test may.
+
+        The window never does this; it carries on drawing and picks the
+        outcome up on a later refresh.
+        """
+        assert self.last_tune is not None, "nothing asked for a tune"
+        assert self.last_tune.wait(timeout), "the tune never landed"
+
+    def settled(self, timeout: float = 5.0) -> None:
+        """Wait for the last write of any kind this was asked for."""
+        assert self.last_write is not None, "nothing asked for a write"
+        assert self.last_write.wait(timeout), "the write never landed"
+
     # --- changing ---
     def tune(self, freq_hz):
+        """Hand the write to the worker, as the real one does.
+
+        Nothing is raised at the caller any more: a tune that fails does
+        so on the worker thread, and the window hears about it through
+        the request the worker keeps.
+        """
         self.calls.append(("tune", freq_hz))
-        if self.tune_error is not None:
-            raise self.tune_error
-        self.frequency = freq_hz
+
+        def write():
+            with self._tuner_lock:
+                if self.tune_error is not None:
+                    raise self.tune_error
+                self.frequency = freq_hz
+
+        self.last_tune = self.device_worker.submit(
+            TUNE, f"Tuned to {freq_hz / 1e6:.1f} MHz", write)
+        return self.last_tune
 
     def set_agc_mode(self, enabled):
+        """Switch Auto now and write later, as AutoGainController does.
+
+        The real one flips ``_enabled`` under its own lock as the call
+        goes through; only the USB write waits for the worker, so a
+        refresh between the two finds Auto already on.  Turning it on
+        asks for the mode and then a gain, and hands back the mode
+        request; turning it off asks for a gain alone - the one that
+        pins the gain where the AGC left it - and hands that back.
+        """
         self.calls.append(("set_agc_mode", enabled))
         self.auto_gain = enabled
 
+        def write_mode():
+            if self.mode_error is not None:
+                raise self.mode_error
+
+        def write_gain():
+            if self.gain_error is not None:
+                raise self.gain_error
+
+        if enabled:
+            asked = self.device_worker.submit(
+                GAIN_MODE, "Gain mode set to manual", write_mode)
+            self.last_write = self.device_worker.submit(
+                GAIN, f"Auto gain applied {self.gain:.1f} dB", write_gain)
+        else:
+            asked = self.device_worker.submit(
+                GAIN, f"Gain set to {self.gain:.1f} dB", write_gain)
+            self.last_write = asked
+        return asked
+
     def set_gain(self, gain_db):
         self.calls.append(("set_gain", gain_db))
-        self.gain = gain_db
+
+        def write():
+            if self.gain_error is not None:
+                raise self.gain_error
+            self.gain = gain_db
+
+        self.last_write = self.device_worker.submit(
+            GAIN, f"Gain set to {gain_db:.1f} dB", write)
+        return self.last_write
+
+    @contextlib.contextmanager
+    def while_the_tuner_is_still(self):
+        """Mirror the controller: held, or the recording is refused."""
+        if not self._tuner_lock.acquire(
+                timeout=_TUNER_SETTLE_TIMEOUT_SEC):
+            raise RecordingError(
+                "Cannot start recording: the tuner is not answering")
+        self.calls.append(("tuner held",))
+        try:
+            yield
+        finally:
+            self._tuner_lock.release()
 
     def start_recording(self, path):
         self.calls.append(("start_recording", path))
@@ -246,10 +344,18 @@ def test_a_snapshot_arriving_later_replaces_the_placeholder(window):
 # ----------------------------------------------------------------------
 
 def test_the_arrows_tune_by_one_step(window):
+    """Each step is asked for from where the receiver is, not where it was.
+
+    The asking no longer waits for the write, so the arrows read back the
+    frequency the receiver reports - which is the one it is still on
+    until the tune lands.  Each click is therefore let land before the
+    next, the way a person clicking would.
+    """
     view, controller = window()
-    view._up.click()
-    view._down.click()
-    view._down.click()
+    for button in (view._up, view._down, view._down):
+        button.click()
+        controller.tuned()
+        view.refresh()
 
     assert [c for c in controller.calls if c[0] == "tune"] == [
         ("tune", 80.1e6), ("tune", 80.0e6), ("tune", 79.9e6)]
@@ -278,10 +384,14 @@ def test_a_tuner_that_refuses_is_reported_not_raised(window):
 
     controller = FakeController(snapshot())
     controller.tune_error = SDRDeviceError("device gone")
-    view, _ = window(controller)
+    view, controller = window(controller)
 
     view._up.click()                    # must not raise
-    assert "tuning failed" in view._health.text()
+    controller.tuned()                  # the write fails on the worker
+    view.refresh()                      # ... and the window hears about it
+
+    assert "failed" in view._health.text(), view._health.text()
+    assert "device gone" in view._health.text()
 
 
 def test_a_failure_survives_the_next_refresh(window):
@@ -290,12 +400,13 @@ def test_a_failure_survives_the_next_refresh(window):
 
     controller = FakeController(snapshot())
     controller.tune_error = SDRDeviceError("device gone")
-    view, _ = window(controller)
+    view, controller = window(controller)
 
     view._up.click()
+    controller.tuned()
     view.refresh()
     view.refresh()
-    assert "tuning failed" in view._health.text()
+    assert "failed" in view._health.text(), view._health.text()
 
 
 def test_a_failure_gives_way_to_the_health_line_eventually(window,
@@ -305,10 +416,12 @@ def test_a_failure_gives_way_to_the_health_line_eventually(window,
 
     controller = FakeController(snapshot())
     controller.tune_error = SDRDeviceError("device gone")
-    view, _ = window(controller)
+    view, controller = window(controller)
 
     view._up.click()
-    assert "tuning failed" in view._health.text()
+    controller.tuned()
+    view.refresh()
+    assert "failed" in view._health.text(), view._health.text()
 
     clock = [main_window.time.monotonic() + main_window.NOTICE_SECONDS + 1]
     monkeypatch.setattr(main_window.time, "monotonic", lambda: clock[0])
@@ -572,3 +685,204 @@ def test_a_recordings_folder_that_cannot_be_made_is_reported(
     assert not getattr(view, button).isChecked()
     assert "failed" in view._health.text()
     assert not [c for c in controller.calls if c[0] == call]
+
+
+# ----------------------------------------------------------------------
+# Stepping while a write is still in the air
+# ----------------------------------------------------------------------
+
+def held(controller):
+    """Stop the worker mid-write, so nothing the window asks for lands."""
+    running = threading.Event()
+    release = threading.Event()
+    controller.device_worker.submit(
+        TUNE, "the one in flight",
+        lambda: (running.set(), release.wait(10)))
+    assert running.wait(5), "the worker never started the first write"
+    return release
+
+
+def test_two_steps_during_one_write_move_two_steps(window):
+    """A step starts from where the tuner is going, not where it is.
+
+    The receiver keeps reporting the frequency it is on until the write
+    lands - 60 ms - so stepping from that asks for the same place twice
+    and ends up half as far as the user asked to go.
+    """
+    view, controller = window()
+    release = held(controller)
+    try:
+        view._up.click()
+        view._up.click()
+
+        assert [c for c in controller.calls if c[0] == "tune"] == [
+            ("tune", 80.1e6), ("tune", 80.2e6)]
+    finally:
+        release.set()
+
+
+def test_a_preset_moves_the_place_the_steps_start_from(window):
+    """Choosing a station and then stepping goes one step from there."""
+    view, controller = window()
+    release = held(controller)
+    try:
+        view._presets.setCurrentIndex(1)
+        view._presets.activated.emit(1)
+        view._up.click()
+
+        tunes = [c[1] for c in controller.calls if c[0] == "tune"]
+        assert tunes[-1] == pytest.approx(tunes[-2] + 0.1e6), tunes
+    finally:
+        release.set()
+
+
+def test_the_step_goes_back_to_the_receiver_once_the_tune_lands(window):
+    """Nothing on its way means the receiver is the truth again."""
+    view, controller = window()
+    view._up.click()
+    controller.tuned()
+    view.refresh()
+
+    assert view._tuning_to is None, "still thinks a tune is on its way"
+
+
+# ----------------------------------------------------------------------
+# Watching what this window asked for, not what happened last
+# ----------------------------------------------------------------------
+
+def test_a_gain_landing_does_not_answer_for_a_tune_that_has_not(window):
+    """The worker's last finished request may be somebody else's.
+
+    The AGC writes gains of its own accord.  One of those landing between
+    two refreshes must not take the "tuning to..." line down, nor stand in
+    for an answer the tune has not given yet.
+    """
+    view, controller = window()
+    release = held(controller)
+    try:
+        view._up.click()
+        # Something else finishes in the meantime, as the AGC does.
+        done = controller.device_worker.submit(GAIN, "gain 20", lambda: None)
+        view.refresh()
+
+        assert not done.finished, "the worker is supposed to be busy"
+        assert "tuning to 80.1 MHz" in view._health.text(), view._health.text()
+    finally:
+        release.set()
+    controller.tuned()
+    view.refresh()
+    assert "tuning to" not in view._health.text()
+
+
+def test_a_gain_that_fails_is_reported_as_well_as_a_tune(window):
+    """A failure of any write the window asked for is worth saying."""
+    view, controller = window()
+    controller.gain_error = OSError("LIBUSB_ERROR_TIMEOUT")
+
+    view._auto_gain.setChecked(False)
+    view._gain_slider.setValue(int(22.0 * 10))
+    view._gain_slider.sliderReleased.emit()
+    controller.settled()
+    view.refresh()
+
+    assert "failed" in view._health.text(), view._health.text()
+    assert "LIBUSB_ERROR_TIMEOUT" in view._health.text()
+
+
+def test_a_tune_replaced_by_a_later_one_is_not_reported_as_a_failure(window):
+    """Superseded is what the window asked for happening once, not failing."""
+    view, controller = window()
+    release = held(controller)
+    try:
+        view._up.click()
+        view._up.click()                # replaces the first
+    finally:
+        release.set()
+    controller.tuned()
+    view.refresh()
+
+    assert "failed" not in view._health.text(), view._health.text()
+
+
+def test_a_failure_stays_readable_while_a_tune_is_still_going(window):
+    """Both want the one status line, and the failure needs it more.
+
+    A tune that has not landed says so again on the next refresh, and
+    the one after that.  A gain that would not write gets one chance to
+    be read, so it is not the one that gives way.
+    """
+    view, controller = window()
+    view._auto_gain.setChecked(False)
+    controller.settled()
+    controller.gain_error = OSError("LIBUSB_ERROR_TIMEOUT")
+    view._gain_slider.setValue(220)          # 22.0 dB, tenths
+    view._gain_slider.sliderReleased.emit()
+    controller.settled()
+
+    release = held(controller)
+    try:
+        # The click refreshes, and that one refresh has both to report:
+        # the gain that failed and the tune that has not landed.
+        view._up.click()
+
+        assert "LIBUSB_ERROR_TIMEOUT" in view._health.text(),             view._health.text()
+
+        # Once it has had its few seconds the tune is still going, and
+        # saying so is the best thing left to say.
+        message, _expires, sort = view._notice
+        view._notice = (message, time.monotonic() - 1.0, sort)
+        view.refresh()
+
+        assert "tuning to 80.1 MHz" in view._health.text(),             view._health.text()
+    finally:
+        release.set()
+
+
+def test_turning_auto_off_is_true_before_the_write_lands(window):
+    """The controller flips the mode under its own lock, not on the worker.
+
+    AutoGainController.disable sets ``_enabled`` and comes back; what it
+    hands to the worker is the gain that pins the device where the AGC
+    left it, and that is a gain write, not a mode one.  A refresh
+    between the two has to find Auto already off.
+    """
+    view, controller = window()
+    assert controller.auto_gain, "the stand-in is meant to start with Auto on"
+    release = held(controller)
+    try:
+        view._auto_gain.setChecked(False)
+        view.refresh()
+
+        assert not controller.auto_gain, "the mode waited for the USB write"
+        asked = view._asked_for[-1]
+        assert not asked.finished, "the worker was supposed to be busy"
+        assert asked.kind == GAIN,             f"turning Auto off pins the gain; that is a {asked.kind} write"
+    finally:
+        release.set()
+
+
+def test_the_window_holds_the_tuner_while_it_names_a_recording(window):
+    """The frequency in the name and the station in the file are one.
+
+    The window reads the frequency to build the filename and then asks
+    for the recording; a tune landing between the two would leave a file
+    called 80.0 MHz with the next station in it.  So both happen with
+    the tuner held.
+    """
+    view, controller = window()
+
+    view._record_audio.click()
+
+    assert controller.calls[:1] == [("tuner held",)], controller.calls
+    assert controller.calls[1][0] == "start_recording", controller.calls
+    assert "80.0MHz" in controller.calls[1][1], controller.calls[1][1]
+
+
+def test_the_window_holds_the_tuner_while_it_names_an_iq_recording(window):
+    """The same for the IQ file, whose sidecar names a frequency too."""
+    view, controller = window()
+
+    view._record_iq.click()
+
+    assert controller.calls[:1] == [("tuner held",)], controller.calls
+    assert controller.calls[1][0] == "start_iq_recording", controller.calls

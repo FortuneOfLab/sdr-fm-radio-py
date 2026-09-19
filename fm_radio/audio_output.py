@@ -56,6 +56,19 @@ _RECORD_WORKER_SHUTDOWN = object()
 # on every callback, and the interesting part is that it is happening at
 # all, not each of the fifty a second.
 _UNDERRUN_LOG_INTERVAL_SEC: float = 5.0
+
+#: Longest shutdown waits for a recording that is being closed elsewhere.
+#: stop_recording is itself bounded at about fifteen seconds; past this
+#: something is wrong and the log should say so rather than the process
+#: hanging on the way out.
+_RECORDING_CLOSE_TIMEOUT_SEC: float = 20.0
+
+#: Longest a new recording waits for the one before it to finish
+#: closing.  Shutdown can afford the twenty seconds above; this wait
+#: falls on whichever thread pressed the button, so past this, refusing
+#: says more than freezing.  A close that is going normally is over in
+#: the time it takes to write what is queued.
+_PREVIOUS_CLOSE_WAIT_SEC: float = 2.0
 # Sentinel placed in the recording queue to mark the end of a session.
 # When the worker reaches it, every preceding chunk has been written;
 # stop_recording() can then safely close the wave file.
@@ -123,6 +136,12 @@ class AudioOutput(AudioOutputInterface):
         # matters; the lines are a sample of it.
         self._underrun_last_logged: float = 0.0
         self._underrun_logged_at: int = 0
+        # Set for as long as a recording is being closed: the flag above
+        # goes down first and the file stays open for the flush, the
+        # worker handshake, the close and the sidecar - up to fifteen
+        # seconds of a file that is still being written while nothing
+        # calls it a recording.  Shutdown waits for this, not for that.
+        self._finalising: threading.Event = threading.Event()
         # Set by cleanup().  A bounded join cannot promise that the thread
         # feeding us has stopped, so the stream defends itself rather than
         # trusting that nobody is left to call in.
@@ -318,6 +337,8 @@ class AudioOutput(AudioOutputInterface):
                 )
                 return
 
+            self._let_the_last_recording_go(filename)
+
             try:
                 wf = wave.open(filename, 'wb')
                 wf.setnchannels(channels)
@@ -359,6 +380,35 @@ class AudioOutput(AudioOutputInterface):
             )
             self.logger.info(f"Recording started: {filename}")
 
+    def _let_the_last_recording_go(self, filename: str) -> None:
+        """Wait for a recording that is still closing, or refuse this one.
+
+        A recording being closed is no longer a recording, but it still
+        owns the wave handle and the queue: it closes whatever is
+        installed by the time it reaches them, which would be the one
+        about to be started here.  Tuning starts that close on a thread
+        of its own, so the two can easily be a button press apart.
+
+        Args:
+            filename: What is being started, for the log.
+
+        Raises:
+            RecordingError: The last one is still closing after
+                ``_PREVIOUS_CLOSE_WAIT_SEC``.
+        """
+        if not self._finalising.is_set():
+            return
+        self.logger.info(
+            "Waiting for the previous recording to finish closing before "
+            "starting %s", filename)
+        if self.wait_for_the_recording_to_close(_PREVIOUS_CLOSE_WAIT_SEC):
+            return
+        self.logger.error(
+            "Refusing to start %s: the previous recording has been closing "
+            "for %.0f s", filename, _PREVIOUS_CLOSE_WAIT_SEC)
+        raise RecordingError(
+            "Cannot start recording: the previous recording is still closing")
+
     def stop_recording(self) -> None:
         """Stop recording, flush pending writes, and close the file.
 
@@ -369,14 +419,51 @@ class AudioOutput(AudioOutputInterface):
         which point all preceding chunks have been processed under
         ``record_lock``.
         """
+        if self.begin_stopping_the_recording():
+            self.finish_stopping_the_recording()
+
+    def begin_stopping_the_recording(self) -> bool:
+        """Stop taking audio for the recording, and nothing else.
+
+        The two halves of stopping cost very different amounts.  This
+        one is a flag under a lock and returns at once; the other is a
+        handshake with the worker and can take fifteen seconds.  A
+        caller who must not carry on putting the new station into the
+        old station's file - tuning - needs this half to have happened
+        before it goes on, and can leave the other to a thread.
+
+        Returns:
+            True when this call is the one that took the recording, and
+            therefore owes it a ``finish_stopping_the_recording``.
+            False when there was nothing to stop.
+        """
         with self._enqueue_lock:
             if not self.recording:
                 self.logger.debug("stop_recording called but not currently recording")
-                return
+                return False
             # Stop further enqueues from the realtime path.  Because we
             # hold _enqueue_lock, any record() that has already passed
             # its flag check has also completed its put before us.
             self.recording = False
+            # From here the file is open and nothing calls it a
+            # recording.  Anybody who needs it finished waits on this.
+            self._finalising.set()
+        return True
+
+    def finish_stopping_the_recording(self) -> None:
+        """Flush what was queued, close the file and write the sidecar.
+
+        The slow half, for whoever ``begin_stopping_the_recording`` gave
+        the recording to.  Whatever happens, the file stops being called
+        one that is closing, or shutdown would wait out its timeout.
+        """
+        try:
+            self._finish_the_recording()
+        finally:
+            self._finalising.clear()
+
+    def _finish_the_recording(self) -> None:
+        """Flush what is queued, close the file and write the sidecar."""
 
         # Push a flush sentinel.  The worker writes every chunk before
         # the sentinel and then sets _flush_event.
@@ -585,6 +672,24 @@ class AudioOutput(AudioOutputInterface):
                     exc_info=True,
                 )
 
+    @property
+    def finalising(self) -> bool:
+        """True while a recording is being closed but is no longer one."""
+        return self._finalising.is_set()
+
+    def wait_for_the_recording_to_close(self, timeout: float) -> bool:
+        """Wait for a recording that is being closed somewhere else.
+
+        Returns False if it is still going by then, which is the caller's
+        cue to say so rather than to keep waiting.
+        """
+        deadline = time.monotonic() + timeout
+        while self._finalising.is_set():
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.01)
+        return True
+
     def cleanup(self) -> None:
         """Stop the audio stream and terminate PyAudio.
 
@@ -603,6 +708,19 @@ class AudioOutput(AudioOutputInterface):
             # than left behind with a worker that has already gone.  One
             # that starts after this is refused.
             with self._start_lock:
+                # A recording being closed somewhere else is still an
+                # open file: the flag went down when the closing started,
+                # not when it finished, so asking the flag would skip it
+                # and leave the file unfinished.
+                if self._finalising.is_set():
+                    self.logger.info(
+                        "Waiting for a recording that is still closing")
+                    if not self.wait_for_the_recording_to_close(
+                            _RECORDING_CLOSE_TIMEOUT_SEC):
+                        self.logger.error(
+                            "A recording has not finished closing after "
+                            "%.0f s; the file may be left unfinished",
+                            _RECORDING_CLOSE_TIMEOUT_SEC)
                 # Stop recording if active
                 if self.recording:
                     self.logger.info(

@@ -52,6 +52,7 @@ from PySide6.QtWidgets import (
 
 from fm_radio.cli import build_recording_path
 from fm_radio.exceptions import RecordingError, SDRDeviceError
+from fm_radio.device_worker import TUNE
 from fm_radio.telemetry import SILENCE_DBFS, StatusSnapshot
 
 logger = logging.getLogger('fm_receiver.gui')
@@ -87,6 +88,13 @@ def _level_percent(dbfs: float) -> int:
                          / -METER_FLOOR_DBFS * 100.0)))
 
 
+#: What a notice is about.  A failure is news the user has to read and
+#: gets its few seconds; progress is a line that will be repeated on the
+#: next refresh if it is still true, so anything may take its place.
+_FAILURE = "failure"
+_PROGRESS = "progress"
+
+
 class ReceiverWindow(QMainWindow):
     """Status and control for a running receiver."""
 
@@ -94,8 +102,8 @@ class ReceiverWindow(QMainWindow):
         super().__init__(parent)
         self.controller = controller
         self.setWindowTitle("SDR FM Receiver")
-        # (message, expiry); see NOTICE_SECONDS.
-        self._notice: tuple[str, float] | None = None
+        # (message, expiry, sort); see NOTICE_SECONDS and _set_notice.
+        self._notice: tuple[str, float, str] | None = None
 
         central = QWidget(self)
         layout = QVBoxLayout(central)
@@ -123,6 +131,16 @@ class ReceiverWindow(QMainWindow):
         # this window has been built and shown.
         # Started once when the device goes; see _free_the_device.
         self._releasing: threading.Thread | None = None
+        # Where the tuner is going, which is not where it is: a write
+        # takes 60 ms and a step asked for during one has to start from
+        # the frequency the last step asked for, not from the one the
+        # receiver is still on.  None when nothing is on its way.
+        self._tuning_to: float | None = None
+        # The writes this window has asked for and not yet reported on.
+        # Watching these rather than the worker's last finished request:
+        # that one can be somebody else's, and a gain landing between two
+        # refreshes would otherwise hide a tune that is still going.
+        self._asked_for: list = []
         # Whether a recording was running when the device went.  Asked
         # once, before the release starts, because the release answers it
         # differently long before it is finished; see
@@ -256,18 +274,34 @@ class ReceiverWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _tune(self, freq_hz: float) -> None:
-        try:
-            self.controller.tune(freq_hz)
-        except SDRDeviceError as exc:
-            # A tuner that refused is worth saying out loud, but not worth
-            # taking the window down over.
-            logger.error("Could not tune to %.1f MHz: %s", freq_hz / 1e6, exc)
-            self._set_notice(f"tuning failed: {exc}")
-            return
+        """Ask for a new frequency and carry on drawing.
+
+        The write is 60 ms of USB on a device that is answering, so this
+        does not wait for it: what went wrong, if anything did, arrives
+        on a later refresh, through the request this keeps hold of.
+        Until then the reading on screen is the station the receiver is
+        still on, which is the truth.
+        """
+        self._tuning_to = freq_hz
+        self._watch(self.controller.tune(freq_hz))
         self.refresh()
 
+    def _watch(self, request) -> None:
+        """Keep a request until there is something to say about it."""
+        if request is not None:
+            self._asked_for.append(request)
+
     def _step(self, delta_hz: float) -> None:
-        self._tune(self.controller.get_frequency() + delta_hz)
+        """Move by one step from wherever the tuner is heading.
+
+        Two clicks in the time one write takes are two steps, not one.
+        The receiver still reports the frequency it is on until the first
+        write lands, so stepping from that would ask for the same place
+        twice and end up half as far as the user asked to go.
+        """
+        from_hz = (self._tuning_to if self._tuning_to is not None
+                   else self.controller.get_frequency())
+        self._tune(from_hz + delta_hz)
 
     def _preset_chosen(self, index: int) -> None:
         freq_hz = self._presets.itemData(index)
@@ -276,7 +310,7 @@ class ReceiverWindow(QMainWindow):
         self._presets.setCurrentIndex(0)
 
     def _auto_gain_toggled(self, checked: bool) -> None:
-        self.controller.set_agc_mode(checked)
+        self._watch(self.controller.set_agc_mode(checked))
         self._gain_slider.setEnabled(not checked)
 
     def _gain_moved(self, value: int) -> None:
@@ -296,7 +330,7 @@ class ReceiverWindow(QMainWindow):
     def _apply_gain(self, value: int) -> None:
         if self._auto_gain.isChecked():
             return
-        self.controller.set_gain(value / _GAIN_SCALE)
+        self._watch(self.controller.set_gain(value / _GAIN_SCALE))
 
     def _audio_recording_toggled(self, checked: bool) -> None:
         if not checked:
@@ -305,10 +339,13 @@ class ReceiverWindow(QMainWindow):
             try:
                 # Inside the try: naming the file creates recordings/, which
                 # fails with an OSError of its own before the receiver has
-                # been asked for anything.
-                path = build_recording_path(
-                    self.controller.get_frequency() / 1e6)
-                self.controller.start_recording(path)
+                # been asked for anything.  Inside the tuner's lock as
+                # well: the frequency in the name and the station in the
+                # file have to be the same one.
+                with self.controller.while_the_tuner_is_still():
+                    path = build_recording_path(
+                        self.controller.get_frequency() / 1e6)
+                    self.controller.start_recording(path)
             except (RecordingError, OSError) as exc:
                 logger.error("Could not start recording: %s", exc)
                 self._set_notice(f"recording failed: {exc}")
@@ -322,9 +359,10 @@ class ReceiverWindow(QMainWindow):
             self.controller.stop_iq_recording()
         else:
             try:
-                path = build_recording_path(
-                    self.controller.get_frequency() / 1e6, iq=True)
-                self.controller.start_iq_recording(path)
+                with self.controller.while_the_tuner_is_still():
+                    path = build_recording_path(
+                        self.controller.get_frequency() / 1e6, iq=True)
+                    self.controller.start_iq_recording(path)
             except (RecordingError, OSError) as exc:
                 logger.error("Could not start IQ recording: %s", exc)
                 self._set_notice(f"IQ recording failed: {exc}")
@@ -335,20 +373,26 @@ class ReceiverWindow(QMainWindow):
     # Display
     # ------------------------------------------------------------------
 
-    def _set_notice(self, message: str) -> None:
+    def _set_notice(self, message: str, sort: str = _FAILURE) -> None:
         """Put *message* in the status bar and keep it there to be read."""
-        self._notice = (message, time.monotonic() + NOTICE_SECONDS)
+        self._notice = (message, time.monotonic() + NOTICE_SECONDS, sort)
         self._health.setText(message)
 
     def _current_notice(self) -> str | None:
         """The notice still worth showing, or None once it has had its time."""
         if self._notice is None:
             return None
-        message, expires = self._notice
+        message, expires, _sort = self._notice
         if time.monotonic() >= expires:
             self._notice = None
             return None
         return message
+
+    def _showing(self, sort: str) -> bool:
+        """True when the notice still worth showing is of this sort."""
+        if self._current_notice() is None:
+            return False
+        return self._notice is not None and self._notice[2] == sort
 
     def refresh(self) -> None:
         """Read the published state and show it.
@@ -371,6 +415,7 @@ class ReceiverWindow(QMainWindow):
         self._show_recording()
         # A failure the user just caused outranks the health line until it
         # has been up long enough to read.
+        self._show_the_device_worker()
         notice = self._current_notice()
         if notice is not None:
             self._health.setText(notice)
@@ -462,6 +507,46 @@ class ReceiverWindow(QMainWindow):
             target=self.controller.cleanup,
             name="DeviceLossCleanup", daemon=True)
         self._releasing.start()
+
+    def _show_the_device_worker(self) -> None:
+        """Say what became of the writes this window asked the SDR for.
+
+        Its own, not the worker's last finished request: that one may
+        have been asked for by the AGC, and a gain landing between two
+        refreshes would hide a tune that is still on its way - or worse,
+        answer for one that has not been made yet.
+
+        Nothing waits for a device write any more, so this is where the
+        answer turns up: a failure becomes a notice, and a tune that has
+        been asked for and not yet made says so rather than leaving the
+        window looking as though the button did nothing.
+        """
+        still_going = []
+        for request in self._asked_for:
+            if not request.finished:
+                still_going.append(request)
+                continue
+            if request.failed:
+                logger.error("%s failed: %s", request.what, request.error)
+                self._set_notice(f"{request.what} failed: {request.error}")
+        self._asked_for = still_going
+
+        tuning = [r for r in still_going if r.kind == TUNE]
+        if tuning and self._tuning_to is not None:
+            # Unless there is a failure up that the user has not had
+            # time to read.  A gain that would not write is worth more
+            # than the news that a tune is still going: the tune says so
+            # again on the next refresh, and the failure will not.
+            if not self._showing(_FAILURE):
+                self._set_notice(
+                    f"tuning to {self._tuning_to / 1e6:.1f} MHz...", _PROGRESS)
+        else:
+            self._tuning_to = None
+            if self._showing(_PROGRESS):
+                # "tuning to 80.1 MHz..." was true while it was; a notice
+                # normally sits for a few seconds so it can be read, and
+                # this one has nothing left to say the moment it lands.
+                self._notice = None
 
     def _show_without_status(self) -> None:
         """Show what can be known without a snapshot: the tuner's own state."""

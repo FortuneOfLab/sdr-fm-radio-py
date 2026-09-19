@@ -27,6 +27,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import queue
 import sys
@@ -41,7 +42,10 @@ from fm_radio.demodulator import FMDemodulator, FMDemodulatorLight
 from fm_radio.audio_output import AudioOutput
 from fm_radio.cli import CommandLineInterface
 from fm_radio.auto_gain import AutoGainController
-from fm_radio.exceptions import SDRDeviceError, AudioOutputError
+from fm_radio.device_worker import TUNE, DeviceWorker, Request
+from fm_radio.exceptions import (
+    SDRDeviceError, AudioOutputError, RecordingError,
+)
 from fm_radio.stations import (
     Station, load_stations, favorites, search, in_area, nearest,
 )
@@ -171,6 +175,75 @@ class _BlockProfiler:
             self._win_q_max = 0
 
 
+#: How long a recording that is starting waits for a tuner that is in
+#: the middle of moving.  A healthy write is 60 ms; past this the device
+#: is not answering, and refusing the recording is better than freezing
+#: the window whose button the user just pressed.
+_TUNER_SETTLE_TIMEOUT_SEC: float = 2.0
+
+
+class RecordingsShut:
+    """The recordings a tune has shut, and the finish they are owed.
+
+    Stopping a recording is two halves - a flag under a lock, then the
+    flush and the close - and whoever calls the first half owes the
+    second.  This exists to make that debt impossible to lose: it is
+    made before anything has been taken, so a ``finally`` over the whole
+    of the tune always has something to ask, and each half it takes is
+    written down as it is taken rather than after both have succeeded.
+
+    Args:
+        audio_output: The audio recorder.
+        sdr_receiver: The IQ recorder.
+        logger: Where a close that fails is reported.
+    """
+
+    def __init__(self, audio_output, sdr_receiver,
+                 logger: logging.Logger) -> None:
+        self._audio_output = audio_output
+        self._sdr_receiver = sdr_receiver
+        self.logger = logger
+        #: Whether this took the audio recording, and owes it a finish.
+        self.audio: bool = False
+        #: The same for the IQ recording.
+        self.iq: bool = False
+
+    def take(self) -> None:
+        """Stop both recordings taking samples, writing each one down.
+
+        If the second of these raises, the first is already recorded and
+        will still be finished: that is the whole point of the object.
+        """
+        self.audio = self._audio_output.begin_stopping_the_recording()
+        self.iq = self._sdr_receiver.begin_stopping_the_iq_recording()
+
+    @property
+    def anything(self) -> bool:
+        """True when there is a file waiting to be finished."""
+        return self.audio or self.iq
+
+    def finish(self) -> None:
+        """Flush, close and write the sidecar for whatever was taken.
+
+        Neither failure stops the other: a file left open is what the
+        finalising flag makes shutdown wait twenty seconds for.
+        """
+        if self.audio:
+            try:
+                self._audio_output.finish_stopping_the_recording()
+            except Exception as e:              # pragma: no cover - guard
+                self.logger.error(
+                    "Could not close the recording after tuning: %s", e,
+                    exc_info=True)
+        if self.iq:
+            try:
+                self._sdr_receiver.finish_stopping_the_iq_recording()
+            except Exception as e:              # pragma: no cover - guard
+                self.logger.error(
+                    "Could not close the IQ recording after tuning: %s", e,
+                    exc_info=True)
+
+
 class FMReceiverController:
     """
     FM Receiver Controller
@@ -191,6 +264,14 @@ class FMReceiverController:
         # starts one when the device goes, and closing the window starts
         # another.  It is idempotent, but only one at a time.
         self._cleanup_lock: threading.Lock = threading.Lock()
+        # Held from the moment a tune shuts the recordings until the
+        # frequency has moved, and by a recording that is being started
+        # for as long as it takes to name it and install it.  The two
+        # have to take it in turns: a recording that is installed in
+        # between is a file named for the station the tuner has just
+        # left.  Reentrant so that a caller which has already taken it
+        # to choose the name can go on to start_recording.
+        self._tuner_lock: threading.RLock = threading.RLock()
         # Nationwide catalogue (bundled snapshot + the user's stations.toml)
         # and the short preset list the CLI tunes by number.  Loading
         # problems are printed as well as logged: logging is off unless
@@ -231,7 +312,11 @@ class FMReceiverController:
                 output_rate=AUDIO_OUTPUT_RATE, frames_per_buffer=AUDIO_FRAMES_PER_BUFFER,
             )
             # Auto gain controller (replaces hardware AGC)
-            self.auto_gain: AutoGainController = AutoGainController(self.sdr_receiver)
+            # One thread for every write to the device, so that no
+            # window and no command line ever waits for USB.
+            self.device_worker: DeviceWorker = DeviceWorker(self.logger)
+            self.auto_gain: AutoGainController = AutoGainController(
+                self.sdr_receiver, self.device_worker)
             # Latest-value slot the processing thread publishes state to;
             # see fm_radio.telemetry for why it is rate-limited rather than
             # written every block.
@@ -317,23 +402,120 @@ class FMReceiverController:
         """
         return self.telemetry.latest
 
-    def tune(self, freq_hz: float) -> None:
-        """Tune to a new frequency.
+    def tune(self, freq_hz: float) -> "Request":
+        """Ask for a new frequency, and come straight back.
 
-        Sets the SDR center frequency, flushes stale IQ data, resets
-        demodulator state, and stops any active recording.
+        The write itself is 60 ms of USB on a device that is answering
+        and forever on one that is not, so it happens on the device
+        worker rather than on whichever thread asked - the window asks
+        from the thread that draws it.
+
+        Everything that follows a tune - the stale IQ, the demodulator
+        state, the AGC counters, a recording that was of a different
+        station - happens on the worker too, after the write, so a
+        caller who does wait sees a receiver that has finished moving.
 
         Args:
             freq_hz: Target frequency in Hz.
+
+        Returns:
+            The request, for a caller that wants to know how it went.
+            The window does not; the command line waits a moment.
         """
-        self.sdr_receiver.set_center_frequency(freq_hz)
-        self._flush_data_queue()
-        self.fm_demodulator.reset()
-        self.auto_gain.reset_counters()
-        if self.audio_output.recording:
-            self.audio_output.stop_recording()
-        if self.sdr_receiver.iq_recording:
-            self.sdr_receiver.stop_iq_recording()
+        return self.device_worker.submit(
+            TUNE, f"Tuned to {freq_hz / 1e6:.1f} MHz",
+            lambda: self._tune_now(freq_hz))
+
+    def _tune_now(self, freq_hz: float) -> None:
+        """Change frequency and settle everything behind it.
+
+        Runs on the device worker.  The order matters: nothing downstream
+        should see a block from the old station tagged with the new one,
+        which is what the generation on each block and the flush here are
+        between them for.
+
+        The recordings stop taking samples before the frequency moves,
+        not after.  A recording is a file that claims a station, and the
+        SDR starts delivering the new one the moment the write lands -
+        stopping afterwards leaves however many blocks fell in the gap
+        recorded under the wrong name.  Stopping first can cost the last
+        fraction of a second of the old station, and if the write then
+        fails the recording has ended for a station the receiver never
+        left; a short file is a smaller harm than a wrong one.
+        """
+        shut = RecordingsShut(self.audio_output, self.sdr_receiver,
+                              self.logger)
+        try:
+            # Nothing may start a recording between the door shutting
+            # and the frequency moving: one that did would be a file
+            # named for the old station and full of the new one.
+            with self._tuner_lock:
+                shut.take()
+                self.sdr_receiver.set_center_frequency(freq_hz)
+            self._flush_data_queue()
+            self.fm_demodulator.reset()
+            self.auto_gain.reset_counters()
+        finally:
+            self._close_the_recordings(shut)
+
+    @contextlib.contextmanager
+    def while_the_tuner_is_still(self):
+        """Hold the tuner where it is, or refuse to wait any longer.
+
+        A recording is a file that claims a station - in its name, in
+        its sidecar and in what is in it - so none of those may be
+        decided while the tuner is between shutting the door and
+        moving.  ``start_recording`` takes this itself; a caller that
+        also names the file from the frequency takes it around both, and
+        may, because it is reentrant.
+
+        Waiting for the tuner is 60 ms on a device that answers and for
+        ever on one that does not, and the wait falls on whichever
+        thread pressed the button - so it is bounded, and a recording
+        that cannot be placed is refused rather than left hanging.
+
+        Raises:
+            RecordingError: The tuner has been moving for longer than
+                ``_TUNER_SETTLE_TIMEOUT_SEC``.
+        """
+        if not self._tuner_lock.acquire(timeout=_TUNER_SETTLE_TIMEOUT_SEC):
+            self.logger.error(
+                "Cannot start a recording: the tuner has been moving for "
+                "%.0f s", _TUNER_SETTLE_TIMEOUT_SEC)
+            raise RecordingError(
+                "Cannot start recording: the tuner is not answering")
+        try:
+            yield
+        finally:
+            self._tuner_lock.release()
+
+    def _close_the_recordings(self, shut: "RecordingsShut") -> None:
+        """Finish the recordings *shut* closed, on a thread of its own.
+
+        Closing one is a flush handshake with its worker and takes up to
+        fifteen seconds.  That is not the device worker's to spend: every
+        other write would queue behind it, and the gain the AGC wants
+        next is not worth a quarter of a minute.
+
+        Nobody waits for this here.  Shutdown does, through the
+        finalising flags on the two recorders, which is what keeps a file
+        from being left half written.
+        """
+        if not shut.anything:
+            return
+        try:
+            threading.Thread(target=self._close_the_recordings_now,
+                             args=(shut,), name="RecordingClose",
+                             daemon=True).start()
+        except RuntimeError as e:               # pragma: no cover - guard
+            # No thread to be had.  Slow is better than a file left open
+            # and a finalising flag nobody will ever clear.
+            self.logger.error("Closing a recording on this thread: %s", e)
+            self._close_the_recordings_now(shut)
+
+    def _close_the_recordings_now(self, shut: "RecordingsShut") -> None:
+        """The body of that thread, and the seam a test can hold open."""
+        shut.finish()
 
     def get_frequency(self) -> float:
         """Return the current center frequency in Hz."""
@@ -356,19 +538,30 @@ class FMReceiverController:
     def start_recording(self, filename: str) -> None:
         """Start recording audio to a WAV file.
 
+        The tuner is held still for this.  The frequency below goes
+        into the sidecar, and the file has to be installed before the
+        tuner is free to move off it - otherwise a tune slips between
+        the two and the recording is of a station its own name denies.
+
         Args:
             filename: Output WAV file path.
+
+        Raises:
+            RecordingError: The tuner has been moving too long to wait
+                for; see :meth:`while_the_tuner_is_still`.
         """
-        # Capture context for the metadata sidecar; the audio subsystem
-        # itself does not know the tuner state.
-        try:
-            metadata = {
-                "center_freq_hz": float(self.sdr_receiver.get_center_frequency()),
-                "gain_db": float(self.sdr_receiver.get_gain()),
-            }
-        except Exception:
-            metadata = None
-        self.audio_output.start_recording(filename, metadata=metadata)
+        with self.while_the_tuner_is_still():
+            # Capture context for the metadata sidecar; the audio
+            # subsystem itself does not know the tuner state.
+            try:
+                metadata = {
+                    "center_freq_hz": float(
+                        self.sdr_receiver.get_center_frequency()),
+                    "gain_db": float(self.sdr_receiver.get_gain()),
+                }
+            except Exception:
+                metadata = None
+            self.audio_output.start_recording(filename, metadata=metadata)
 
     def stop_recording(self) -> None:
         """Stop the current recording session."""
@@ -379,8 +572,18 @@ class FMReceiverController:
         return self.audio_output.recording
 
     def start_iq_recording(self, filename: str) -> None:
-        """Start recording raw IQ samples to a 2-channel WAV file."""
-        self.sdr_receiver.start_iq_recording(filename)
+        """Start recording raw IQ samples to a 2-channel WAV file.
+
+        Held against the tuner for the same reason as the audio one: the
+        sidecar names a centre frequency, and the file must be installed
+        while the receiver is still on it.
+
+        Raises:
+            RecordingError: The tuner has been moving too long to wait
+                for; see :meth:`while_the_tuner_is_still`.
+        """
+        with self.while_the_tuner_is_still():
+            self.sdr_receiver.start_iq_recording(filename)
 
     def stop_iq_recording(self) -> None:
         """Stop the current IQ recording session."""
@@ -390,7 +593,7 @@ class FMReceiverController:
         """Return True if raw IQ recording is active."""
         return self.sdr_receiver.iq_recording
 
-    def set_agc_mode(self, enabled: bool) -> None:
+    def set_agc_mode(self, enabled: bool) -> "Request | None":
         """Enable or disable automatic gain control.
 
         When enabled, the auto gain controller monitors IQ peak
@@ -399,25 +602,32 @@ class FMReceiverController:
 
         Args:
             enabled: True to enable auto gain, False for manual mode.
+
+        Returns:
+            The device write this asked for, or None when it asked for
+            none.  The window watches it; nothing has to.
         """
         if enabled:
-            self.auto_gain.enable()
-        else:
-            self.auto_gain.disable()
+            return self.auto_gain.enable()
+        return self.auto_gain.disable()
 
     def get_gain(self) -> float:
         """Return the current gain value in dB."""
         return self.sdr_receiver.get_gain()
 
-    def set_gain(self, gain: float) -> None:
+    def set_gain(self, gain: float) -> "Request | None":
         """Set the manual gain value in dB.
 
         Only effective when auto gain is disabled.
 
         Args:
             gain: Gain value in dB.
+
+        Returns:
+            The device write this asked for, or None when auto gain is on
+            and the request was refused.
         """
-        self.auto_gain.set_gain_manual(gain)
+        return self.auto_gain.set_gain_manual(gain)
 
     def is_manual_gain(self) -> bool:
         """Return True if manual gain mode is active (auto gain disabled)."""
@@ -844,6 +1054,9 @@ class FMReceiverController:
             # goes before the device it writes to.  Each resource also
             # refuses use once closed, because a bounded join cannot promise
             # that every thread has finished.
+            # The writer goes before the device it writes to, and the
+            # writer is one thread for all of them now.
+            self.device_worker.stop()
             self.auto_gain.stop()
             self.sdr_receiver.stop()
             self._join_threads()

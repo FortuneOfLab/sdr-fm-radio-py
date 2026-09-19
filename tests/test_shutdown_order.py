@@ -2101,3 +2101,589 @@ def test_a_stop_from_the_callback_closes_once_however_often_it_is_asked(
 
     assert device.calls.count("close") == 1, device.calls
     assert "close during read" not in device.calls, device.calls
+
+
+# ----------------------------------------------------------------------
+# A recording being closed while shutdown goes past
+# ----------------------------------------------------------------------
+
+def test_cleanup_waits_for_a_recording_that_is_still_closing(receiver,
+                                                             tmp_path):
+    """Tuning ends a recording; shutdown must not overtake the ending.
+
+    stop_recording clears its flag first and then flushes, closes the
+    file and writes the sidecar.  cleanup asked the flag, saw no
+    recording, and came back with the file still open - the process then
+    went, leaving a WAV nothing had finished.
+    """
+    audio = receiver.audio_output
+    audio.start_recording(str(tmp_path / "left_open.wav"))
+    audio.record(np.zeros((2048, 2), dtype=np.float32))
+
+    closing = threading.Event()
+    finish = threading.Event()
+    real_wait = audio._flush_event.wait
+
+    def slow_flush(timeout=None):
+        closing.set()
+        finish.wait(10)
+        return real_wait(0)
+
+    audio._flush_event.wait = slow_flush
+    threading.Thread(target=audio.stop_recording, daemon=True).start()
+    assert closing.wait(5), "the recording never started closing"
+    assert not audio.recording, "the flag is meant to be down by now"
+    assert audio.finalising, "and the file still open"
+
+    done = threading.Event()
+    threading.Thread(target=lambda: (receiver.cleanup(), done.set()),
+                     daemon=True).start()
+    time.sleep(0.3)
+
+    assert not done.is_set(), "cleanup went past a file that was still open"
+
+    finish.set()
+
+    assert done.wait(20), "cleanup never finished"
+    assert audio.record_wave is None, "the file was left open"
+
+
+def test_cleanup_does_not_wait_for_ever_on_a_recording(receiver, tmp_path,
+                                                       monkeypatch):
+    """Bounded, like every other wait on the way out."""
+    monkeypatch.setattr("fm_radio.audio_output._RECORDING_CLOSE_TIMEOUT_SEC",
+                        0.3)
+    audio = receiver.audio_output
+    audio.start_recording(str(tmp_path / "stuck.wav"))
+
+    stuck = threading.Event()
+    audio._finalising.set()             # as though a close were under way
+
+    try:
+        started = time.monotonic()
+        receiver.cleanup()
+        elapsed = time.monotonic() - started
+
+        assert elapsed < 10.0, f"cleanup took {elapsed:.1f} s"
+    finally:
+        stuck.set()
+        audio._finalising.clear()
+
+
+def test_tuning_does_not_put_the_recording_close_on_the_device_worker(
+        receiver, tmp_path):
+    """Fifteen seconds of flush is not the device worker's to spend.
+
+    Every other write queues behind it, and the gain the AGC wants next
+    is not worth a quarter of a minute.
+    """
+    audio = receiver.audio_output
+    audio.start_recording(str(tmp_path / "while_tuning.wav"))
+
+    closing = threading.Event()
+    finish = threading.Event()
+    real_wait = audio._flush_event.wait
+
+    def slow_flush(timeout=None):
+        closing.set()
+        finish.wait(10)
+        return real_wait(0)
+
+    audio._flush_event.wait = slow_flush
+
+    try:
+        tuned = receiver.tune(81.3e6)
+        assert tuned.wait(5), "the tune waited for the recording to close"
+        assert closing.wait(5), "the recording was never closed"
+
+        # The worker is free while that goes on.
+        after = receiver.set_gain(20.0)
+        if after is not None:
+            assert after.wait(5), "a later write queued behind the recording"
+    finally:
+        finish.set()
+
+
+def a_close_that_will_not_finish(audio):
+    """Hold a recording open in its flush, and hand back the release.
+
+    Everything after the flag goes down - the flush, the close, the
+    sidecar - is the slow half, and these tests are about what has to
+    have happened before it.
+    """
+    closing = threading.Event()
+    finish = threading.Event()
+    real_wait = audio._flush_event.wait
+
+    def slow_flush(timeout=None):
+        closing.set()
+        finish.wait(10)
+        return real_wait(0)
+
+    audio._flush_event.wait = slow_flush
+    return closing, finish
+
+
+def test_tuning_shuts_the_recordings_before_the_frequency_moves(receiver,
+                                                                tmp_path):
+    """The door shuts first; the file is finished afterwards.
+
+    The SDR starts delivering the new station the moment the write
+    lands, so a recording that is still taking samples then takes some
+    of them - into a file whose name and sidecar say the old station.
+    """
+    audio = receiver.audio_output
+    sdr = receiver.sdr_receiver
+    audio.start_recording(str(tmp_path / "before.wav"))
+    sdr.start_iq_recording(str(tmp_path / "before_iq.wav"))
+    closing, finish = a_close_that_will_not_finish(audio)
+
+    when_the_write_went = {}
+    real_set = sdr.set_center_frequency
+
+    def watched(freq_hz):
+        when_the_write_went["audio"] = audio.recording
+        when_the_write_went["iq"] = sdr.iq_recording
+        return real_set(freq_hz)
+
+    sdr.set_center_frequency = watched
+
+    try:
+        tuned = receiver.tune(81.3e6)
+        assert tuned.wait(5), "the tune never landed"
+
+        assert when_the_write_went == {"audio": False, "iq": False},             when_the_write_went
+        assert closing.wait(5), "the slow half never started"
+        assert audio.finalising, "the file is meant to still be closing"
+    finally:
+        finish.set()
+        sdr.set_center_frequency = real_set
+
+
+def test_a_block_of_the_new_station_misses_the_old_recording(receiver,
+                                                             tmp_path):
+    """And the file proves it: only what was offered before the tune.
+
+    The thread that finishes the file is held at its first line for the
+    whole of this, which is the window the old order left open: the
+    write has landed, the SDR is on the new station, and nothing has
+    closed the door on the old station's file yet.
+    """
+    audio = receiver.audio_output
+    path = tmp_path / "one_station.wav"
+    audio.start_recording(str(path))
+    audio.record(np.zeros((2048, 2), dtype=np.float32))
+
+    let_it_close = threading.Event()
+    real_close = receiver._close_the_recordings_now
+
+    def held_close(*taken):
+        assert let_it_close.wait(10), "the test never let the close start"
+        return real_close(*taken)
+
+    receiver._close_the_recordings_now = held_close
+
+    try:
+        tuned = receiver.tune(81.3e6)
+        assert tuned.wait(5), "the tune never landed"
+
+        # A block of the new station, offered the way the processing
+        # thread offers one.  The door is shut and this has nowhere to
+        # go, even though the file is still open behind it.
+        audio.record(np.ones((2048, 2), dtype=np.float32))
+    finally:
+        let_it_close.set()
+
+    assert audio.wait_for_the_recording_to_close(20),         "the recording never finished closing"
+    with wave.open(str(path), "rb") as f:
+        assert f.getnframes() == 2048,             "the new station is in the old station's file"
+
+
+def test_a_tune_does_not_wait_for_the_recording_to_finish(receiver, tmp_path):
+    """The fast half is a flag; the slow half is somebody else's thread."""
+    audio = receiver.audio_output
+    audio.start_recording(str(tmp_path / "not_waited_for.wav"))
+    closing, finish = a_close_that_will_not_finish(audio)
+
+    try:
+        tuned = receiver.tune(81.3e6)
+
+        assert tuned.wait(5), "the tune waited for the recording to close"
+        assert closing.wait(5), "the slow half never started"
+        assert audio.finalising, "it was supposed to still be going"
+
+        after = receiver.set_gain(20.0)
+        if after is not None:
+            assert after.wait(5), "a later write queued behind the recording"
+    finally:
+        finish.set()
+
+
+def a_start_that_is_half_way(receiver, what):
+    """Hold a recording between its metadata and its file being installed.
+
+    The window the tune must not fit through: the frequency has been
+    read for the sidecar, and nothing is yet calling itself a recording.
+    """
+    inside = threading.Event()
+    go = threading.Event()
+    if what == "audio":
+        owner, name = receiver.audio_output, "start_recording"
+    else:
+        owner, name = receiver.sdr_receiver, "start_iq_recording"
+    real = getattr(owner, name)
+
+    def slow_start(filename, **kw):
+        inside.set()
+        assert go.wait(10), "the test never let the recording start"
+        return real(filename, **kw)
+
+    setattr(owner, name, slow_start)
+    return inside, go
+
+
+def test_a_tune_waits_for_a_recording_that_is_half_started(receiver, tmp_path):
+    """Otherwise the file is named for a station it does not contain.
+
+    Starting a recording reads the frequency for the sidecar, opens the
+    file and only then calls itself a recording.  A tune that went
+    through the middle of that found no recording to stop, moved, and
+    left the new station being written into the old station's file.
+    """
+    audio = receiver.audio_output
+    sdr = receiver.sdr_receiver
+    was_on = sdr.get_center_frequency()
+    inside, go = a_start_that_is_half_way(receiver, "audio")
+
+    path = tmp_path / "half_started.wav"
+    starting = threading.Thread(target=receiver.start_recording,
+                                args=(str(path),), daemon=True)
+    starting.start()
+    assert inside.wait(5), "the recording never started starting"
+
+    when_the_write_went = {}
+    real_set = sdr.set_center_frequency
+
+    def watched(freq_hz):
+        when_the_write_went["recording"] = audio.recording
+        return real_set(freq_hz)
+
+    sdr.set_center_frequency = watched
+
+    try:
+        tuned = receiver.tune(81.3e6)
+        assert not tuned.wait(0.3), \
+            "the tune went past a recording that was being installed"
+
+        go.set()
+        starting.join(5)
+        assert not starting.is_alive(), "the recording never finished starting"
+        assert tuned.wait(5), "the tune never landed"
+
+        # It started, and then the tune stopped it - in that order, and
+        # before the frequency moved.  So the file is short, and what is
+        # in it is the station its sidecar names.
+        assert when_the_write_went == {"recording": False}, when_the_write_went
+        assert audio._record_meta["center_freq_hz"] == pytest.approx(was_on)
+    finally:
+        sdr.set_center_frequency = real_set
+        go.set()
+
+
+def test_a_tune_waits_for_an_iq_recording_that_is_half_started(receiver,
+                                                               tmp_path):
+    """The IQ sidecar names a centre frequency too."""
+    sdr = receiver.sdr_receiver
+    inside, go = a_start_that_is_half_way(receiver, "iq")
+
+    path = tmp_path / "half_started_iq.wav"
+    starting = threading.Thread(target=receiver.start_iq_recording,
+                                args=(str(path),), daemon=True)
+    starting.start()
+    assert inside.wait(5), "the recording never started starting"
+
+    when_the_write_went = {}
+    real_set = sdr.set_center_frequency
+
+    def watched(freq_hz):
+        when_the_write_went["iq_recording"] = sdr.iq_recording
+        return real_set(freq_hz)
+
+    sdr.set_center_frequency = watched
+
+    try:
+        tuned = receiver.tune(81.3e6)
+        assert not tuned.wait(0.3), \
+            "the tune went past an IQ recording that was being installed"
+
+        go.set()
+        starting.join(5)
+        assert tuned.wait(5), "the tune never landed"
+
+        assert when_the_write_went == {"iq_recording": False}, \
+            when_the_write_went
+    finally:
+        sdr.set_center_frequency = real_set
+        go.set()
+
+
+def test_a_recording_is_refused_rather_than_left_waiting_for_the_tuner(
+        receiver, tmp_path, monkeypatch):
+    """The wait is on the thread that pressed the button, so it is bounded.
+
+    On a device that has stopped answering the frequency write never
+    returns, and a window that waited for it would be a frozen window.
+    """
+    monkeypatch.setattr("fm_radio.controller._TUNER_SETTLE_TIMEOUT_SEC", 0.2)
+    sdr = receiver.sdr_receiver
+    stuck = threading.Event()
+    writing = threading.Event()
+    real_set = sdr.set_center_frequency
+
+    def never_answers(freq_hz):
+        writing.set()
+        stuck.wait(10)
+        return real_set(freq_hz)
+
+    sdr.set_center_frequency = never_answers
+
+    try:
+        receiver.tune(81.3e6)
+        assert writing.wait(5), "the write never started"
+
+        started = time.monotonic()
+        with pytest.raises(RecordingError):
+            receiver.start_recording(str(tmp_path / "refused.wav"))
+        waited = time.monotonic() - started
+
+        assert waited < 5.0, f"the button was held for {waited:.1f} s"
+    finally:
+        stuck.set()
+        sdr.set_center_frequency = real_set
+
+
+def test_a_tune_that_fails_half_way_still_finishes_what_it_took(receiver,
+                                                                tmp_path):
+    """The debt is written down as it is taken, not after it all succeeds.
+
+    The audio recording has been stopped and its file is open when the
+    IQ side blows up.  If that skipped the finish, the WAV would be left
+    for shutdown to wait twenty seconds for and then abandon.
+    """
+    audio = receiver.audio_output
+    path = tmp_path / "half_way.wav"
+    audio.start_recording(str(path))
+    audio.record(np.zeros((2048, 2), dtype=np.float32))
+
+    def blows_up():
+        raise RuntimeError("the IQ side blew up")
+
+    receiver.sdr_receiver.begin_stopping_the_iq_recording = blows_up
+
+    asked = receiver.tune(81.3e6)
+    assert asked.wait(5), "the tune never answered"
+    assert asked.failed, "the tune was supposed to fail"
+
+    assert audio.wait_for_the_recording_to_close(10), \
+        "the recording was left half closed"
+    assert audio.record_wave is None, "the file was left open"
+    with wave.open(str(path), "rb") as f:
+        assert f.getnframes() == 2048
+
+
+def test_a_frequency_write_that_fails_still_finishes_what_it_took(receiver,
+                                                                   tmp_path):
+    """The same, one line later."""
+    audio = receiver.audio_output
+    audio.start_recording(str(tmp_path / "write_failed.wav"))
+
+    def blows_up(freq_hz):
+        raise SDRDeviceError("the write blew up")
+
+    receiver.sdr_receiver.set_center_frequency = blows_up
+
+    asked = receiver.tune(81.3e6)
+    assert asked.wait(5), "the tune never answered"
+    assert asked.failed, "the tune was supposed to fail"
+
+    assert audio.wait_for_the_recording_to_close(10), \
+        "the recording was left half closed"
+    assert audio.record_wave is None, "the file was left open"
+
+
+def test_naming_and_starting_a_recording_can_be_one_step(receiver, tmp_path):
+    """A caller that reads the frequency for the name keeps the tuner still.
+
+    The name claims a station as much as the sidecar does, so the two
+    are chosen together - which means taking the tuner's lock around a
+    start_recording that takes it again.
+    """
+    with receiver.while_the_tuner_is_still():
+        mhz = receiver.get_frequency() / 1e6
+        receiver.start_recording(str(tmp_path / f"{mhz:.1f}MHz.wav"))
+
+    assert receiver.audio_output.recording, "the recording never started"
+    assert receiver.audio_output._record_meta["center_freq_hz"] == \
+        pytest.approx(mhz * 1e6)
+
+
+def a_close_held_at_the_door(receiver):
+    """Hold the thread that finishes a recording, and hand back the key."""
+    let_it_close = threading.Event()
+    real_close = receiver._close_the_recordings_now
+
+    def held_close(*shut):
+        assert let_it_close.wait(10), "the test never let the close start"
+        return real_close(*shut)
+
+    receiver._close_the_recordings_now = held_close
+    return let_it_close
+
+
+def a_start_that_says_when_it_asks(owner, name):
+    """Note when a start asks whether the last recording is still closing.
+
+    That question is the whole fix, and it is asked before the new file
+    is opened - so a test that waits for it knows the starter is still
+    outside, whatever the scheduler is doing.
+    """
+    asked = threading.Event()
+    real = getattr(owner, name)
+
+    def watched(timeout):
+        asked.set()
+        return real(timeout)
+
+    setattr(owner, name, watched)
+    return asked
+
+
+def test_a_recording_that_is_closing_does_not_close_the_next_one(receiver,
+                                                                 tmp_path):
+    """The handle belongs to the close until the close has finished.
+
+    Tuning hands the flush and the close to a thread.  While that runs
+    the flag is down and nothing calls it a recording, so a new one
+    could be started - into the same handle field.  The old close then
+    reached it and closed the new recording's file, leaving a window
+    that still said "recording" and a WAV with nothing in it.
+    """
+    audio = receiver.audio_output
+    first = tmp_path / "first.wav"
+    second = tmp_path / "second.wav"
+    audio.start_recording(str(first))
+    audio.record(np.zeros((2048, 2), dtype=np.float32))
+
+    let_it_close = a_close_held_at_the_door(receiver)
+
+    tuned = receiver.tune(81.3e6)
+    assert tuned.wait(5), "the tune never landed"
+    assert not audio.recording and audio.finalising, \
+        "the first recording is meant to be closing"
+
+    asked = a_start_that_says_when_it_asks(
+        audio, "wait_for_the_recording_to_close")
+    starting = threading.Thread(target=receiver.start_recording,
+                                args=(str(second),), daemon=True)
+    starting.start()
+
+    assert asked.wait(5), \
+        "the start never asked whether the last recording was still closing"
+    assert not audio.recording, \
+        "the second recording was installed under the first one's close"
+
+    let_it_close.set()
+    starting.join(10)
+    assert not starting.is_alive(), "the second recording never started"
+
+    assert audio.recording, "the second recording is not running"
+    assert audio.record_wave is not None, \
+        "the first recording's close took the second one's file"
+
+    audio.record(np.ones((2048, 2), dtype=np.float32))
+    audio.stop_recording()
+
+    with wave.open(str(second), "rb") as f:
+        assert f.getnframes() == 2048, "nothing was written to the second file"
+    with wave.open(str(first), "rb") as f:
+        assert f.getnframes() == 2048, "the first file lost what was in it"
+
+
+def test_an_iq_recording_that_is_closing_does_not_close_the_next_one(
+        receiver, tmp_path):
+    """The IQ side shares a handle field the same way."""
+    sdr = receiver.sdr_receiver
+    first = tmp_path / "first_iq.wav"
+    second = tmp_path / "second_iq.wav"
+    sdr.start_iq_recording(str(first))
+
+    let_it_close = a_close_held_at_the_door(receiver)
+
+    tuned = receiver.tune(81.3e6)
+    assert tuned.wait(5), "the tune never landed"
+    assert not sdr.iq_recording and sdr.iq_finalising, \
+        "the first IQ recording is meant to be closing"
+
+    asked = a_start_that_says_when_it_asks(
+        sdr, "wait_for_the_iq_recording_to_close")
+    starting = threading.Thread(target=receiver.start_iq_recording,
+                                args=(str(second),), daemon=True)
+    starting.start()
+
+    assert asked.wait(5), \
+        "the start never asked whether the last one was still closing"
+    assert not sdr.iq_recording, \
+        "the second IQ recording was installed under the first one's close"
+
+    let_it_close.set()
+    starting.join(10)
+    assert not starting.is_alive(), "the second IQ recording never started"
+
+    assert sdr.iq_recording, "the second IQ recording is not running"
+    assert sdr.iq_record_wave is not None, \
+        "the first recording's close took the second one's file"
+
+
+def test_a_recording_is_refused_when_the_last_one_will_not_finish_closing(
+        receiver, tmp_path, monkeypatch):
+    """The wait is on the thread that pressed the button, so it is bounded."""
+    monkeypatch.setattr("fm_radio.audio_output._PREVIOUS_CLOSE_WAIT_SEC", 0.2)
+    audio = receiver.audio_output
+    audio.start_recording(str(tmp_path / "will_not_close.wav"))
+
+    let_it_close = a_close_held_at_the_door(receiver)
+
+    try:
+        assert receiver.tune(81.3e6).wait(5), "the tune never landed"
+        assert audio.finalising
+
+        started = time.monotonic()
+        with pytest.raises(RecordingError):
+            receiver.start_recording(str(tmp_path / "refused.wav"))
+        waited = time.monotonic() - started
+
+        assert waited < 5.0, f"the button was held for {waited:.1f} s"
+        assert audio.record_wave is not None, \
+            "the refused recording took the closing one's handle"
+    finally:
+        let_it_close.set()
+
+
+def test_an_iq_recording_is_refused_when_the_last_one_will_not_close(
+        receiver, tmp_path, monkeypatch):
+    """The same for IQ."""
+    monkeypatch.setattr("fm_radio.sdr_receiver._PREVIOUS_IQ_CLOSE_WAIT_SEC",
+                        0.2)
+    sdr = receiver.sdr_receiver
+    sdr.start_iq_recording(str(tmp_path / "will_not_close_iq.wav"))
+
+    let_it_close = a_close_held_at_the_door(receiver)
+
+    try:
+        assert receiver.tune(81.3e6).wait(5), "the tune never landed"
+        assert sdr.iq_finalising
+
+        with pytest.raises(RecordingError):
+            receiver.start_iq_recording(str(tmp_path / "refused_iq.wav"))
+    finally:
+        let_it_close.set()

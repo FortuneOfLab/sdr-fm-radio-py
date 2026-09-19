@@ -7,12 +7,14 @@ block on USB, stale AGC requests must not override manual settings, and
 
 from __future__ import annotations
 
+import logging
 import time
 
 import numpy as np
 import pytest
 
 from fm_radio.auto_gain import AutoGainController
+from fm_radio.device_worker import DeviceWorker
 from fm_radio.constants import AGC_GAIN_TABLE, AGC_DEFAULT_GAIN_INDEX
 
 
@@ -37,10 +39,20 @@ class SlowMockSdr:
 
 @pytest.fixture
 def agc_pair():
+    """The gain controller over a slow device, and the worker it writes on.
+
+    The writing thread is not the controller's own any more: every write
+    to a device goes through one worker, so the test owns it and stops it
+    rather than asking the controller to.
+    """
     sdr = SlowMockSdr()
-    agc = AutoGainController(sdr)
-    yield sdr, agc
-    agc.stop()
+    worker = DeviceWorker(logging.getLogger("test.auto_gain"))
+    agc = AutoGainController(sdr, worker)
+    try:
+        yield sdr, agc
+    finally:
+        agc.stop()
+        worker.stop()
 
 
 def _skip_warmup(agc: AutoGainController) -> None:
@@ -108,7 +120,23 @@ def test_warmup_suppresses_agc(agc_pair):
     assert len(sdr.calls) == calls_before
 
 
-def test_stop_joins_worker(agc_pair):
+def test_stopping_the_worker_ends_the_thread_that_writes(agc_pair):
+    """The controller no longer owns one; the worker does."""
     sdr, agc = agc_pair
-    agc.stop()
-    assert not agc._gain_worker.is_alive()
+    agc._worker.stop()
+    assert not agc._worker.running
+
+
+def test_turning_auto_off_is_in_the_log(agc_pair, caplog):
+    """The log is how anybody works out what the gain is doing.
+
+    A gain that stops moving and no line saying why is a puzzle; this
+    one says where the gain was pinned and by what.
+    """
+    _sdr, agc = agc_pair
+    agc.enable()
+    with caplog.at_level(logging.INFO, logger=agc.logger.name):
+        agc.disable(22.0)
+
+    assert any("Auto gain control disabled" in r.message
+               and "22.0" in r.message for r in caplog.records),         [r.message for r in caplog.records]
