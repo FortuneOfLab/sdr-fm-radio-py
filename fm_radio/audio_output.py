@@ -75,6 +75,24 @@ _PREVIOUS_CLOSE_WAIT_SEC: float = 2.0
 _RECORD_FLUSH_SENTINEL = object()
 
 
+class _ReadyRecording:
+    """A file that is open and waiting to be recorded into.
+
+    Made by :meth:`AudioOutput.prepare_a_recording`, and then either
+    installed or discarded.  Nothing about the receiver has changed
+    while one of these exists.
+    """
+
+    __slots__ = ("path", "wave", "channels", "metadata")
+
+    def __init__(self, path: str, wave_file, channels: int,
+                 metadata: dict | None) -> None:
+        self.path = path
+        self.wave = wave_file
+        self.channels = channels
+        self.metadata = metadata
+
+
 class AudioOutput(AudioOutputInterface):
     """
     Audio output and recording management class
@@ -117,7 +135,17 @@ class AudioOutput(AudioOutputInterface):
         # thread reaches ``wave.open`` per session.  Distinct from
         # ``_enqueue_lock`` so the realtime path (``record()``) is
         # never blocked during the slow file open.
-        self._start_lock: threading.Lock = threading.Lock()
+        # Reentrant: start_recording takes it and then calls install,
+        # which takes it again to make its decision against cleanup.
+        self._start_lock: threading.RLock = threading.RLock()
+        # One recording after another, counted.  A sidecar written for
+        # an older number has been overtaken - by the stop that ended
+        # that recording, or by the next one - and is thrown away
+        # rather than written over what came after it.
+        self._record_session: int = 0
+        # Held for the sidecar write alone, so two of them cannot
+        # interleave inside the file.
+        self._sidecar_lock: threading.Lock = threading.Lock()
         # Set by the worker when it reaches the flush sentinel so
         # stop_recording() can close the wave file only after every
         # queued chunk has actually been written.
@@ -299,6 +327,10 @@ class AudioOutput(AudioOutputInterface):
                         metadata: dict | None = None) -> None:
         """Start recording audio (asynchronous via worker thread).
 
+        Getting the file ready and putting it in are separate - see
+        :meth:`prepare_a_recording` - and this does both, for a caller
+        with nothing to decide in between.
+
         Thread safety design:
           - ``_start_lock`` serialises concurrent ``start_recording``
             callers, so only the winner reaches ``wave.open`` and
@@ -320,65 +352,224 @@ class AudioOutput(AudioOutputInterface):
         # only place that can truncate the target file, and we want
         # exactly one caller per session to reach it.
         with self._start_lock:
-            if self._closed.is_set():
-                # Same reasoning as SDRReceiver.start_iq_recording: the
-                # worker that would write the chunks has gone, and no
-                # audio is coming to write.
-                self.logger.warning(
-                    "Ignoring start_recording for %s: the audio output is "
-                    "closed", filename)
-                raise RecordingError(
-                    "Cannot start recording: the audio output is closed")
-
             if self.recording:
                 self.logger.warning(
                     "Already recording; ignoring duplicate "
                     "start_recording for %s", filename,
                 )
                 return
-
-            self._let_the_last_recording_go(filename)
-
+            ready = self.prepare_a_recording(filename, channels, metadata)
             try:
-                wf = wave.open(filename, 'wb')
-                wf.setnchannels(channels)
-                wf.setsampwidth(RECORD_SAMPLE_WIDTH)
-                wf.setframerate(int(self.output_rate))
-            except (OSError, wave.Error) as e:
-                self.logger.error(
-                    f"Recording start failed: {e}", exc_info=True,
-                )
-                raise RecordingError(f"Recording start failed: {e}") from e
+                session = self.install_a_prepared_recording(ready)
+            except BaseException:
+                # The file is open and nothing is going to write to it.
+                self.discard_a_prepared_recording(ready)
+                raise
+        self.finish_starting_the_recording(session)
 
+    def prepare_a_recording(self, filename: str, channels: int = 2,
+                            metadata: dict | None = None
+                            ) -> "_ReadyRecording":
+        """Get a file ready to record into, without starting anything.
+
+        Everything slow is here: waiting for the recording before this
+        one to finish closing, and opening the file.  None of it
+        changes what the receiver is doing, so a caller that has to
+        decide under a lock whether to go ahead can do this first and
+        hold nothing while it happens.
+
+        Args:
+            filename: Filename to save the WAV file.
+            channels: Number of channels.
+            metadata: Extra key/value pairs for the sidecar.
+
+        Returns:
+            What :meth:`install_a_prepared_recording` needs, or what
+            :meth:`discard_a_prepared_recording` takes back.
+
+        Raises:
+            RecordingError: The output is closed, the one before this
+                has not finished closing, or the file would not open.
+        """
+        if self._closed.is_set():
+            # Same reasoning as SDRReceiver.start_iq_recording: the
+            # worker that would write the chunks has gone, and no
+            # audio is coming to write.
+            self.logger.warning(
+                "Ignoring start_recording for %s: the audio output is "
+                "closed", filename)
+            raise RecordingError(
+                "Cannot start recording: the audio output is closed")
+
+        self._let_the_last_recording_go(filename)
+
+        # Before anything is made: a channel count the wave module will
+        # not take is a failure that should cost nothing, rather than
+        # one that leaves a file to be taken back.
+        if int(channels) < 1:
+            raise RecordingError(
+                f"Recording start failed: {channels} channels")
+
+        # Made, not opened: wave.open truncates, and the file it would
+        # truncate can be the one a recording is being written to right
+        # now.  Creating it exclusively means the only file this can
+        # ever empty is the one it just made, which is also the only
+        # one discard_a_prepared_recording is entitled to remove.
+        try:
+            os.close(os.open(filename,
+                             os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666))
+        except FileExistsError as e:
+            self.logger.error("Recording start failed: %s exists", filename)
+            raise RecordingError(
+                f"Recording start failed: {filename} already exists") from e
+        except OSError as e:
+            self.logger.error(
+                f"Recording start failed: {e}", exc_info=True,
+            )
+            raise RecordingError(f"Recording start failed: {e}") from e
+
+        try:
+            wf = wave.open(filename, 'wb')
+        except (OSError, wave.Error) as e:
+            self.logger.error(
+                f"Recording start failed: {e}", exc_info=True,
+            )
+            self._remove_the_file_we_made(filename)
+            raise RecordingError(f"Recording start failed: {e}") from e
+
+        try:
+            wf.setnchannels(channels)
+            wf.setsampwidth(RECORD_SAMPLE_WIDTH)
+            wf.setframerate(int(self.output_rate))
+        except Exception as e:
+            # The handle is open and has no header; closing it is what
+            # lets go of the file, and the file has to go before the
+            # next attempt at the same name can make it.
+            self.logger.error(
+                f"Recording start failed: {e}", exc_info=True,
+            )
+            self._shut_a_file_that_never_started(wf, filename)
+            raise RecordingError(f"Recording start failed: {e}") from e
+        return _ReadyRecording(filename, wf, channels, metadata)
+
+    def _shut_a_file_that_never_started(self, wave_file,
+                                        filename: str) -> None:
+        """Close a handle with no header on it, and take the file back.
+
+        ``Wave_write.close`` raises when it has no parameters to write
+        a header from, but it lets go of the file underneath on its way
+        out regardless - which is the part that matters, because on
+        Windows a file that is still open cannot be removed.
+        """
+        try:
+            wave_file.close()
+        except Exception as e:
+            self.logger.debug("Could not close %s cleanly: %s", filename, e)
+        self._remove_the_file_we_made(filename)
+
+    def _remove_the_file_we_made(self, filename: str) -> None:
+        """Take back a file this class created and is not going to use."""
+        try:
+            os.remove(filename)
+        except OSError as e:                    # pragma: no cover - guard
+            self.logger.debug("Could not remove %s: %s", filename, e)
+
+    def install_a_prepared_recording(self, ready: "_ReadyRecording") -> int:
+        """Put a prepared file in and start recording into it.
+
+        The quick half: a queue drained, a handle installed, a flag
+        raised.  No file is opened, written or closed, so a caller
+        holding a lock across this is holding it for a few dozen
+        assignments.  The sidecar is
+        :meth:`finish_starting_the_recording`, afterwards and outside
+        whatever lock the caller is holding.
+
+        Taken under ``_start_lock``, which cleanup also takes: a
+        recording cannot be installed into an output that has been
+        shut down, leaving a handle nothing will ever close.
+
+        Returns:
+            The session number to hand to
+            :meth:`finish_starting_the_recording`.
+
+        Raises:
+            RecordingError: The output was closed while this was being
+                prepared.
+        """
+        with self._start_lock:
+            if self._closed.is_set():
+                raise RecordingError(
+                    "Cannot start recording: the audio output is closed")
             # Atomic install w.r.t. the realtime ``record()`` path.
             with self._enqueue_lock:
                 self._drain_record_queue()
                 self._flush_event.clear()
                 self._record_drop_count = 0
                 with self.record_lock:
-                    self.record_wave = wf
-                    self._record_base_path = filename
+                    self.record_wave = ready.wave
+                    self._record_base_path = ready.path
                     self._record_part_index = 0
                     self._record_bytes_written = 0
-                    self._record_channels = channels
+                    self._record_channels = ready.channels
                 self.recording = True
 
-            # Metadata sidecar (CLI-thread only, never realtime).
+            self._record_session += 1
+            session = self._record_session
             self._record_meta = {
                 "type": "audio",
                 "file": recording_meta.part_list(
-                    filename, 0, self._make_rotated_record_path,
+                    ready.path, 0, self._make_rotated_record_path,
                 )[0],
                 "sample_rate_hz": int(self.output_rate),
-                "channels": int(channels),
+                "channels": int(ready.channels),
                 "started_at": recording_meta.now_iso(),
             }
-            if metadata:
-                self._record_meta.update(metadata)
-            recording_meta.write_sidecar(
-                filename, self._record_meta, self.logger,
-            )
-            self.logger.info(f"Recording started: {filename}")
+            if ready.metadata:
+                self._record_meta.update(ready.metadata)
+        return session
+
+    def finish_starting_the_recording(self, session: int) -> None:
+        """Write the sidecar and say so, for the recording *session* began.
+
+        Everything about starting a recording that touches a file: the
+        sidecar, which is opened, written and closed, and the log line,
+        which on this program's settings goes to a handler that writes
+        one too.  Neither is for under a lock anybody else wants, and
+        the caller is expected to have let go of its own first.
+
+        A session that has since been overtaken - stopped, or replaced
+        by a later recording - writes nothing: the outcome the stop
+        recorded is the last word, and a start that was slow to get
+        here must not put its own beginning back over it.
+        """
+        with self._sidecar_lock:
+            if session != self._record_session:
+                self.logger.debug(
+                    "Not writing the sidecar for recording %d; the current "
+                    "one is %d", session, self._record_session)
+                return
+            path = self._record_base_path
+            meta = getattr(self, "_record_meta", None)
+            if path is None or not meta:
+                return
+            recording_meta.write_sidecar(path, meta, self.logger)
+        self.logger.info(f"Recording started: {path}")
+
+    def discard_a_prepared_recording(self, ready: "_ReadyRecording") -> None:
+        """Give back a file that is not going to be recorded into.
+
+        The caller decided against it after the file was made, so the
+        file goes too: an empty WAV left behind is a recording that
+        never happened, and it would be the only trace of one.
+        """
+        try:
+            ready.wave.close()
+        except Exception as e:                  # pragma: no cover - guard
+            self.logger.debug("Could not close %s: %s", ready.path, e)
+        # Only ever the file prepare_a_recording created: it refuses to
+        # take over one that was already there, so this cannot remove
+        # somebody else's.
+        self._remove_the_file_we_made(ready.path)
 
     def _let_the_last_recording_go(self, filename: str) -> None:
         """Wait for a recording that is still closing, or refuse this one.
@@ -407,7 +598,8 @@ class AudioOutput(AudioOutputInterface):
             "Refusing to start %s: the previous recording has been closing "
             "for %.0f s", filename, _PREVIOUS_CLOSE_WAIT_SEC)
         raise RecordingError(
-            "Cannot start recording: the previous recording is still closing")
+            "Cannot start recording: the previous recording is still "
+            "closing")
 
     def stop_recording(self) -> None:
         """Stop recording, flush pending writes, and close the file.
@@ -510,18 +702,24 @@ class AudioOutput(AudioOutputInterface):
                 finally:
                     self.record_wave = None
 
-        # Finalise the metadata sidecar with the session outcome.
-        if base_path is not None and getattr(self, "_record_meta", None):
-            self._record_meta.update({
-                "stopped_at": recording_meta.now_iso(),
-                "parts": recording_meta.part_list(
-                    base_path, part_index, self._make_rotated_record_path,
-                ),
-                "dropped_chunks": int(drops),
-            })
-            recording_meta.write_sidecar(
-                base_path, self._record_meta, self.logger,
-            )
+        # Finalise the metadata sidecar with the session outcome.  Under
+        # the same lock as the one the start writes through, and last:
+        # the session is moved on first, so a start still on its way to
+        # writing its own beginning finds itself overtaken and leaves
+        # this alone.
+        with self._sidecar_lock:
+            if base_path is not None and getattr(self, "_record_meta", None):
+                self._record_meta.update({
+                    "stopped_at": recording_meta.now_iso(),
+                    "parts": recording_meta.part_list(
+                        base_path, part_index, self._make_rotated_record_path,
+                    ),
+                    "dropped_chunks": int(drops),
+                })
+                recording_meta.write_sidecar(
+                    base_path, self._record_meta, self.logger,
+                )
+            self._record_session += 1
 
     def record(self, stereo_audio: np.ndarray) -> None:
         """Hand stereo audio to the recording worker.

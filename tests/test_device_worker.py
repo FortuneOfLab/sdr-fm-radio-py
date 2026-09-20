@@ -13,7 +13,9 @@ import time
 
 import pytest
 
-from fm_radio.device_worker import GAIN, GAIN_MODE, TUNE, DeviceWorker
+from fm_radio.device_worker import (
+    GAIN, GAIN_MODE, RECORDING, TUNE, DeviceWorker,
+)
 
 
 @pytest.fixture
@@ -373,3 +375,121 @@ def test_a_write_that_had_begun_is_let_finish(worker):
     assert stopped.wait(5), "stop never returned"
     assert done == ["tune"], "the write did not finish"
     assert asked.finished and not asked.superseded and not asked.failed
+
+
+# ----------------------------------------------------------------------
+# Coalescing stops at an event
+# ----------------------------------------------------------------------
+
+def test_a_tune_before_an_event_is_not_taken_away_by_a_later_one(worker):
+    """The order the queue runs in has to be the order that was asked for.
+
+    Coalescing used to reach the whole queue, so a tune queued before a
+    recording could be removed by a tune queued after it.  The worker
+    still ran one thing at a time - it just ran the wrong set of
+    things, and the recording ended up named for a station the
+    receiver had been told to leave.
+    """
+    release = threading.Event()
+    inside = threading.Event()
+    done: list = []
+    worker.submit(GAIN, "the one in flight", blocking(release, started=inside))
+    assert inside.wait(5), "the worker never started"
+
+    first = worker.submit(TUNE, "tune 81.3",
+                          lambda: done.append("tune 81.3"))
+    recording = worker.submit(RECORDING, "recording",
+                              lambda: done.append("recording"))
+    second = worker.submit(TUNE, "tune 82.5",
+                           lambda: done.append("tune 82.5"))
+    release.set()
+
+    assert second.wait(5), "the last request never ran"
+    assert not first.superseded, "the tune before the recording was taken away"
+    assert done == ["tune 81.3", "recording", "tune 82.5"], done
+    assert recording.finished and not recording.failed
+
+
+def test_two_tunes_after_an_event_still_collapse(worker):
+    """The coalescing that is worth having is still there."""
+    release = threading.Event()
+    inside = threading.Event()
+    done: list = []
+    worker.submit(GAIN, "the one in flight", blocking(release, started=inside))
+    assert inside.wait(5), "the worker never started"
+
+    worker.submit(RECORDING, "recording", lambda: done.append("recording"))
+    first = worker.submit(TUNE, "tune 81.3", lambda: done.append("81.3"))
+    last = worker.submit(TUNE, "tune 82.5", lambda: done.append("82.5"))
+    release.set()
+
+    assert last.wait(5)
+    assert first.superseded, "the tune before it should have been replaced"
+    assert done == ["recording", "82.5"], done
+
+
+def test_two_events_are_two_events(worker):
+    """Nothing coalesces a recording, in either direction."""
+    release = threading.Event()
+    inside = threading.Event()
+    done: list = []
+    worker.submit(GAIN, "the one in flight", blocking(release, started=inside))
+    assert inside.wait(5), "the worker never started"
+
+    worker.submit(RECORDING, "start", lambda: done.append("start"))
+    last = worker.submit(RECORDING, "stop", lambda: done.append("stop"))
+    release.set()
+
+    assert last.wait(5)
+    assert done == ["start", "stop"], done
+
+
+# ----------------------------------------------------------------------
+# Taking a request back
+# ----------------------------------------------------------------------
+
+def test_a_queued_request_can_be_taken_back(worker):
+    """And whoever was waiting on it is released, not left there.
+
+    A cancelled request finishes at the moment it is cancelled, so
+    waiting on it says nothing about where the worker has got to.
+    What says that is a request queued behind it: once that has run,
+    the worker is past the place the cancelled one would have been.
+    """
+    release = threading.Event()
+    inside = threading.Event()
+    done: list = []
+    worker.submit(GAIN, "the one in flight", blocking(release, started=inside))
+    assert inside.wait(5), "the worker never started"
+
+    asked = worker.submit(RECORDING, "recording",
+                          lambda: done.append("recording"))
+    behind = worker.submit(RECORDING, "the one behind it",
+                           lambda: done.append("behind"))
+
+    assert worker.cancel(asked) is True
+    release.set()
+
+    assert asked.wait(5), "the waiter was left there"
+    assert asked.cancelled and not asked.failed
+    assert behind.wait(5), "the worker never got past it"
+    assert done == ["behind"], f"the cancelled one ran anyway: {done}"
+
+
+def test_a_request_that_has_begun_cannot_be_taken_back(worker):
+    """It is already inside whatever it does; the caller has to settle."""
+    release = threading.Event()
+    inside = threading.Event()
+    asked = worker.submit(RECORDING, "recording",
+                          blocking(release, started=inside))
+    assert inside.wait(5), "it never started"
+
+    assert worker.cancel(asked) is False
+
+    release.set()
+    assert asked.wait(5)
+    assert not asked.cancelled
+
+
+def test_cancelling_nothing_is_allowed(worker):
+    assert worker.cancel(None) is False

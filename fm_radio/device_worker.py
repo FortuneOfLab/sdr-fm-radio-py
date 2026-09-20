@@ -38,11 +38,24 @@ the window ignores it and shows whatever the worker reports later, the
 command line waits a moment for it because somebody just typed a command
 and is looking at the prompt.
 
-Requests are coalesced by kind: only the newest tune, the newest gain and
-the newest gain mode are worth making, and a burst of them from a held
-button or a dragged slider collapses to the one the user ended on.  Order
-between kinds is kept, so "manual gain" followed by "30 dB" still happens
-that way round.
+Most requests are coalesced by kind: only the newest tune, the newest
+gain and the newest gain mode are worth making, and a burst of them from
+a held button or a dragged slider collapses to the one the user ended
+on.  Order between kinds is kept, so "manual gain" followed by "30 dB"
+still happens that way round.
+
+Not all of them.  Starting a recording is here for the order it gets -
+the tuner moves on this thread, so a recording cannot be installed half
+way through a retune - and it is an event rather than a state: a start
+and the stop after it are not the same intent expressed twice, so
+neither replaces the other.
+
+An event is also where coalescing stops.  A tune queued before a
+recording is the tune that recording is going to be named for, and a
+later tune must not reach back past the recording and take it away:
+the queue would still run in order, but it would be the wrong order's
+worth of requests.  So the newest request of a coalescing kind only
+replaces others back as far as the last event.
 """
 
 from __future__ import annotations
@@ -53,11 +66,16 @@ import threading
 import time
 from typing import Callable
 
-#: What a request is about.  Two requests of the same kind are the same
-#: intent expressed twice, and only the newer one is worth carrying out.
+#: What a request is about.
 TUNE = "tune"
 GAIN = "gain"
 GAIN_MODE = "gain mode"
+RECORDING = "recording"
+
+#: The kinds where two requests are the same intent expressed twice, so
+#: only the newer one is worth carrying out.  Everything else is an
+#: event: asking twice means asking for two things.
+COALESCING = frozenset({TUNE, GAIN, GAIN_MODE})
 
 #: Longest a write may take before it is worth saying so.  Ordinary ones
 #: are 30-200 ms; past this the device is struggling and the log should
@@ -91,9 +109,15 @@ class Request:
         self._done: threading.Event = threading.Event()
         #: What went wrong, if anything did.
         self.error: Exception | None = None
+        #: Whatever the write produced, for the few that produce
+        #: something worth having - the path a recording was given.
+        self.result = None
         #: True when a newer request of the same kind replaced this one
         #: before it was carried out.
         self.superseded: bool = False
+        #: True when whoever asked for this took it back before it was
+        #: carried out - a recording stopped before it started.
+        self.cancelled: bool = False
 
     @property
     def finished(self) -> bool:
@@ -109,16 +133,23 @@ class Request:
         """Wait for this to finish.  False if it has not by then."""
         return self._done.wait(timeout)
 
-    def _finish(self, error: Exception | None = None) -> None:
+    def _finish(self, error: Exception | None = None,
+                result=None) -> None:
         self.error = error
+        self.result = result
         self._done.set()
 
     def _supersede(self) -> None:
         self.superseded = True
         self._done.set()
 
+    def _cancel(self) -> None:
+        self.cancelled = True
+        self._done.set()
+
     def __repr__(self) -> str:                  # pragma: no cover - debug
         state = ("waiting" if not self.finished else
+                 "cancelled" if self.cancelled else
                  "superseded" if self.superseded else
                  f"failed: {self.error}" if self.failed else "done")
         return f"<Request {self.serial} {self.what} ({state})>"
@@ -162,12 +193,14 @@ class DeviceWorker:
         """Ask for a device write, and come straight back.
 
         Args:
-            kind: ``TUNE``, ``GAIN`` or ``GAIN_MODE``.  A newer request of
-                the same kind replaces an older one that has not been
-                carried out yet.
+            kind: One of the kinds above.  For a kind in ``COALESCING``,
+                a newer request replaces an older one of the same kind
+                that has not been carried out yet; for any other, both
+                are carried out.
             what: How to describe it to a person.
             run: What to do on the worker thread.  Anything it raises
-                becomes the request's error.
+                becomes the request's error, and whatever it returns
+                becomes the request's result.
 
         Returns:
             The request, which the caller is free to ignore.
@@ -184,19 +217,65 @@ class DeviceWorker:
                     "Not %s: the device worker has stopped", what)
                 request._supersede()
                 return request
-            # Anything of this kind still waiting was the same intent,
-            # expressed before the user changed their mind.  It goes, and
-            # the new one takes its place at the back - at the back, not
-            # in its place, so a gain asked for after a gain mode still
-            # happens after it.
-            for older in [r for r in self._waiting if r.kind == kind]:
-                self._waiting.remove(older)
-                superseded.append(older)
+            # Anything of this kind still waiting since the last event
+            # was the same intent, expressed before the user changed
+            # their mind.  It goes, and the new one takes its place at
+            # the back - at the back, not in its place, so a gain asked
+            # for after a gain mode still happens after it.
+            #
+            # Since the last event, and no further back: a tune queued
+            # before a recording is the one that recording will be
+            # named for, and reaching past the recording to take it
+            # away would leave the recording named for a station the
+            # receiver was told to leave.
+            if kind in COALESCING:
+                for older in self._replaceable(kind):
+                    self._waiting.remove(older)
+                    superseded.append(older)
             self._waiting.append(request)
             self._gate.notify()
         for older in superseded:
             older._supersede()
         return request
+
+    def _replaceable(self, kind: str) -> list[Request]:
+        """Waiting requests of *kind* that a new one may take the place of.
+
+        Only those after the last event in the queue.  The caller holds
+        ``_gate``.
+        """
+        after = 0
+        for i, waiting in enumerate(self._waiting):
+            if waiting.kind not in COALESCING:
+                after = i + 1
+        return [r for r in list(self._waiting)[after:] if r.kind == kind]
+
+    def cancel(self, request: "Request | None") -> bool:
+        """Take a request back, if it has not begun.
+
+        For a caller that has changed its mind: a recording stopped
+        before the worker got round to starting it.  A request that is
+        being carried out cannot be taken back - the caller has to
+        settle with whatever it did - and one that is finished has
+        nothing to take.
+
+        Args:
+            request: What to take back; None is allowed and does
+                nothing, so a caller need not check.
+
+        Returns:
+            True when it was taken back, and is now finished as
+            cancelled rather than done.
+        """
+        if request is None:
+            return False
+        with self._gate:
+            if request not in self._waiting:
+                return False
+            self._waiting.remove(request)
+        self.logger.debug("Taken back: %s", request.what)
+        request._cancel()
+        return True
 
     @property
     def latest(self) -> Request | None:
@@ -260,7 +339,7 @@ class DeviceWorker:
     def _write(self, request: Request) -> None:
         started = time.perf_counter()
         try:
-            request._run()
+            result = request._run()
         except Exception as e:
             self.logger.error("%s failed: %s", request.what, e, exc_info=True)
             request._finish(e)
@@ -268,8 +347,8 @@ class DeviceWorker:
             return
         took_ms = (time.perf_counter() - started) * 1000.0
         level = logging.WARNING if took_ms >= _SLOW_WRITE_MS else logging.INFO
-        self.logger.log(level, "%s (USB blocked %.1fms)", request.what, took_ms)
-        request._finish()
+        self.logger.log(level, "%s (took %.1fms)", request.what, took_ms)
+        request._finish(result=result)
         self._remember(request)
 
     # ------------------------------------------------------------------
