@@ -348,6 +348,53 @@ def test_the_mode_distinguishes_mono_from_a_half_open_blend(
     assert view._mode.text() == expected
 
 
+@pytest.mark.parametrize("blend", [0.51, 0.76, 0.92, 0.994])
+def test_a_blend_the_receiver_calls_stereo_is_still_shown_as_a_figure(
+        window, blend):
+    """The receiver calls anything over half stereo; the bar does not.
+
+    STEREO beside a bar half way along reads as a contradiction, and
+    the bar is the reason this exists: it says how much there is.
+    So the word only claims the whole of it when the bar is full,
+    and says the figure otherwise - which is also what the bar shows.
+    """
+    view, _ = window(FakeController(snapshot(stereo=True,
+                                             blend_factor=blend)))
+
+    assert view._mode.text() == f"{blend:.2f}", "the word overstates it"
+    assert view._blend.value() == round(blend * 100)
+
+
+@pytest.mark.parametrize("blend,word", [
+    (1.0, "STEREO"),
+    (0.995, "STEREO"),
+])
+def test_the_word_claims_the_whole_of_it_only_when_the_bar_is_full(
+        window, blend, word):
+    view, _ = window(FakeController(snapshot(stereo=True,
+                                             blend_factor=blend)))
+
+    assert view._blend.value() == 100
+    assert view._mode.text() == word
+
+
+@pytest.mark.parametrize("blend", [-0.2, 1.4, float("nan")])
+def test_the_word_never_says_something_the_bar_cannot_show(window, blend):
+    """The bar clamps, so the figure beside it has to clamp with it.
+
+    It printed the raw blend, so a blend of -0.2 was an empty bar
+    labelled -0.20 and a NaN was an empty bar labelled nan.
+    """
+    view, _ = window(FakeController(snapshot(stereo=True,
+                                             blend_factor=blend)))
+
+    shown = view._mode.text()
+    if shown == "STEREO":
+        assert view._blend.value() == 100
+    else:
+        assert float(shown) == pytest.approx(view._blend.value() / 100.0)
+
+
 # ----------------------------------------------------------------------
 # How much stereo there is
 # ----------------------------------------------------------------------
@@ -391,6 +438,40 @@ def test_a_blend_outside_its_range_stays_on_the_bar(window, blend,
                                              blend_factor=blend)))
 
     assert view._blend.value() == expected
+
+
+def test_the_blend_line_does_not_change_width_as_it_settles(window,
+                                                              qt_app):
+    """Or the bar shrinks and grows under a receiver finding its feet.
+
+    A minimum width picked by eye is not a fixed width: the column
+    grows the moment the text is wider than it.
+
+    In silence, because the level labels share that column and
+    "-12.3 dBFS" is wider than anything the blend line says - so
+    with a signal in them they size the column and the blend line
+    could be any width at all without it showing.
+    """
+    def quiet(**kw):
+        return snapshot(level_left_dbfs=SILENCE_DBFS,
+                        level_right_dbfs=SILENCE_DBFS, **kw)
+
+    controller = FakeController(quiet(stereo=True, blend_factor=0.30))
+    view, _ = window(controller)
+    view.resize(800, 600)
+    view.show()
+    qt_app.processEvents()
+    assert view._left_db.text() == "--", "the meters were meant to be silent"
+    while_blending = view._blend.width()
+
+    for stereo, blend in ((True, 1.0), (True, 0.0), (False, 1.0)):
+        controller.status = quiet(stereo=stereo, blend_factor=blend)
+        view.refresh()
+        qt_app.processEvents()
+
+        assert view._blend.width() == while_blending, (
+            "the bar went from %d to %d wide showing %r"
+            % (while_blending, view._blend.width(), view._mode.text()))
 
 
 def test_the_bar_empties_when_there_is_no_snapshot(window):

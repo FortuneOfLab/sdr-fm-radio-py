@@ -77,13 +77,35 @@ METER_FLOOR_DBFS = -60.0
 #: tried would be gone in 50 ms - faster than they can read it.
 NOTICE_SECONDS = 5.0
 
-#: Gain slider resolution: the widget is integral, the tuner is in dB.
-#: Room for the widest thing the blend line says, so that the bar
-#: beside it does not change width as the receiver settles.
-_MODE_WIDTH = 60
+#: Everything the blend line can say.  The widest of them is measured
+#: and kept, so that the bar beside it does not change width as the
+#: receiver settles.
+_BLEND_WORDS = ("--", "MONO", "STEREO", "0.00")
 
+#: Gain slider resolution: the widget is integral, the tuner is in dB.
 _GAIN_SCALE = 10.0
 _GAIN_MAX_DB = 49.6
+
+
+def _room_for_the_widest(label: QLabel) -> int:
+    """How wide *label* has to be to hold any of _BLEND_WORDS.
+
+    Measured rather than guessed.  A minimum width only holds until
+    the text is wider than it, so a number picked by eye is not a
+    fixed width at all: the column grows for the longest word and
+    the bar beside it shrinks, which is the flicker this is here to
+    prevent.  Asking the label itself covers the font it is really
+    going to use and whatever margins it has.
+    """
+    was = label.text()
+    try:
+        widest = 0
+        for word in _BLEND_WORDS:
+            label.setText(word)
+            widest = max(widest, label.sizeHint().width())
+        return widest
+    finally:
+        label.setText(was)
 
 
 def _blend_percent(blend: float, stereo: bool) -> int:
@@ -244,7 +266,7 @@ class ReceiverWindow(QMainWindow):
             "How much of the stereo image is being let through: "
             "empty is mono, full is the whole of it")
         self._mode = QLabel("--", box)
-        self._mode.setMinimumWidth(_MODE_WIDTH)
+        self._mode.setMinimumWidth(_room_for_the_widest(self._mode))
         grid.addWidget(QLabel("Blend", box), 0, 0)
         grid.addWidget(self._blend, 0, 1)
         grid.addWidget(self._mode, 0, 2)
@@ -636,19 +658,26 @@ class ReceiverWindow(QMainWindow):
     def _show_blend(self, status: StatusSnapshot) -> None:
         """The bar, and a word for what the bar amounts to.
 
-        The word is still worth having: a bar three-quarters along
-        does not say whether the receiver is on its way up to stereo
-        or has settled there, and MONO says something a bar at zero
-        cannot - that nobody asked for stereo in the first place.
+        Both off the same number, so that they cannot disagree.  The
+        word said STEREO from a blend of 0.5 up, which is what the
+        receiver calls stereo, and beside a bar half way along it
+        read as a contradiction; and it printed the raw blend while
+        the bar clamped it, so a blend of -0.2 was an empty bar
+        labelled -0.20.
+
+        The word is still worth having.  MONO says something the bar
+        cannot - that nobody asked for stereo, rather than that the
+        pilot is too poor for it - and a number is worth more than a
+        bar to read a figure off.
         """
-        self._blend.setValue(_blend_percent(status.blend_factor,
-                                            status.stereo))
+        percent = _blend_percent(status.blend_factor, status.stereo)
+        self._blend.setValue(percent)
         if not status.stereo:
             self._mode.setText("MONO")
-        elif status.stereo_locked:
+        elif percent >= 100:
             self._mode.setText("STEREO")
         else:
-            self._mode.setText(f"{status.blend_factor:.2f}")
+            self._mode.setText(f"{percent / 100.0:.2f}")
 
     def _show_gain(self, gain_db: float, auto: bool) -> None:
         """Show the gain without fighting the user for the slider.
