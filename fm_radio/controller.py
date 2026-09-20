@@ -50,6 +50,9 @@ from fm_radio.exceptions import (
 from fm_radio.stations import (
     Station, load_stations, favorites, search, in_area, nearest,
 )
+from fm_radio.spectrum import (
+    DEFAULT_SPECTRUM_INTERVAL_SEC, SpectrumFrame, SpectrumMaker,
+)
 from fm_radio.telemetry import StatusSnapshot, TelemetryPublisher, peak_dbfs
 from fm_radio.constants import (
     SDR_SAMPLE_RATE, SDR_SAMPLE_RATE_LIGHT, SDR_CENTER_FREQ_DEFAULT,
@@ -357,6 +360,17 @@ class FMReceiverController:
             # published as the state of what the receiver moved to.
             self.telemetry: TelemetryPublisher = TelemetryPublisher(
                 current_generation=lambda: self.sdr_receiver.tuning_generation)
+            # The picture of the band, on a slot of its own.  It costs
+            # more to make than a snapshot and a display can use fewer
+            # of them, so it has its own interval; the generation
+            # filtering is the same, and for the same reason - a
+            # picture of the station the receiver has just left is not
+            # one to show.
+            self.spectrum: TelemetryPublisher = TelemetryPublisher(
+                interval_sec=DEFAULT_SPECTRUM_INTERVAL_SEC,
+                current_generation=lambda: self.sdr_receiver.tuning_generation)
+            self._spectrum_maker = SpectrumMaker(
+                self.sdr_receiver.sample_rate)
             # Naming the tuned station means scanning the catalogue, which
             # only has a different answer when the frequency changes.  The
             # cache is written and read on the processing thread only.
@@ -409,6 +423,15 @@ class FMReceiverController:
     def current_station(self) -> Station | None:
         """Return the catalogue entry the tuner is currently sitting on."""
         return nearest(self.catalogue, self.get_frequency())
+
+    def get_spectrum(self) -> "SpectrumFrame | None":
+        """The latest picture of the band, or None if there is not one.
+
+        None for the same three reasons as :meth:`get_status`: nothing
+        published yet, everything published belongs to a tuning the
+        receiver has moved on from, or every attempt has failed.
+        """
+        return self.spectrum.latest
 
     def get_status(self) -> StatusSnapshot | None:
         """Return the current receiver state, or None if there is not one.
@@ -803,6 +826,39 @@ class FMReceiverController:
     # Internal methods
     # ------------------------------------------------------------------
 
+    def _publish_spectrum(self, iq_samples: np.ndarray, now: float,
+                          generation: int) -> None:
+        """Make a picture of the band and publish it, absorbing failures.
+
+        On the processing thread, out of the same block the demodulator
+        just had, and only when one is due - measured at a third of a
+        millisecond against the sixteen the block has.  A failure here
+        is a display that does not update; it is not worth a block.
+
+        The frequency comes from the tuner paired with the generation
+        it belongs to, not from ``center_freq``: that is set before
+        the hardware write and the generation is bumped after it, so
+        for the 40-200 ms in between a picture of the old station
+        would be labelled with the new frequency - and would pass the
+        staleness check on the way out, because the generation has
+        not moved yet either.
+        """
+        current, centre_hz = self.sdr_receiver.the_tuning_and_its_frequency()
+        if current != generation:
+            # Samples from a station we have left.  The publisher
+            # would drop the frame on the way out; building it first
+            # would be a third of a millisecond of the block's
+            # sixteen spent on a picture nobody sees.
+            return
+        try:
+            self.spectrum.publish(
+                self._spectrum_maker.frame(iq_samples, centre_hz, now),
+                generation)
+        except Exception as e:
+            self.logger.error("Could not build a spectrum: %s", e,
+                              exc_info=True)
+            self.spectrum.defer(now)
+
     def _publish_status(self, iq_samples: np.ndarray, left: np.ndarray,
                         right: np.ndarray, profiler: "_BlockProfiler",
                         block_dt_sec: float, q_depth: int, now: float,
@@ -1098,6 +1154,8 @@ class FMReceiverController:
                             iq_samples, left, right, profiler, block_dt,
                             q_depth_after_get, t_end, generation,
                         )
+                    if block_ok and self.spectrum.due(t_end):
+                        self._publish_spectrum(iq_samples, t_end, generation)
         except Exception as e:
             self.logger.critical(f"Fatal error in processing thread: {e}", exc_info=True)
         finally:

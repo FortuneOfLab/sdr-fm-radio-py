@@ -44,6 +44,7 @@ class FakeController:
 
     def __init__(self, status: StatusSnapshot | None = None) -> None:
         self.status = status
+        self.spectrum = None
         # The real controller owns one of these; the window reads it to
         # find out how the writes it asked for went.
         self.device_worker = DeviceWorker(logging.getLogger("test.gui"))
@@ -78,6 +79,15 @@ class FakeController:
     # --- reading ---
     def get_status(self):
         return self.status
+
+    def get_spectrum(self):
+        """The picture of the band, or None when there is not one.
+
+        The real one publishes these at 10 Hz from the processing
+        thread and hides any from before a retune, so None is an
+        ordinary answer and the window has to cope with it.
+        """
+        return self.spectrum
 
     def get_frequency(self):
         return self.frequency

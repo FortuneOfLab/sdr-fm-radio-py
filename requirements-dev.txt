@@ -3,3 +3,4 @@ scipy
 numba
 pytest
 PySide6
+pyqtgraph

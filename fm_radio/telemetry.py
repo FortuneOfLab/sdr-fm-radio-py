@@ -170,6 +170,13 @@ class StatusSnapshot:
 class TelemetryPublisher:
     """A latest-value slot between the processing thread and its readers.
 
+    What it holds is a :class:`StatusSnapshot` or anything else the
+    processing thread makes at an interval and hands over whole: the
+    only thing asked of it is a ``timestamp``, which is what the next
+    deadline is measured from.  The receiver keeps two - the status at
+    20 Hz and the spectrum at 10 Hz - because they cost very different
+    amounts to build and a display wants them at different rates.
+
     The processing thread is the only writer of snapshots; readers only read.
     Publishing rebinds one attribute to an already-built immutable object, so
     a reader sees either the previous entry or the new one, never a
@@ -189,8 +196,8 @@ class TelemetryPublisher:
     def __init__(self, interval_sec: float = DEFAULT_PUBLISH_INTERVAL_SEC,
                  current_generation: Callable[[], int] | None = None) -> None:
         self.interval_sec: float = max(0.0, float(interval_sec))
-        # (generation, snapshot); rebound as one object, never mutated.
-        self._latest: tuple[int, StatusSnapshot] | None = None
+        # (generation, entry); rebound as one object, never mutated.
+        self._latest: tuple[int, Any] | None = None
         # Where "which state is current" comes from.  The receiver passes
         # the tuner's generation; the default suits a publisher under test,
         # where nothing ever changes underneath.
@@ -213,7 +220,7 @@ class TelemetryPublisher:
         """
         return (now if now is not None else time.perf_counter()) >= self._next_due
 
-    def publish(self, snapshot: StatusSnapshot, generation: int) -> None:
+    def publish(self, snapshot: "Any", generation: int) -> None:
         """Store *snapshot* as the state of *generation* and arm the interval.
 
         *generation* is the one stamped on the IQ block the snapshot was
@@ -234,8 +241,8 @@ class TelemetryPublisher:
         self._next_due = now + self.interval_sec
 
     @property
-    def latest(self) -> StatusSnapshot | None:
-        """The current snapshot, or None if there is not one.
+    def latest(self) -> "Any | None":
+        """The current entry, or None if there is not one.
 
         None means no block has been processed yet, or everything published
         so far belongs to a generation the receiver has moved on from.
