@@ -1485,6 +1485,60 @@ def test_pilot_power_scaling_matches_real_bandpass_convention():
     assert abs(measured - expected) / expected < 0.05
 
 
+def a_neighbour(samples, rate, offset_hz, amplitude=4.0):
+    """A loud carrier well outside the channel being received."""
+    t = np.arange(samples) / rate
+    return (amplitude
+            * np.exp(2j * np.pi * offset_hz * t)).astype(np.complex64)
+
+
+def test_the_channel_it_offers_has_the_neighbours_taken_out(rng):
+    """The whole point of offering it rather than the raw block.
+
+    Something measuring how steady the channel is has to be given
+    the channel: on the real radio a frequency with nothing on it
+    next to a loud one measured 0.124 across the band and 0.646
+    across the channel alone.
+    """
+    demod = FMDemodulator(stereo=True)
+    wanted = _random_iq(rng, SDR_BLOCK_SIZE) * 0.1
+    loud_neighbour = a_neighbour(SDR_BLOCK_SIZE, demod.iq_sample_rate,
+                                 offset_hz=0.4e6)
+
+    demod.process_iq_samples(
+        (wanted + loud_neighbour).astype(np.complex64))
+    channel = demod.channel_iq
+
+    assert channel is not None
+    strength = float(np.mean(np.abs(channel) ** 2))
+    neighbour_strength = float(np.mean(np.abs(loud_neighbour) ** 2))
+    assert strength < neighbour_strength / 100.0, (
+        "the neighbour is still in there: channel %.4g against its %.4g"
+        % (strength, neighbour_strength))
+
+
+def test_the_light_chain_offers_its_channel_too(rng):
+    """It has no filter to apply: at 250 kHz the band is the channel."""
+    demod = FMDemodulatorLight(stereo=False)
+    block = _random_iq(rng, SDR_BLOCK_SIZE)
+
+    demod.process_iq_samples(block)
+
+    assert demod.channel_iq is not None
+    assert demod.channel_iq.size == block.size
+
+
+def test_the_channel_is_gone_after_a_reset(rng):
+    """A reset is a retune; the station just left is not the channel."""
+    demod = FMDemodulator(stereo=True)
+    demod.process_iq_samples(_random_iq(rng, SDR_BLOCK_SIZE))
+    assert demod.channel_iq is not None
+
+    demod.reset()
+
+    assert demod.channel_iq is None
+
+
 def test_the_first_block_after_a_reset_carries_no_audio(rng):
     """The filters have nothing in them yet, so nothing comes out.
 

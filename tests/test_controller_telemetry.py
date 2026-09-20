@@ -9,6 +9,7 @@ the DSP.
 from __future__ import annotations
 
 import contextlib
+import sys
 import threading
 import time
 
@@ -688,6 +689,96 @@ def test_a_stale_block_is_dropped_before_the_new_tuning_is_started(receiver):
     assert watched.kinds == ["reset", "process"], \
         f"the stale block reached the demodulator: {watched.kinds}"
     assert receiver._stale_blocks == 1
+
+
+# ----------------------------------------------------------------------
+# How clean the channel is
+# ----------------------------------------------------------------------
+
+def test_the_snapshot_says_how_steady_the_envelope_is(receiver):
+    """An FM carrier holds its amplitude; noise does not."""
+    run_blocks(receiver, 4)
+
+    status = receiver.get_status()
+
+    assert status.am_depth > 0.0, "the fake IQ is noise; it cannot be steady"
+
+
+def test_the_envelope_is_measured_on_the_channel_not_the_band(receiver):
+    """The raw block carries the neighbours too.
+
+    On the real radio a frequency with nothing on it next to a loud
+    one read 0.124 against the whole 1.024 MHz and 0.646 once the
+    channel was all that was left - a clean-looking figure produced
+    entirely by somebody else's transmission.  So the snapshot has
+    to be measuring what the demodulator filtered, not what the SDR
+    delivered.
+    """
+    demod = receiver.fm_demodulator
+    handed_in = []
+    measured = []
+
+    real_process = demod.process_iq_samples
+    module = sys.modules["fm_radio.controller"].multipath
+    real_depth = module.am_depth
+
+    def watched_process(iq):
+        handed_in.append(id(iq))
+        return real_process(iq)
+
+    def watched_depth(iq):
+        # What it was given, and whether that was the channel the
+        # demodulator had just filtered.  Not the size: a filter is
+        # the same length in as out, so every version of this passes
+        # a size check.
+        measured.append((id(iq), iq is demod.channel_iq))
+        return real_depth(iq)
+
+    demod.process_iq_samples = watched_process
+    module.am_depth = watched_depth
+    try:
+        run_blocks(receiver, 4)
+    finally:
+        module.am_depth = real_depth
+
+    assert measured, "nothing measured the envelope"
+    raw = set(handed_in)
+    for where, was_the_channel in measured:
+        assert where not in raw, "the whole band was measured"
+        assert was_the_channel, "something other than the channel was"
+
+
+def test_a_block_that_cannot_be_measured_is_not_reported_as_clean(receiver):
+    """The snapshot carries the not-measurable through as None.
+
+    0.06 is a good station and 0.0 is a perfect one; neither is what
+    a block of NaNs is, and this reading is the one thing that must
+    not call the worst input the best reception.
+    """
+    block = iq_block(receiver)
+    block[7] = complex(float("nan"), 0.0)
+    enqueue(receiver, block)
+    receiver.telemetry.interval_sec = 0.0
+    run_blocks(receiver, 1)
+
+    seen = [receiver.get_status().am_depth]
+    receiver.fm_demodulator._channel_iq = np.full(
+        16, complex(float("nan"), 0.0), dtype=np.complex64)
+    run_blocks(receiver, 1)
+    seen.append(receiver.get_status().am_depth)
+
+    assert None in seen, "a block of NaNs was measured as %s" % seen
+
+
+def test_a_demodulator_that_has_not_run_yet_reads_as_nothing(receiver):
+    """channel_iq is None before the first block, and after a retune."""
+    assert receiver.fm_demodulator.channel_iq is None
+
+    run_blocks(receiver, 2)
+    assert receiver.fm_demodulator.channel_iq is not None
+
+    receiver.fm_demodulator.reset()
+    assert receiver.fm_demodulator.channel_iq is None,         "the station just left is still in there"
 
 
 # ----------------------------------------------------------------------

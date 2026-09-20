@@ -50,6 +50,7 @@ from fm_radio.exceptions import (
 from fm_radio.stations import (
     Station, load_stations, favorites, search, in_area, nearest,
 )
+from fm_radio import multipath
 from fm_radio.spectrum import (
     DEFAULT_SPECTRUM_INTERVAL_SEC, SpectrumFrame, SpectrumMaker,
 )
@@ -917,9 +918,13 @@ class FMReceiverController:
         """Capture the receiver's state for whatever is watching it.
 
         Called from the processing thread, only on a block where the
-        publisher is due.  The three measurements taken here — IQ peak and
-        the two audio levels — are the only work this adds to the realtime
-        path; everything else is reading a value the receiver already keeps.
+        publisher is due.  The four measurements taken here — IQ peak,
+        the two audio levels, and the AM depth of the channel's
+        envelope — are the only work this adds to the realtime path;
+        everything else is reading a value the receiver already keeps.
+        The AM depth is the expensive one at 0.138 ms, and the count is
+        worth keeping right: it is what anybody costing this path will
+        read before they measure it.
         """
         demod = self.fm_demodulator
         audio = self.audio_output
@@ -928,6 +933,14 @@ class FMReceiverController:
         station_name = self._station_name_for(freq_hz)
 
         iq_peak = float(np.max(np.abs(iq_samples))) if iq_samples.size else 0.0
+        # Of the channel, not of the band: the raw block carries the
+        # neighbours too, and on a quiet frequency next to a loud one
+        # they make an empty channel look clean.  The demodulator
+        # hands over what it filtered for itself, so this is a mean
+        # and a standard deviation and nothing else.
+        channel_iq = demod.channel_iq
+        am = (multipath.am_depth(channel_iq)
+              if channel_iq is not None else None)
 
         return StatusSnapshot(
             freq_hz=freq_hz,
@@ -944,6 +957,8 @@ class FMReceiverController:
             pilot_snr_db=demod.pilot_snr_ema,
             pilot_jitter_db=float(demod.pilot_jitter_ema),
             side_nr_enabled=bool(demod.side_nr_enabled),
+
+            am_depth=am,
 
             level_left_dbfs=peak_dbfs(left),
             level_right_dbfs=peak_dbfs(right),
