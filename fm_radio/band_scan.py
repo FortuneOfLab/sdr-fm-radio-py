@@ -32,6 +32,13 @@ pilot.  A pilot is the strongest evidence that a peak is a broadcast
 rather than a spur - nothing else at 19 kHz above a demodulated carrier
 is a coincidence.
 
+It is not evidence that the peak is a station of its own.  Tuned to
+the edge of a strong signal the receiver still hears that signal, and
+demodulates its pilot along with it: 82.1 MHz, which is NHK-FM at
+82.5 leaking through, came back with 15 dB of pilot.  A pilot says
+there is a broadcast in the channel, not that the channel is where it
+is transmitted from.
+
 Two things this had to learn from the band it was written against.
 
 The gain is held for the whole sweep.  With the AGC running, each hop
@@ -95,10 +102,40 @@ PILOT_HZ: float = 19000.0
 PILOT_HALF_WIDTH_HZ: float = 400.0
 PILOT_NOISE_OFFSET_HZ: float = 2000.0
 
+#: Blocks thrown away after tuning before the pilot is measured.
+#: The first one out of a demodulator reset carries no audio at all,
+#: and the ones after it are its filters filling.
+SETTLING_BLOCKS: int = 2
+
 #: How far the pilot has to stand above that noise to count as one.
 #: Measured on this radio: real stereo stations came out at 20-40 dB
 #: and channels with nothing on them below 3 dB.
 PILOT_OVER_NOISE_DB: float = 10.0
+
+
+#: A stereo pilot was heard here: this is a broadcast.
+CONFIRMED = "confirmed"
+#: Something is here and nothing proved what.  A mono station reads
+#: this way, and so does a strong station's skirt, and so does a
+#: spur - the pilot is the only evidence this scan has, and its
+#: absence is not evidence of absence.
+UNCONFIRMED = "unconfirmed"
+#: Unconfirmed, and there is a confirmed station close enough and
+#: far enough above it to be what this is the edge of.
+LIKELY_SKIRT = "likely skirt"
+
+#: How far a skirt reaches, and how far below its station it is by
+#: then.  82.1 MHz is NHK-FM at 82.5 leaking through; the peak test
+#: only rejects skirts within 200 kHz, and widening that would lose
+#: real neighbours instead.
+#:
+#: Power is the only test there is for this.  A skirt carries its
+#: station's pilot - 82.1 read 15 dB of one - so being a broadcast
+#: does not make a peak a station, and 82.1 comes back as a skirt
+#: only when it is far enough below 82.5.  On a run where the two
+#: were 1.6 dB apart it did not, and was reported as a station.
+SKIRT_REACH_HZ: float = 500e3
+SKIRT_BELOW_DB: float = 15.0
 
 
 @dataclasses.dataclass(frozen=True)
@@ -113,15 +150,60 @@ class Signal:
     #: None if the frequency was never listened to for one.
     pilot_over_noise_db: float | None = None
 
+    #: CONFIRMED, UNCONFIRMED or LIKELY_SKIRT.  Set once the whole
+    #: sweep is in, because what a peak is depends on its neighbours.
+    sort: str = UNCONFIRMED
+
     @property
     def stereo(self) -> bool:
-        """True when a stereo pilot was heard here."""
+        """True when a stereo pilot was heard here.
+
+        Not the same question as whether this is a station: a mono
+        broadcast has no pilot either.  See ``sort``.
+        """
         return (self.pilot_over_noise_db is not None
                 and self.pilot_over_noise_db >= PILOT_OVER_NOISE_DB)
 
     @property
     def freq_mhz(self) -> float:
         return self.freq_hz / 1e6
+
+
+def classify(signals: "list[Signal]") -> "list[Signal]":
+    """Say of each peak how sure we are that it is a broadcast.
+
+    Three answers, because there are three cases and only two of
+    them look alike from here.
+
+    A pilot and nothing louder beside it is a broadcast.  No pilot
+    is not an answer at all: a mono station has none, and neither
+    does a spur, and this cannot tell them apart - so they are both
+    unconfirmed rather than both "not stereo", because the next
+    thing to use this writes unknown stations to a file and must
+    not treat a spur as a quiet station.
+
+    A peak near something much louder is the louder one's skirt,
+    whether or not it has a pilot of its own.  It has one either
+    way: tuned to the edge of a strong signal the receiver still
+    hears that signal, pilot and all.  So the test is on where the
+    peak is and how far below its neighbour, and not on the pilot.
+    """
+    confirmed = [s for s in signals if s.stereo]
+    out = []
+    for signal in signals:
+        louder_beside = [c for c in confirmed
+                         if c is not signal
+                         and abs(c.freq_hz - signal.freq_hz) <= SKIRT_REACH_HZ
+                         and c.power_dbfs - signal.power_dbfs
+                         >= SKIRT_BELOW_DB]
+        if louder_beside:
+            sort = LIKELY_SKIRT
+        elif signal.stereo:
+            sort = CONFIRMED
+        else:
+            sort = UNCONFIRMED
+        out.append(dataclasses.replace(signal, sort=sort))
+    return out
 
 
 def hop_centres(sample_rate_hz: float, start_hz: float = BAND_START_HZ,
@@ -206,14 +288,13 @@ def peaks(powers: dict[float, float],
     return found
 
 
-def pilot_over_noise_db(composite: np.ndarray,
-                        rate_hz: float = COMPOSITE_RATE) -> float | None:
-    """How far 19 kHz stands above the noise either side of it.
+def pilot_and_noise_power(composite: np.ndarray,
+                          rate_hz: float = COMPOSITE_RATE
+                          ) -> "tuple[float, float] | None":
+    """Power at 19 kHz, and power in the bands either side of it.
 
-    The stereo pilot is the one thing that says a carrier is a
-    broadcast and not a spur: a transmitter puts it there on purpose,
-    and nothing else does.  Measured on one block rather than tracked,
-    because a scan hears each frequency once.
+    The two halves of the pilot measurement, unreduced, so that a
+    listen of several blocks can add them up before dividing once.
 
     None when the block is too short to resolve the bands, which is
     what a hop that captured nothing gives.
@@ -224,19 +305,39 @@ def pilot_over_noise_db(composite: np.ndarray,
     spectrum = np.abs(np.fft.rfft(windowed)) ** 2
     freqs = np.fft.rfftfreq(composite.size, 1.0 / rate_hz)
 
-    def power_in(centre: float, half_width: float) -> float:
-        band = np.abs(freqs - centre) <= half_width
+    def power_in(centre: float) -> float:
+        band = np.abs(freqs - centre) <= PILOT_HALF_WIDTH_HZ
         return float(spectrum[band].mean()) if band.any() else 0.0
 
-    pilot = power_in(PILOT_HZ, PILOT_HALF_WIDTH_HZ)
-    below = power_in(PILOT_HZ - PILOT_NOISE_OFFSET_HZ, PILOT_HALF_WIDTH_HZ)
-    above = power_in(PILOT_HZ + PILOT_NOISE_OFFSET_HZ, PILOT_HALF_WIDTH_HZ)
-    noise = 0.5 * (below + above)
-    return 10.0 * np.log10((pilot + 1e-30) / (noise + 1e-30))
+    pilot = power_in(PILOT_HZ)
+    below = power_in(PILOT_HZ - PILOT_NOISE_OFFSET_HZ)
+    above = power_in(PILOT_HZ + PILOT_NOISE_OFFSET_HZ)
+    return pilot, 0.5 * (below + above)
 
 
-class Cancelled(Exception):
-    """Raised inside a scan that has been asked to stop."""
+def over_noise_db(pilot_power: float, noise_power: float) -> float:
+    """The pilot reading the two powers amount to."""
+    return 10.0 * np.log10((pilot_power + 1e-30) / (noise_power + 1e-30))
+
+
+def pilot_over_noise_db(composite: np.ndarray,
+                        rate_hz: float = COMPOSITE_RATE) -> float | None:
+    """How far 19 kHz stands above the noise either side of it.
+
+    The stereo pilot is the one thing that says a carrier is a
+    broadcast and not a spur: a transmitter puts it there on purpose,
+    and nothing else does.
+
+    One block of it.  A scan listens for longer than that and adds
+    the powers up before dividing - see BandScan._listen_for_a_pilot,
+    and why taking the best of several readings was wrong.
+    """
+    both = pilot_and_noise_power(composite, rate_hz)
+    return None if both is None else over_noise_db(*both)
+
+
+class ScanFailed(Exception):
+    """The receiver would not do what the sweep asked of it."""
 
 
 class BandScan:
@@ -247,12 +348,26 @@ class BandScan:
     is cancelled or something goes wrong halfway.  The audio is of
     wherever the sweep happens to be while it runs, which is what a
     scan sounds like on any radio.
+
+    The blocks it looks at are copies the receiver hands over, not
+    blocks taken from the demodulator's queue: see
+    SDRReceiver.watch_the_blocks.  Taking them left the demodulator
+    with gaps that its filters carried straight across, which is a
+    worse noise than the sweep's own.
+
+    A pilot is listened for over a quarter of a second, and the
+    powers are added up before being divided once.  Taking the best
+    reading of several blocks, which is what this did first, gets
+    better at finding noise the longer it listens and no better at
+    finding a weak pilot.
     """
 
     def __init__(self, controller, on_progress=None) -> None:
         self.controller = controller
         self._on_progress = on_progress
         self._stop = threading.Event()
+        #: Where the receiver copies its blocks while a sweep runs.
+        self._blocks: "object | None" = None
         # Its own, not the receiver's.  A scan runs on whatever thread
         # started it while the processing thread is still going, and
         # both the spectrum maker and the demodulator carry state from
@@ -288,10 +403,28 @@ class BandScan:
         """
         was_at = self.controller.get_frequency()
         was_auto = not self.controller.is_manual_gain()
+        sdr = self.controller.sdr_receiver
+        self._blocks = sdr.watch_the_blocks()
         try:
-            return self._sweep(listen_sec)
+            found = self._sweep(listen_sec)
+        except BaseException as went_wrong:
+            # The sweep's own failure is the one worth raising; a
+            # failure to tidy up after it is a second line on the
+            # same story.
+            try:
+                self._put_the_receiver_back(was_at, was_auto)
+            except Exception as and_then:
+                went_wrong.add_note(
+                    "the receiver was not put back: %s" % and_then)
+            raise
         finally:
-            self._put_the_receiver_back(was_at, was_auto)
+            sdr.stop_watching(self._blocks)
+            self._blocks = None
+        # Not in the finally: a sweep that worked and left the
+        # receiver somewhere else has not worked.  The person who
+        # started it was listening to something.
+        self._put_the_receiver_back(was_at, was_auto)
+        return found
 
     # ------------------------------------------------------------------
 
@@ -305,6 +438,7 @@ class BandScan:
             if self.cancelled:
                 break
             heard.append(self._listen_for_a_pilot(signal, listen_sec))
+        heard = classify(heard)
         heard.sort(key=lambda s: s.power_dbfs, reverse=True)
         return heard
 
@@ -345,16 +479,25 @@ class BandScan:
         # though it were the first of a session.
         self._demodulator.reset()
         deadline = time.monotonic() + listen_sec
-        best = None
+        pilot = noise = 0.0
+        blocks = 0
         while time.monotonic() < deadline and not self.cancelled:
             block = self._a_fresh_block()
             if block is None:
                 break
             composite = self._demodulator.process_iq_samples(block)
-            reading = pilot_over_noise_db(composite)
-            if reading is not None and (best is None or reading > best):
-                best = reading
-        return dataclasses.replace(signal, pilot_over_noise_db=best)
+            both = pilot_and_noise_power(composite)
+            if both is None:
+                continue
+            blocks += 1
+            if blocks <= SETTLING_BLOCKS:
+                # The filters are still filling, and the first block
+                # out of a reset carries no audio at all.
+                continue
+            pilot += both[0]
+            noise += both[1]
+        heard = over_noise_db(pilot, noise) if noise > 0.0 else None
+        return dataclasses.replace(signal, pilot_over_noise_db=heard)
 
     # ------------------------------------------------------------------
 
@@ -366,13 +509,24 @@ class BandScan:
         loud one reads as loud as the loud one did.
         """
         if not self.controller.is_manual_gain():
-            self._wait_for(self.controller.set_agc_mode(False))
+            self._wait_for(self.controller.set_agc_mode(False),
+                           "holding the gain")
 
     def _tune_and_settle(self, freq_hz: float) -> None:
-        self._wait_for(self.controller.tune(freq_hz))
+        self._wait_for(self.controller.tune(freq_hz),
+                       "tuning to %.1f MHz" % (freq_hz / 1e6))
 
     def _a_fresh_block(self, timeout_sec: float = 1.0):
-        """The next block that belongs to where the tuner is now."""
+        """The next block that belongs to where the tuner is now.
+
+        From the watcher's queue, not from the one the demodulator
+        reads: that is a work queue, so a block taken from it is a
+        block the receiver never sees.  Taking them during a sweep
+        left the demodulator with gaps its filters carried straight
+        across, which is a worse noise than the sweep's own.
+        """
+        if self._blocks is None:                # pragma: no cover - guard
+            return None
         sdr = self.controller.sdr_receiver
         deadline = time.monotonic() + timeout_sec
         while time.monotonic() < deadline:
@@ -380,7 +534,7 @@ class BandScan:
                 return None
             wanted = sdr.tuning_generation
             try:
-                generation, block = sdr.data_queue.get(timeout=0.1)
+                generation, block = self._blocks.get(timeout=0.1)
             except Exception:
                 continue
             if generation == wanted:
@@ -390,26 +544,50 @@ class BandScan:
     def _put_the_receiver_back(self, freq_hz: float, auto_gain: bool) -> None:
         """Where it was, however the sweep ended.
 
-        A scan that failed halfway has still left the tuner somewhere
-        else and the AGC off, and the person who started it was
-        listening to something.
+        Both halves are tried even if the first one fails - a tuner
+        that would not move is no reason to leave the AGC off as well
+        - and what did not work is raised afterwards rather than
+        logged and forgotten.  A receiver left on a frequency nobody
+        asked for, with the gain pinned, is not a finished scan.
         """
+        trouble = []
         try:
-            self._wait_for(self.controller.tune(freq_hz))
-        except Exception as e:                  # pragma: no cover - guard
-            logger.error("Could not tune back to %.1f MHz: %s",
-                         freq_hz / 1e6, e)
+            self._wait_for(self.controller.tune(freq_hz),
+                           "tuning back to %.1f MHz" % (freq_hz / 1e6))
+        except Exception as e:
+            logger.error("%s", e)
+            trouble.append(str(e))
         if auto_gain:
             try:
-                self._wait_for(self.controller.set_agc_mode(True))
-            except Exception as e:              # pragma: no cover - guard
-                logger.error("Could not put the gain back on auto: %s", e)
+                self._wait_for(self.controller.set_agc_mode(True),
+                               "putting the gain back on auto")
+            except Exception as e:
+                logger.error("%s", e)
+                trouble.append(str(e))
+        if trouble:
+            raise ScanFailed("; and ".join(trouble))
 
     @staticmethod
-    def _wait_for(request, timeout_sec: float = 5.0) -> None:
-        """Let a device request finish; a scan cannot run ahead of it."""
-        if request is not None:
-            request.wait(timeout_sec)
+    def _wait_for(request, what: str, timeout_sec: float = 5.0) -> None:
+        """Let a device request finish, and find out whether it did.
+
+        A sweep cannot run ahead of the tuner, and it cannot carry on
+        as though a write happened when it did not: the next thing it
+        does is label a block with the frequency it asked for.  A
+        None request means there was nothing to do - asking for a
+        mode the receiver is already in - which is success.
+        """
+        if request is None:
+            return
+        if not request.wait(timeout_sec):
+            raise ScanFailed("%s did not finish in %.0f s"
+                             % (what, timeout_sec))
+        if request.failed:
+            raise ScanFailed("%s failed: %s" % (what, request.error))
+        if request.superseded:
+            raise ScanFailed("%s was replaced by a later one" % what)
+        if request.cancelled:
+            raise ScanFailed("%s was cancelled" % what)
 
     def _say(self, what: str) -> None:
         logger.debug("%s", what)

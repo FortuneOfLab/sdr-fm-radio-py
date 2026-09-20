@@ -136,6 +136,10 @@ class SDRReceiver(SDRReceiverInterface):
         # the realtime callback.
         self.iq_record_lock: threading.Lock = threading.Lock()
         self._iq_enqueue_lock: threading.Lock = threading.Lock()
+        # Somewhere for a second reader to be handed the same blocks;
+        # see watch_the_blocks.  None when nobody is watching, which
+        # is nearly always, and read on the realtime path.
+        self._tap: "queue.Queue | None" = None
         # Serialises concurrent ``start_iq_recording`` callers so only
         # one reaches ``wave.open`` (the file-truncating step).
         # Distinct from ``_iq_enqueue_lock`` so the SDR callback is
@@ -254,6 +258,31 @@ class SDRReceiver(SDRReceiverInterface):
             # free again now, which may be the thing a deferred close was
             # waiting for.
             self.handle.retry_pending_close()
+
+    def watch_the_blocks(self, depth: int = 1) -> "queue.Queue":
+        """Be handed the same IQ blocks the demodulator gets.
+
+        For something that wants to look at the samples without
+        taking them: a band scan, most obviously, which runs while
+        the receiver is still playing.  The blocks are the same
+        arrays, so a watcher reads them and does not write to them.
+
+        Only one watcher at a time, which is all there has ever been
+        a use for; a second call replaces the first.  Blocks are
+        dropped rather than queued when the watcher is behind.
+
+        Returns:
+            The queue to read ``(generation, block)`` from.  Hand it
+            back to :meth:`stop_watching` when finished with it.
+        """
+        tap: "queue.Queue" = queue.Queue(maxsize=max(1, int(depth)))
+        self._tap = tap
+        return tap
+
+    def stop_watching(self, tap: "queue.Queue") -> None:
+        """Stop feeding *tap*, unless somebody else has taken over."""
+        if self._tap is tap:
+            self._tap = None
 
     def get_center_frequency(self) -> float:
         """Return the centre frequency in Hz, or the last one read.
@@ -375,6 +404,21 @@ class SDRReceiver(SDRReceiverInterface):
             # Convert to numpy array allowing a copy if necessary (NumPy 2.x compatibility).
             iq = np.asarray(iq_samples, dtype=np.complex64)
             self.data_queue.put((generation, iq), block=False)
+
+            # And to whoever else is watching.  data_queue is a work
+            # queue - whatever takes a block from it is the only thing
+            # that gets it - so a second reader sharing it would be
+            # taking blocks out of the demodulator's stream.  This
+            # hands over the same array, which nobody writes to.
+            # Dropped rather than waited for: this is the realtime
+            # path, and a watcher that is behind wants the next block
+            # rather than an old one.
+            tap = self._tap
+            if tap is not None:
+                try:
+                    tap.put_nowait((generation, iq))
+                except queue.Full:
+                    pass
 
             # Hand the same array to the IQ-recording worker if active.
             # The pair (flag check, put_nowait) is atomic under

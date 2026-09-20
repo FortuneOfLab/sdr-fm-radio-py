@@ -13,8 +13,11 @@ import numpy as np
 import pytest
 
 from fm_radio.band_scan import (
-    BAND_END_HZ, BAND_START_HZ, PILOT_HZ, PILOT_OVER_NOISE_DB, BandScan,
-    Signal, channel_powers, hop_centres, peaks, pilot_over_noise_db,
+    BAND_END_HZ, BAND_START_HZ, CONFIRMED, LIKELY_SKIRT, PILOT_HZ,
+    PILOT_OVER_NOISE_DB, SETTLING_BLOCKS, UNCONFIRMED, BandScan,
+    ScanFailed, Signal,
+    channel_powers, classify, hop_centres, over_noise_db, peaks,
+    pilot_and_noise_power, pilot_over_noise_db,
 )
 from fm_radio.constants import COMPOSITE_RATE
 from fm_radio.spectrum import SpectrumFrame
@@ -224,8 +227,21 @@ def test_what_counts_as_stereo(reading, stereo):
 # ----------------------------------------------------------------------
 
 class FakeRequest:
+    """A device request that went however it was told to go."""
+
+    def __init__(self, done: bool = True, error=None,
+                 superseded: bool = False, cancelled: bool = False) -> None:
+        self._done = done
+        self.error = error
+        self.superseded = superseded
+        self.cancelled = cancelled
+
+    @property
+    def failed(self) -> bool:
+        return self.error is not None
+
     def wait(self, timeout=None):
-        return True
+        return self._done
 
 
 class FakeSDR:
@@ -233,11 +249,44 @@ class FakeSDR:
 
     def __init__(self) -> None:
         self.tuning_generation = 0
-        self.data_queue = _AlwaysABlock(self)
+        # The demodulator's own queue.  Reading from it is the defect
+        # this fake is here to catch: a block taken out of it is a
+        # block the receiver never sees.
+        self.data_queue = _NotYours()
+        self._tap = None
+        self.watched = 0
+        self.stopped_watching = 0
+
+    def watch_the_blocks(self, depth: int = 1):
+        self.watched += 1
+        self._tap = _AlwaysABlock(self)
+        return self._tap
+
+    def stop_watching(self, tap) -> None:
+        if self._tap is tap:
+            self._tap = None
+            self.stopped_watching += 1
+
+
+class _NotYours:
+    """The work queue, which a sweep must not read.
+
+    It counts as well as complaining: the sweep retries a block that
+    would not come, so raising on its own only makes a sweep that
+    reads this slow rather than failed.
+    """
+
+    def __init__(self) -> None:
+        self.reads = 0
+
+    def get(self, timeout=None):
+        self.reads += 1
+        raise AssertionError(
+            "the sweep took a block out of the demodulator's queue")
 
 
 class _AlwaysABlock:
-    """A queue that hands out a block of the frequency now tuned."""
+    """The watcher's queue: a block of the frequency now tuned."""
 
     def __init__(self, sdr) -> None:
         self._sdr = sdr
@@ -252,7 +301,8 @@ class _AlwaysABlock:
 class FakeController:
     """Enough receiver to be swept, and a record of what was asked."""
 
-    def __init__(self, auto_gain: bool = True, at_hz: float = 80.0e6) -> None:
+    def __init__(self, auto_gain: bool = True, at_hz: float = 80.0e6,
+                 tune_answers=None, agc_answers=None) -> None:
         self.sdr_receiver = FakeSDR()
         self._freq = at_hz
         self._auto = auto_gain
@@ -260,6 +310,12 @@ class FakeController:
         self.agc_calls: list[bool] = []
         self.fm_demodulator = None          # a scan must not reach for this
         self._spectrum_maker = None         # nor this
+        # What the device says to each request, for the sweeps that
+        # have to cope with one that did not work.
+        self._tune_answers = list(tune_answers or [])
+        self._agc_answers = list(agc_answers or [])
+        #: A frequency the tuner will not go to, whenever it is asked.
+        self.will_not_tune_to = None
 
     def get_frequency(self) -> float:
         return self._freq
@@ -268,15 +324,318 @@ class FakeController:
         return not self._auto
 
     def tune(self, freq_hz):
+        if (self.will_not_tune_to is not None
+                and abs(freq_hz - self.will_not_tune_to) < 1.0):
+            self.tuned_to.append(freq_hz)
+            return FakeRequest(error=OSError("the tuner is stuck"))
+        answer = (self._tune_answers.pop(0) if self._tune_answers
+                  else FakeRequest())
         self.tuned_to.append(freq_hz)
-        self._freq = freq_hz
-        self.sdr_receiver.tuning_generation += 1
-        return FakeRequest()
+        if not answer.failed and not answer.superseded and answer.wait(0):
+            self._freq = freq_hz
+            self.sdr_receiver.tuning_generation += 1
+        return answer
 
     def set_agc_mode(self, enabled):
+        answer = (self._agc_answers.pop(0) if self._agc_answers
+                  else FakeRequest())
         self.agc_calls.append(bool(enabled))
-        self._auto = bool(enabled)
-        return FakeRequest()
+        if not answer.failed:
+            self._auto = bool(enabled)
+        return answer
+
+
+# ----------------------------------------------------------------------
+# What the device said
+# ----------------------------------------------------------------------
+
+@pytest.mark.parametrize("answer,because", [
+    (FakeRequest(done=False), "did not finish"),
+    (FakeRequest(error=OSError("the dongle went")), "failed"),
+    (FakeRequest(superseded=True), "replaced"),
+    (FakeRequest(cancelled=True), "cancelled"),
+])
+def test_a_tune_that_did_not_happen_stops_the_sweep(answer, because):
+    """Carrying on would label the next block with a frequency the
+    receiver is not on.
+
+    _a_fresh_block reads the generation as it finds it, so a hop
+    whose write never landed measures the last frequency and files
+    it under this one.
+    """
+    controller = FakeController(tune_answers=[answer])
+
+    with pytest.raises(ScanFailed) as complaint:
+        BandScan(controller).run(listen_sec=0.0)
+
+    assert because in str(complaint.value)
+
+
+def test_a_gain_that_would_not_hold_stops_the_sweep():
+    """Or the hops come back in units that cannot be compared."""
+    controller = FakeController(
+        auto_gain=True, agc_answers=[FakeRequest(error=OSError("no"))])
+
+    with pytest.raises(ScanFailed):
+        BandScan(controller).run(listen_sec=0.0)
+
+
+def test_a_receiver_that_could_not_be_put_back_is_not_a_finished_sweep():
+    """The person who started it was listening to something.
+
+    81.3 MHz is not one of the hops, so the only time the sweep
+    asks for it is at the end.
+    """
+    controller = FakeController(auto_gain=False, at_hz=81.3e6)
+    controller.will_not_tune_to = 81.3e6
+
+    with pytest.raises(ScanFailed) as complaint:
+        BandScan(controller).run(listen_sec=0.0)
+
+    assert "81.3" in str(complaint.value)
+
+
+def test_both_halves_of_putting_it_back_are_tried():
+    """A tuner that will not move is no reason to leave the gain pinned."""
+    controller = FakeController(auto_gain=True, at_hz=81.3e6)
+    controller.will_not_tune_to = 81.3e6
+
+    with pytest.raises(ScanFailed):
+        BandScan(controller).run(listen_sec=0.0)
+
+    assert controller.agc_calls[-1] is True, "the gain was left held"
+
+
+def test_the_sweeps_own_failure_is_the_one_that_is_raised(monkeypatch):
+    """A failure to tidy up is a second line on the same story."""
+    controller = FakeController(auto_gain=True, at_hz=81.3e6)
+    controller.will_not_tune_to = 81.3e6
+    scan = BandScan(controller)
+
+    def explode(*args, **kwargs):
+        raise RuntimeError("the sweep broke")
+
+    monkeypatch.setattr(scan, "_look_at_the_band", explode)
+
+    with pytest.raises(RuntimeError, match="the sweep broke"):
+        scan.run(listen_sec=0.0)
+
+
+# ----------------------------------------------------------------------
+# Whose blocks are whose
+# ----------------------------------------------------------------------
+
+def test_the_sweep_watches_the_blocks_rather_than_taking_them():
+    """data_queue is a work queue: a block taken from it is one the
+    demodulator never sees, and its filters carry straight across
+    the gap.
+    """
+    controller = FakeController()
+
+    BandScan(controller).run(listen_sec=0.0)
+
+    assert controller.sdr_receiver.watched == 1
+    assert controller.sdr_receiver.data_queue.reads == 0, (
+        "the sweep read the demodulator's queue %d times"
+        % controller.sdr_receiver.data_queue.reads)
+
+
+def test_the_sweep_stops_watching_when_it_is_done():
+    controller = FakeController()
+
+    BandScan(controller).run(listen_sec=0.0)
+
+    assert controller.sdr_receiver.stopped_watching == 1
+    assert controller.sdr_receiver._tap is None
+
+
+def test_the_sweep_stops_watching_even_when_it_fails(monkeypatch):
+    controller = FakeController()
+    scan = BandScan(controller)
+    monkeypatch.setattr(scan, "_look_at_the_band",
+                        lambda: (_ for _ in ()).throw(RuntimeError("no")))
+
+    with pytest.raises(RuntimeError):
+        scan.run(listen_sec=0.0)
+
+    assert controller.sdr_receiver._tap is None
+
+
+# ----------------------------------------------------------------------
+# How sure we are that a peak is a broadcast
+# ----------------------------------------------------------------------
+
+def test_a_pilot_settles_it():
+    found = classify([Signal(81.3e6, -2.0, 52.4)])
+
+    assert found[0].sort == CONFIRMED
+
+
+def test_a_skirt_of_a_confirmed_station_is_named_as_one():
+    """82.1 MHz came back 25 dB under NHK-FM at 82.5 and is the same
+    transmission.  The peak test only rejects skirts within 200 kHz.
+    """
+    found = classify([Signal(82.5e6, 0.0, 54.6), Signal(82.1e6, -25.1, 9.9)])
+
+    assert {round(s.freq_mhz, 1): s.sort for s in found} == {
+        82.5: CONFIRMED, 82.1: LIKELY_SKIRT}
+
+
+def test_a_station_with_no_pilot_and_nothing_beside_it_is_not_a_skirt():
+    """A mono broadcast has no pilot either, and this cannot tell.
+
+    Saying "not stereo" of a mono station and of a skirt alike would
+    let the next thing to use this treat them the same, and the next
+    thing writes unknown stations to a file.
+    """
+    found = classify([Signal(81.3e6, -2.0, 52.4), Signal(90.5e6, -32.3, 5.3)])
+
+    assert {round(s.freq_mhz, 1): s.sort for s in found} == {
+        81.3: CONFIRMED, 90.5: UNCONFIRMED}
+
+
+def test_a_skirt_with_a_pilot_of_its_own_is_still_a_skirt():
+    """It has one because it is hearing the station beside it.
+
+    Tuned to the edge of a strong signal the receiver still
+    demodulates that signal: 82.1 MHz came back with 15 dB of
+    pilot, which is NHK-FM's.  So a pilot cannot be what rescues a
+    peak from being a skirt.
+    """
+    found = classify([Signal(82.5e6, 0.0, 54.6), Signal(82.1e6, -20.0, 15.0)])
+
+    assert {round(s.freq_mhz, 1): s.sort for s in found} == {
+        82.5: CONFIRMED, 82.1: LIKELY_SKIRT}
+
+
+def test_a_peak_beside_a_confirmed_one_but_nearly_as_loud_is_not_a_skirt():
+    """Two real stations can be neighbours; a skirt is well below."""
+    found = classify([Signal(82.5e6, 0.0, 54.6), Signal(82.1e6, -2.0, 4.0)])
+
+    assert [s.sort for s in found if round(s.freq_mhz, 1) == 82.1] == [
+        UNCONFIRMED]
+
+
+def test_nothing_confirmed_means_nothing_is_a_skirt():
+    found = classify([Signal(82.5e6, 0.0, 4.0), Signal(82.1e6, -25.0, 3.0)])
+
+    assert {s.sort for s in found} == {UNCONFIRMED}
+
+
+# ----------------------------------------------------------------------
+# Listening for longer
+# ----------------------------------------------------------------------
+
+def added_up(blocks) -> float:
+    """The reading a listen of several blocks amounts to."""
+    pilot = noise = 0.0
+    for block in blocks:
+        p, n = pilot_and_noise_power(block)
+        pilot += p
+        noise += n
+    return over_noise_db(pilot, noise)
+
+
+def test_listening_longer_does_not_walk_the_reading_up_on_its_own():
+    """Why the powers are added up rather than the best one taken.
+
+    Not that adding up reads higher - on the same noise it reads
+    lower, and that is the point: the best of several readings is
+    the luckiest one, and the more blocks are listened to the
+    luckier the luckiest gets.  A quarter of a second of nothing was
+    reading further above the noise than a sixteenth of a second of
+    nothing, which is a scan that finds more stations the longer it
+    listens to an empty channel.
+
+    Adding the powers up is the same measurement however long it
+    runs.
+    """
+    blocks = [composite(0.0, noise=0.05, seed=n) for n in range(40)]
+
+    best_drift = abs(max(pilot_over_noise_db(b) for b in blocks)
+                     - max(pilot_over_noise_db(b) for b in blocks[:4]))
+    added_drift = abs(added_up(blocks) - added_up(blocks[:4]))
+
+    assert added_drift < best_drift, (
+        "adding up moved %.2f dB with the listening, the best of them "
+        "%.2f dB" % (added_drift, best_drift))
+
+
+def test_adding_the_powers_up_does_not_manufacture_a_pilot():
+    """Forty blocks of noise are still not a station."""
+    blocks = [composite(0.0, noise=0.05, seed=n) for n in range(40)]
+
+    assert added_up(blocks) < PILOT_OVER_NOISE_DB
+
+
+def test_a_pilot_that_is_really_there_survives_being_added_up():
+    heard = added_up([composite(0.1, noise=0.05, seed=n) for n in range(15)])
+
+    assert heard > PILOT_OVER_NOISE_DB
+
+
+def a_listen(scan, blocks, listen_sec: float = 5.0):
+    """Run the listening loop over a fixed set of blocks.
+
+    The sweep tests hand it listen_sec=0.0, which skips this loop
+    altogether - so nothing there says how the readings are put
+    together.  This hands it blocks that are already composite and
+    lets it do the rest.
+    """
+    handed = iter(blocks)
+    scan._a_fresh_block = lambda timeout_sec=1.0: next(handed, None)
+    scan._demodulator.process_iq_samples = lambda block: block
+    return scan._listen_for_a_pilot(Signal(81.3e6, -2.0), listen_sec)
+
+
+def test_the_listen_adds_the_powers_up_rather_than_taking_the_best():
+    """The aggregation, pinned to the number it should come to."""
+    blocks = [composite(0.0, noise=0.05, seed=n) for n in range(12)]
+    scan = BandScan(FakeController())
+
+    heard = a_listen(scan, blocks)
+
+    assert heard.pilot_over_noise_db == pytest.approx(
+        added_up(blocks[SETTLING_BLOCKS:]), abs=0.01)
+    assert heard.pilot_over_noise_db != pytest.approx(
+        max(pilot_over_noise_db(b) for b in blocks), abs=0.01)
+
+
+def test_the_first_blocks_after_tuning_are_thrown_away():
+    """The first one out of a demodulator reset carries no audio at
+    all, and the ones after it are its filters filling.
+    """
+    quiet = [composite(0.0, noise=0.05, seed=n) for n in range(2)]
+    loud = [composite(0.2, noise=0.05, seed=n) for n in range(10)]
+    scan = BandScan(FakeController())
+
+    heard = a_listen(scan, quiet + loud)
+
+    assert heard.pilot_over_noise_db == pytest.approx(
+        added_up(loud), abs=0.01), "the settling blocks were counted"
+
+
+def test_a_listen_that_gets_no_blocks_says_nothing():
+    scan = BandScan(FakeController())
+
+    heard = a_listen(scan, [])
+
+    assert heard.pilot_over_noise_db is None
+
+
+def test_the_best_of_several_blocks_of_noise_rises_with_the_listening():
+    """The defect in taking the maximum, stated on its own.
+
+    More tries at pure noise finds a higher noise, so listening
+    longer made a spur more likely to pass and a weak station no
+    more likely to.
+    """
+    blocks = [composite(0.0, noise=0.05, seed=n) for n in range(40)]
+
+    few = max(pilot_over_noise_db(b) for b in blocks[:4])
+    many = max(pilot_over_noise_db(b) for b in blocks)
+
+    assert many > few
 
 
 def test_the_gain_is_held_for_the_whole_sweep():
