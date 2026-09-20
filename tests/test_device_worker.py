@@ -449,7 +449,13 @@ def test_two_events_are_two_events(worker):
 # ----------------------------------------------------------------------
 
 def test_a_queued_request_can_be_taken_back(worker):
-    """And whoever was waiting on it is released, not left there."""
+    """And whoever was waiting on it is released, not left there.
+
+    A cancelled request finishes at the moment it is cancelled, so
+    waiting on it says nothing about where the worker has got to.
+    What says that is a request queued behind it: once that has run,
+    the worker is past the place the cancelled one would have been.
+    """
     release = threading.Event()
     inside = threading.Event()
     done: list = []
@@ -458,13 +464,16 @@ def test_a_queued_request_can_be_taken_back(worker):
 
     asked = worker.submit(RECORDING, "recording",
                           lambda: done.append("recording"))
+    behind = worker.submit(RECORDING, "the one behind it",
+                           lambda: done.append("behind"))
 
     assert worker.cancel(asked) is True
     release.set()
 
     assert asked.wait(5), "the waiter was left there"
     assert asked.cancelled and not asked.failed
-    assert done == [], "it ran anyway"
+    assert behind.wait(5), "the worker never got past it"
+    assert done == ["behind"], f"the cancelled one ran anyway: {done}"
 
 
 def test_a_request_that_has_begun_cannot_be_taken_back(worker):

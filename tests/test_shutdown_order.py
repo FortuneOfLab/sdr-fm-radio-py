@@ -2329,15 +2329,15 @@ def a_start_that_is_half_way(receiver, what):
     inside = threading.Event()
     go = threading.Event()
     if what == "audio":
-        owner, name = receiver.audio_output, "start_recording"
+        owner, name = receiver.audio_output, "prepare_a_recording"
     else:
-        owner, name = receiver.sdr_receiver, "start_iq_recording"
+        owner, name = receiver.sdr_receiver, "prepare_an_iq_recording"
     real = getattr(owner, name)
 
-    def slow_start(filename, **kw):
+    def slow_start(*args, **kw):
         inside.set()
         assert go.wait(10), "the test never let the recording start"
-        return real(filename, **kw)
+        return real(*args, **kw)
 
     setattr(owner, name, slow_start)
     return inside, go
@@ -2993,3 +2993,135 @@ def test_two_tunes_with_no_recording_between_them_still_collapse(receiver):
     assert last.wait(5)
     assert replaced.superseded, "a held button should still collapse"
     assert receiver.get_frequency() == pytest.approx(83.7e6)
+
+
+def a_disk_that_is_thinking(owner, name="_let_the_last_recording_go"):
+    """Hold a recording inside the slow half of starting it.
+
+    The hold is on a step every version of the code goes through, and
+    one that is meant to happen with no lock held.  A test that holds
+    it and then asks something else to happen is asking exactly the
+    question: is anybody else waiting for this?
+    """
+    opening = threading.Event()
+    go = threading.Event()
+    real = getattr(owner, name)
+
+    def slow_open(*args, **kw):
+        opening.set()
+        assert go.wait(10), "the test never let the open finish"
+        return real(*args, **kw)
+
+    setattr(owner, name, slow_open)
+    return opening, go
+
+
+def test_a_stop_does_not_wait_for_a_recording_that_is_being_opened(
+        receiver, tmp_path):
+    """Opening the file is disk; the thread that asked must not pay for it.
+
+    The lock that orders a start against a stop used to be held across
+    the open, the sidecar and the wait for the recording before this
+    one - so a stop, or another start, waited for the disk.
+    """
+    audio = receiver.audio_output
+    opening, go = a_disk_that_is_thinking(audio)
+
+    asked = receiver.start_recording(str(tmp_path / "slow.wav"))
+    assert opening.wait(5), "the start never reached the slow half"
+
+    try:
+        started = time.monotonic()
+        receiver.stop_recording()
+        waited = time.monotonic() - started
+
+        assert waited < 1.0, f"the stop waited {waited:.1f} s for the disk"
+    finally:
+        go.set()
+
+    assert asked.wait(5), "nobody answered for the start"
+    assert isinstance(asked.error, RecordingError), asked.error
+    assert not audio.recording
+    assert not (tmp_path / "slow.wav").exists(), \
+        "the file it prepared was left behind"
+
+
+def test_an_iq_start_does_not_wait_for_an_audio_one_being_opened(
+        receiver, tmp_path):
+    """The other thing that used to queue behind the disk."""
+    audio = receiver.audio_output
+    opening, go = a_disk_that_is_thinking(audio)
+
+    receiver.start_recording(str(tmp_path / "slow.wav"))
+    assert opening.wait(5), "the start never reached the slow half"
+
+    try:
+        started = time.monotonic()
+        asked = receiver.start_iq_recording(str(tmp_path / "quick_iq.wav"))
+        waited = time.monotonic() - started
+
+        assert waited < 1.0, f"the ask waited {waited:.1f} s for the disk"
+        assert not asked.finished, "it cannot have happened yet"
+    finally:
+        go.set()
+
+    assert asked.wait(5), "the IQ recording never started"
+    assert not asked.failed, asked.error
+    assert receiver.sdr_receiver.iq_recording
+
+
+def test_a_recording_that_will_not_open_does_not_leave_a_file(receiver,
+                                                               tmp_path):
+    """And the failure is reported, not swallowed."""
+    audio = receiver.audio_output
+    path = tmp_path / "refused.wav"
+
+    def refuse(*args, **kw):
+        raise RecordingError("no room on the disk")
+
+    audio.prepare_a_recording = refuse
+
+    asked = receiver.start_recording(str(path))
+
+    assert asked.wait(5)
+    assert isinstance(asked.error, RecordingError), asked.error
+    assert not path.exists()
+    assert not audio.recording
+
+
+def test_the_wait_for_the_last_recording_happens_once(receiver, tmp_path,
+                                                      monkeypatch):
+    """Not once outside a lock and then again inside it.
+
+    The controller used to wait for the previous recording to finish
+    closing, ignore the answer, and then let the recorder wait for it
+    all over again - two goes at the same two seconds.
+    """
+    monkeypatch.setattr("fm_radio.audio_output._PREVIOUS_CLOSE_WAIT_SEC", 0.2)
+    audio = receiver.audio_output
+    audio.start_recording(str(tmp_path / "will_not_close.wav"))
+    let_it_close = a_close_held_at_the_door(receiver)
+
+    waits: list[float] = []
+    real_wait = audio.wait_for_the_recording_to_close
+
+    def counted(timeout):
+        waits.append(timeout)
+        return real_wait(timeout)
+
+    audio.wait_for_the_recording_to_close = counted
+
+    try:
+        assert receiver.tune(81.3e6).wait(5), "the tune never landed"
+        assert audio.finalising
+
+        started = time.monotonic()
+        asked = receiver.start_recording(str(tmp_path / "next.wav"))
+        assert asked.wait(5)
+        waited = time.monotonic() - started
+
+        assert isinstance(asked.error, RecordingError), asked.error
+        assert len(waits) == 1, f"waited {len(waits)} times: {waits}"
+        assert waited < 1.0, f"it waited {waited:.1f} s in total"
+    finally:
+        let_it_close.set()

@@ -64,6 +64,16 @@ _PREVIOUS_IQ_CLOSE_WAIT_SEC: float = 2.0
 
 
 
+class _ReadyIQRecording:
+    """An IQ file that is open and waiting to be recorded into."""
+
+    __slots__ = ("path", "wave")
+
+    def __init__(self, path: str, wave_file) -> None:
+        self.path = path
+        self.wave = wave_file
+
+
 class SDRReceiver(SDRReceiverInterface):
     """
     Receiver class using RTL-SDR
@@ -395,69 +405,100 @@ class SDRReceiver(SDRReceiverInterface):
             handle and flip ``self.iq_recording``.
         """
         with self._iq_start_lock:
-            if not self.handle.usable:
-                # The worker that would write the blocks is gone, and no
-                # blocks are coming anyway.  Opening the file here would
-                # leave one behind with iq_recording set against nothing.
-                self.logger.warning(
-                    "Ignoring start_iq_recording for %s: the receiver has "
-                    "been stopped", filename)
-                raise RecordingError(
-                    "Cannot start IQ recording: the receiver has been stopped")
-
             if self.iq_recording:
                 self.logger.warning(
                     "IQ recording already active; ignoring duplicate "
                     "start_iq_recording for %s", filename,
                 )
                 return
+            ready = self.prepare_an_iq_recording(filename)
+            self.install_a_prepared_iq_recording(ready)
 
-            self._let_the_last_iq_recording_go(filename)
+    def prepare_an_iq_recording(self, filename: str) -> "_ReadyIQRecording":
+        """Get a file ready to record IQ into, without starting anything.
 
-            try:
-                wf = wave.open(filename, 'wb')
-                wf.setnchannels(2)           # I/Q
-                wf.setsampwidth(2)           # int16
-                wf.setframerate(int(self.sample_rate))
-            except (OSError, wave.Error) as e:
-                self.logger.error(
-                    f"IQ recording start failed: {e}", exc_info=True,
-                )
-                raise RecordingError(
-                    f"IQ recording start failed: {e}",
-                ) from e
+        Mirrors AudioOutput.prepare_a_recording: everything slow is
+        here - the wait for the recording before this one, and the
+        open - so a caller that has to decide under a lock whether to
+        go ahead holds nothing while it happens.
 
-            # Atomic install w.r.t. the SDR callback's enqueue path.
-            with self._iq_enqueue_lock:
-                self._drain_iq_record_queue()
-                self._iq_flush_event.clear()
-                self._iq_record_drop_count = 0
-                with self.iq_record_lock:
-                    self.iq_record_wave = wf
-                    self._iq_record_base_path = filename
-                    self._iq_record_part_index = 0
-                    self._iq_record_bytes_written = 0
-                self.iq_recording = True
+        Raises:
+            RecordingError: The receiver has been stopped, the one
+                before this has not finished closing, or the file
+                would not open.
+        """
+        if not self.handle.usable:
+            # The worker that would write the blocks is gone, and no
+            # blocks are coming anyway.  Opening the file here would
+            # leave one behind with iq_recording set against nothing.
+            self.logger.warning(
+                "Ignoring start_iq_recording for %s: the receiver has "
+                "been stopped", filename)
+            raise RecordingError(
+                "Cannot start IQ recording: the receiver has been stopped")
 
-            # Metadata sidecar (CLI-thread only, never the SDR callback).
-            try:
-                gain_db = float(self.get_gain())
-            except Exception:
-                gain_db = None
-            self._iq_record_meta = {
-                "type": "iq",
-                "file": recording_meta.part_list(
-                    filename, 0, self._make_rotated_iq_path,
-                )[0],
-                "sample_rate_hz": int(self.sample_rate),
-                "center_freq_hz": float(self.center_freq),
-                "gain_db": gain_db,
-                "started_at": recording_meta.now_iso(),
-            }
-            recording_meta.write_sidecar(
-                filename, self._iq_record_meta, self.logger,
+        self._let_the_last_iq_recording_go(filename)
+
+        try:
+            wf = wave.open(filename, 'wb')
+            wf.setnchannels(2)           # I/Q
+            wf.setsampwidth(2)           # int16
+            wf.setframerate(int(self.sample_rate))
+        except (OSError, wave.Error) as e:
+            self.logger.error(
+                f"IQ recording start failed: {e}", exc_info=True,
             )
-            self.logger.info(f"IQ recording started: {filename}")
+            raise RecordingError(
+                f"IQ recording start failed: {e}",
+            ) from e
+        return _ReadyIQRecording(filename, wf)
+
+    def install_a_prepared_iq_recording(self,
+                                        ready: "_ReadyIQRecording") -> None:
+        """Put a prepared file in and start recording IQ into it."""
+        # Atomic install w.r.t. the SDR callback's enqueue path.
+        with self._iq_enqueue_lock:
+            self._drain_iq_record_queue()
+            self._iq_flush_event.clear()
+            self._iq_record_drop_count = 0
+            with self.iq_record_lock:
+                self.iq_record_wave = ready.wave
+                self._iq_record_base_path = ready.path
+                self._iq_record_part_index = 0
+                self._iq_record_bytes_written = 0
+            self.iq_recording = True
+
+        # Metadata sidecar (CLI-thread only, never the SDR callback).
+        try:
+            gain_db = float(self.get_gain())
+        except Exception:
+            gain_db = None
+        self._iq_record_meta = {
+            "type": "iq",
+            "file": recording_meta.part_list(
+                ready.path, 0, self._make_rotated_iq_path,
+            )[0],
+            "sample_rate_hz": int(self.sample_rate),
+            "center_freq_hz": float(self.center_freq),
+            "gain_db": gain_db,
+            "started_at": recording_meta.now_iso(),
+        }
+        recording_meta.write_sidecar(
+            ready.path, self._iq_record_meta, self.logger,
+        )
+        self.logger.info(f"IQ recording started: {ready.path}")
+
+    def discard_a_prepared_iq_recording(self,
+                                        ready: "_ReadyIQRecording") -> None:
+        """Give back a file that is not going to be recorded into."""
+        try:
+            ready.wave.close()
+        except Exception as e:                  # pragma: no cover - guard
+            self.logger.debug("Could not close %s: %s", ready.path, e)
+        try:
+            os.remove(ready.path)
+        except OSError as e:                    # pragma: no cover - guard
+            self.logger.debug("Could not remove %s: %s", ready.path, e)
 
     def _let_the_last_iq_recording_go(self, filename: str) -> None:
         """Wait for an IQ recording that is still closing, or refuse this.

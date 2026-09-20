@@ -176,12 +176,6 @@ class _BlockProfiler:
             self._win_q_max = 0
 
 
-#: How long a recording that is starting waits for the one before it
-#: to finish closing.  The recorders bound their own waits the same
-#: way; this is the controller asking first, outside the lock a stop
-#: needs, so that a stop is never queued behind a start's waiting.
-PREVIOUS_CLOSE_WAIT_SEC: float = 2.0
-
 #: How long the command line is given to notice that it has been asked
 #: to stop.  Both ways of ending the wait are immediate - a byte down a
 #: pipe, a Return into the console's own buffer - so this is only how
@@ -565,12 +559,18 @@ class FMReceiverController:
         return request
 
     def _start_recording_now(self, filename: str | None, wanted: int) -> str:
-        """Name it if it has no name, and install it.  On the worker.
+        """Name the file, get it ready, and put it in.  On the worker.
+
+        Only the last of those is under the lock, and it is a queue
+        drained and a handle installed.  The naming, the waiting for
+        the recording before this one, and the open all happen with
+        nothing held: a stop is a lock away at every moment, which is
+        the point of it being able to overtake this at all.
 
         Raises:
-            RecordingError: It was stopped before it started, or there
-                is already a recording running that this must not
-                disturb.
+            RecordingError: It was stopped before it started, there is
+                already a recording running that this must not
+                disturb, or the file would not open.
         """
         if filename is None:
             filename = build_recording_path(self.get_frequency() / 1e6)
@@ -584,18 +584,21 @@ class FMReceiverController:
             }
         except Exception:
             metadata = None
-        # Outside the lock: the one before this can take two seconds to
-        # finish closing, and a stop waiting to be heard should not
-        # queue behind a wait that belongs to a start.
-        if self.audio_output.finalising:
-            self.audio_output.wait_for_the_recording_to_close(
-                PREVIOUS_CLOSE_WAIT_SEC)
-        with self._recording_lock:
-            self._the_start_is_still_wanted(
-                wanted, self._audio_recording_wanted,
-                self.audio_output.recording, "recording")
-            self.audio_output.start_recording(filename, metadata=metadata)
-            self._starting_audio = None
+        ready = self.audio_output.prepare_a_recording(
+            filename, metadata=metadata)
+        try:
+            with self._recording_lock:
+                self._the_start_is_still_wanted(
+                    wanted, self._audio_recording_wanted,
+                    self.audio_output.recording, "recording")
+                self.audio_output.install_a_prepared_recording(ready)
+                self._starting_audio = None
+        except BaseException:
+            # Nobody is going to record into it, so it does not stay:
+            # an empty WAV is a recording that never happened, and it
+            # would be the only sign of one.
+            self.audio_output.discard_a_prepared_recording(ready)
+            raise
         return filename
 
     @staticmethod
@@ -669,19 +672,24 @@ class FMReceiverController:
 
     def _start_iq_recording_now(self, filename: str | None,
                                 wanted: int) -> str:
-        """Name it if it has no name, and install it.  On the worker."""
+        """Name the file, get it ready, and put it in.  On the worker.
+
+        Split the same way as the audio one, and for the same reason.
+        """
         if filename is None:
             filename = build_recording_path(self.get_frequency() / 1e6,
                                             iq=True)
-        if self.sdr_receiver.iq_finalising:
-            self.sdr_receiver.wait_for_the_iq_recording_to_close(
-                PREVIOUS_CLOSE_WAIT_SEC)
-        with self._recording_lock:
-            self._the_start_is_still_wanted(
-                wanted, self._iq_recording_wanted,
-                self.sdr_receiver.iq_recording, "IQ recording")
-            self.sdr_receiver.start_iq_recording(filename)
-            self._starting_iq = None
+        ready = self.sdr_receiver.prepare_an_iq_recording(filename)
+        try:
+            with self._recording_lock:
+                self._the_start_is_still_wanted(
+                    wanted, self._iq_recording_wanted,
+                    self.sdr_receiver.iq_recording, "IQ recording")
+                self.sdr_receiver.install_a_prepared_iq_recording(ready)
+                self._starting_iq = None
+        except BaseException:
+            self.sdr_receiver.discard_a_prepared_iq_recording(ready)
+            raise
         return filename
 
     def stop_iq_recording(self) -> bool:
