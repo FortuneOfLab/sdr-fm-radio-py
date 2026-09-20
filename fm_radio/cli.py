@@ -40,7 +40,6 @@ from typing import TYPE_CHECKING, Callable
 
 from fm_radio.console_input import ConsoleReader, console_reader
 from fm_radio.constants import RECORDINGS_DIR
-from fm_radio.exceptions import RecordingError
 
 if TYPE_CHECKING:
     from fm_radio.controller import FMReceiverController
@@ -57,6 +56,11 @@ def build_recording_path(freq_mhz: float, iq: bool = False) -> str:
     suffix = "_IQ" if iq else ""
     return os.path.join(RECORDINGS_DIR, f"{stamp}_{freq_mhz:.1f}MHz{suffix}.wav")
 
+
+#: How long a typed "record start" waits before the prompt comes back
+#: without a filename.  Making the file is quick; the tuner that may be
+#: in front of it is not always, and the prompt should not be.
+RECORD_REPORT_TIMEOUT_SEC: float = 2.0
 
 #: How long a typed tune waits for the SDR before the prompt comes back
 #: without an answer.  A tune is 60 ms of USB on a device that is
@@ -317,17 +321,26 @@ class CommandLineInterface(threading.Thread):
 
     def _cmd_record_start(self, cmd: str) -> bool:
         """Handle 'record start' — begin recording with auto-generated filename."""
-        try:
-            # The name says which station this is, so it is chosen while
-            # the tuner is held on that station and not a moment later.
-            with self.controller.while_the_tuner_is_still():
-                freq = self.controller.get_frequency() / 1e6
-                filename = build_recording_path(freq, iq=False)
-                self.controller.start_recording(filename)
-            print(f"Recording started: {filename}")
-        except RecordingError as e:
-            print(f"Recording start failed: {e}")
+        self._report_recording(self.controller.start_recording(), "Recording")
         return True
+
+    def _report_recording(self, request, what: str) -> None:
+        """Say how a recording that was asked for went, if it has yet.
+
+        The receiver names the file, because the name says which
+        station this is and only the worker knows which station that
+        will be by the time the file is made.  Somebody is looking at
+        the prompt, so this waits a moment for an answer - but only a
+        moment, the same as a typed tune.
+        """
+        if not request.wait(RECORD_REPORT_TIMEOUT_SEC):
+            print(f"{what} asked for; the receiver has not answered yet.")
+        elif request.superseded:
+            print(f"{what} was dropped: the receiver is stopping.")
+        elif request.failed:
+            print(f"{what} start failed: {request.error}")
+        else:
+            print(f"{what} started: {request.result}")
 
     def _cmd_record_stop(self, cmd: str) -> bool:
         """Handle 'record stop' — stop recording."""
@@ -340,14 +353,8 @@ class CommandLineInterface(threading.Thread):
 
     def _cmd_iq_record_start(self, cmd: str) -> bool:
         """Handle 'iqrec start' - begin IQ recording with auto-generated filename."""
-        try:
-            with self.controller.while_the_tuner_is_still():
-                freq = self.controller.get_frequency() / 1e6
-                filename = build_recording_path(freq, iq=True)
-                self.controller.start_iq_recording(filename)
-            print(f"IQ recording started: {filename}")
-        except RecordingError as e:
-            print(f"IQ recording start failed: {e}")
+        self._report_recording(self.controller.start_iq_recording(),
+                               "IQ recording")
         return True
 
     def _cmd_iq_record_stop(self, cmd: str) -> bool:

@@ -38,11 +38,17 @@ the window ignores it and shows whatever the worker reports later, the
 command line waits a moment for it because somebody just typed a command
 and is looking at the prompt.
 
-Requests are coalesced by kind: only the newest tune, the newest gain and
-the newest gain mode are worth making, and a burst of them from a held
-button or a dragged slider collapses to the one the user ended on.  Order
-between kinds is kept, so "manual gain" followed by "30 dB" still happens
-that way round.
+Most requests are coalesced by kind: only the newest tune, the newest
+gain and the newest gain mode are worth making, and a burst of them from
+a held button or a dragged slider collapses to the one the user ended
+on.  Order between kinds is kept, so "manual gain" followed by "30 dB"
+still happens that way round.
+
+Not all of them.  Starting a recording is here for the order it gets -
+the tuner moves on this thread, so a recording cannot be installed
+half way through a retune - and it is an event rather than a state:
+two of them are two recordings, and the second does not replace the
+first.
 """
 
 from __future__ import annotations
@@ -53,11 +59,16 @@ import threading
 import time
 from typing import Callable
 
-#: What a request is about.  Two requests of the same kind are the same
-#: intent expressed twice, and only the newer one is worth carrying out.
+#: What a request is about.
 TUNE = "tune"
 GAIN = "gain"
 GAIN_MODE = "gain mode"
+RECORDING = "recording"
+
+#: The kinds where two requests are the same intent expressed twice, so
+#: only the newer one is worth carrying out.  Everything else is an
+#: event: asking twice means asking for two things.
+COALESCING = frozenset({TUNE, GAIN, GAIN_MODE})
 
 #: Longest a write may take before it is worth saying so.  Ordinary ones
 #: are 30-200 ms; past this the device is struggling and the log should
@@ -91,6 +102,9 @@ class Request:
         self._done: threading.Event = threading.Event()
         #: What went wrong, if anything did.
         self.error: Exception | None = None
+        #: Whatever the write produced, for the few that produce
+        #: something worth having - the path a recording was given.
+        self.result = None
         #: True when a newer request of the same kind replaced this one
         #: before it was carried out.
         self.superseded: bool = False
@@ -109,8 +123,10 @@ class Request:
         """Wait for this to finish.  False if it has not by then."""
         return self._done.wait(timeout)
 
-    def _finish(self, error: Exception | None = None) -> None:
+    def _finish(self, error: Exception | None = None,
+                result=None) -> None:
         self.error = error
+        self.result = result
         self._done.set()
 
     def _supersede(self) -> None:
@@ -162,12 +178,14 @@ class DeviceWorker:
         """Ask for a device write, and come straight back.
 
         Args:
-            kind: ``TUNE``, ``GAIN`` or ``GAIN_MODE``.  A newer request of
-                the same kind replaces an older one that has not been
-                carried out yet.
+            kind: One of the kinds above.  For a kind in ``COALESCING``,
+                a newer request replaces an older one of the same kind
+                that has not been carried out yet; for any other, both
+                are carried out.
             what: How to describe it to a person.
             run: What to do on the worker thread.  Anything it raises
-                becomes the request's error.
+                becomes the request's error, and whatever it returns
+                becomes the request's result.
 
         Returns:
             The request, which the caller is free to ignore.
@@ -188,10 +206,12 @@ class DeviceWorker:
             # expressed before the user changed their mind.  It goes, and
             # the new one takes its place at the back - at the back, not
             # in its place, so a gain asked for after a gain mode still
-            # happens after it.
-            for older in [r for r in self._waiting if r.kind == kind]:
-                self._waiting.remove(older)
-                superseded.append(older)
+            # happens after it.  Kinds outside COALESCING are events
+            # rather than intents, and two of them are two of them.
+            if kind in COALESCING:
+                for older in [r for r in self._waiting if r.kind == kind]:
+                    self._waiting.remove(older)
+                    superseded.append(older)
             self._waiting.append(request)
             self._gate.notify()
         for older in superseded:
@@ -260,7 +280,7 @@ class DeviceWorker:
     def _write(self, request: Request) -> None:
         started = time.perf_counter()
         try:
-            request._run()
+            result = request._run()
         except Exception as e:
             self.logger.error("%s failed: %s", request.what, e, exc_info=True)
             request._finish(e)
@@ -268,8 +288,8 @@ class DeviceWorker:
             return
         took_ms = (time.perf_counter() - started) * 1000.0
         level = logging.WARNING if took_ms >= _SLOW_WRITE_MS else logging.INFO
-        self.logger.log(level, "%s (USB blocked %.1fms)", request.what, took_ms)
-        request._finish()
+        self.logger.log(level, "%s (took %.1fms)", request.what, took_ms)
+        request._finish(result=result)
         self._remember(request)
 
     # ------------------------------------------------------------------

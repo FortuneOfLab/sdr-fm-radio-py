@@ -50,8 +50,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from fm_radio.cli import build_recording_path
-from fm_radio.exceptions import RecordingError, SDRDeviceError
+from fm_radio.exceptions import SDRDeviceError
 from fm_radio.device_worker import TUNE
 from fm_radio.telemetry import SILENCE_DBFS, StatusSnapshot
 
@@ -95,6 +94,15 @@ _FAILURE = "failure"
 _PROGRESS = "progress"
 
 
+def _still_going(request):
+    """The request if it has not finished, else None.
+
+    A finished one has nothing left to say here: what became of it is
+    the recorder's state, or a notice from _show_the_device_worker.
+    """
+    return request if request is not None and not request.finished else None
+
+
 class ReceiverWindow(QMainWindow):
     """Status and control for a running receiver."""
 
@@ -136,6 +144,12 @@ class ReceiverWindow(QMainWindow):
         # the frequency the last step asked for, not from the one the
         # receiver is still on.  None when nothing is on its way.
         self._tuning_to: float | None = None
+        # A recording that has been asked for and has not started yet.
+        # The receiver decides when, because the tuner may be in front
+        # of it, and until then the button has to look pressed or it
+        # reads as a button that did nothing.
+        self._starting_audio = None
+        self._starting_iq = None
         # The writes this window has asked for and not yet reported on.
         # Watching these rather than the worker's last finished request:
         # that one can be somebody else's, and a gain landing between two
@@ -286,10 +300,11 @@ class ReceiverWindow(QMainWindow):
         self._watch(self.controller.tune(freq_hz))
         self.refresh()
 
-    def _watch(self, request) -> None:
+    def _watch(self, request):
         """Keep a request until there is something to say about it."""
         if request is not None:
             self._asked_for.append(request)
+        return request
 
     def _step(self, delta_hz: float) -> None:
         """Move by one step from wherever the tuner is heading.
@@ -333,23 +348,19 @@ class ReceiverWindow(QMainWindow):
         self._watch(self.controller.set_gain(value / _GAIN_SCALE))
 
     def _audio_recording_toggled(self, checked: bool) -> None:
+        """Ask for a recording, or end one.  Neither waits here.
+
+        The receiver names the file: the name says which station this
+        is, and which station that will be is only settled once the
+        tuner has finished whatever it is doing.  What comes back is a
+        request, watched like any other.
+        """
         if not checked:
             self.controller.stop_recording()
+            self._starting_audio = None
         else:
-            try:
-                # Inside the try: naming the file creates recordings/, which
-                # fails with an OSError of its own before the receiver has
-                # been asked for anything.  Inside the tuner's lock as
-                # well: the frequency in the name and the station in the
-                # file have to be the same one.
-                with self.controller.while_the_tuner_is_still():
-                    path = build_recording_path(
-                        self.controller.get_frequency() / 1e6)
-                    self.controller.start_recording(path)
-            except (RecordingError, OSError) as exc:
-                logger.error("Could not start recording: %s", exc)
-                self._set_notice(f"recording failed: {exc}")
-                self._record_audio.setChecked(False)
+            self._starting_audio = self._watch(
+                self.controller.start_recording())
         # Show the new state now rather than at the next refresh: a control
         # that answers 50 ms late reads as a control that did not work.
         self._show_recording()
@@ -357,16 +368,10 @@ class ReceiverWindow(QMainWindow):
     def _iq_recording_toggled(self, checked: bool) -> None:
         if not checked:
             self.controller.stop_iq_recording()
+            self._starting_iq = None
         else:
-            try:
-                with self.controller.while_the_tuner_is_still():
-                    path = build_recording_path(
-                        self.controller.get_frequency() / 1e6, iq=True)
-                    self.controller.start_iq_recording(path)
-            except (RecordingError, OSError) as exc:
-                logger.error("Could not start IQ recording: %s", exc)
-                self._set_notice(f"IQ recording failed: {exc}")
-                self._record_iq.setChecked(False)
+            self._starting_iq = self._watch(
+                self.controller.start_iq_recording())
         self._show_recording()
 
     # ------------------------------------------------------------------
@@ -624,18 +629,32 @@ class ReceiverWindow(QMainWindow):
         The buttons are checkable, but the receiver is what decides whether
         it is recording — a recording can stop without the button being
         pressed.
+
+        One that has been asked for and not started yet counts as
+        pressed.  The receiver decides when it starts, because a tune
+        may be in front of it on the worker, and a button that springs
+        back up in the meantime reads as a button that did nothing.
         """
+        self._starting_audio = _still_going(self._starting_audio)
+        self._starting_iq = _still_going(self._starting_iq)
         audio = self.controller.is_recording()
         iq = self.controller.is_iq_recording()
-        for button, active in ((self._record_audio, audio),
-                               (self._record_iq, iq)):
+        for button, active, starting in (
+                (self._record_audio, audio, self._starting_audio),
+                (self._record_iq, iq, self._starting_iq)):
             # No blockSignals: these are wired to clicked, which setChecked
             # does not emit.  The Auto checkbox is wired to toggled, which it
             # does, and blocks them for that reason.
-            button.setChecked(active)
+            button.setChecked(active or starting is not None)
         parts = [name for name, on in (("audio", audio), ("IQ", iq)) if on]
-        self._recording_status.setText(
-            "recording " + " + ".join(parts) if parts else "")
+        waiting = [name for name, asked in
+                   (("audio", self._starting_audio),
+                    ("IQ", self._starting_iq)) if asked is not None]
+        text = "recording " + " + ".join(parts) if parts else ""
+        if waiting:
+            text = ((text + ", " if text else "")
+                    + "starting " + " + ".join(waiting) + "...")
+        self._recording_status.setText(text)
 
     # ------------------------------------------------------------------
 

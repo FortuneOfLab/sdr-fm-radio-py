@@ -2356,9 +2356,7 @@ def test_a_tune_waits_for_a_recording_that_is_half_started(receiver, tmp_path):
     inside, go = a_start_that_is_half_way(receiver, "audio")
 
     path = tmp_path / "half_started.wav"
-    starting = threading.Thread(target=receiver.start_recording,
-                                args=(str(path),), daemon=True)
-    starting.start()
+    starting = receiver.start_recording(str(path))
     assert inside.wait(5), "the recording never started starting"
 
     when_the_write_went = {}
@@ -2376,8 +2374,7 @@ def test_a_tune_waits_for_a_recording_that_is_half_started(receiver, tmp_path):
             "the tune went past a recording that was being installed"
 
         go.set()
-        starting.join(5)
-        assert not starting.is_alive(), "the recording never finished starting"
+        assert starting.wait(5), "the recording never finished starting"
         assert tuned.wait(5), "the tune never landed"
 
         # It started, and then the tune stopped it - in that order, and
@@ -2397,9 +2394,7 @@ def test_a_tune_waits_for_an_iq_recording_that_is_half_started(receiver,
     inside, go = a_start_that_is_half_way(receiver, "iq")
 
     path = tmp_path / "half_started_iq.wav"
-    starting = threading.Thread(target=receiver.start_iq_recording,
-                                args=(str(path),), daemon=True)
-    starting.start()
+    starting = receiver.start_iq_recording(str(path))
     assert inside.wait(5), "the recording never started starting"
 
     when_the_write_went = {}
@@ -2417,7 +2412,7 @@ def test_a_tune_waits_for_an_iq_recording_that_is_half_started(receiver,
             "the tune went past an IQ recording that was being installed"
 
         go.set()
-        starting.join(5)
+        assert starting.wait(5), "the recording never finished starting"
         assert tuned.wait(5), "the tune never landed"
 
         assert when_the_write_went == {"iq_recording": False}, \
@@ -2427,14 +2422,15 @@ def test_a_tune_waits_for_an_iq_recording_that_is_half_started(receiver,
         go.set()
 
 
-def test_a_recording_is_refused_rather_than_left_waiting_for_the_tuner(
-        receiver, tmp_path, monkeypatch):
-    """The wait is on the thread that pressed the button, so it is bounded.
+def test_asking_for_a_recording_does_not_wait_for_the_tuner(
+        receiver, tmp_path):
+    """The whole point: the button comes back, whatever the tuner is doing.
 
     On a device that has stopped answering the frequency write never
-    returns, and a window that waited for it would be a frozen window.
+    returns.  The recording is asked of the same worker, so it happens
+    after the write - but the asking is over at once, and the thread
+    that asked is the one drawing the window.
     """
-    monkeypatch.setattr("fm_radio.controller._TUNER_SETTLE_TIMEOUT_SEC", 0.2)
     sdr = receiver.sdr_receiver
     stuck = threading.Event()
     writing = threading.Event()
@@ -2452,11 +2448,16 @@ def test_a_recording_is_refused_rather_than_left_waiting_for_the_tuner(
         assert writing.wait(5), "the write never started"
 
         started = time.monotonic()
-        with pytest.raises(RecordingError):
-            receiver.start_recording(str(tmp_path / "refused.wav"))
+        asked = receiver.start_recording(str(tmp_path / "later.wav"))
         waited = time.monotonic() - started
 
-        assert waited < 5.0, f"the button was held for {waited:.1f} s"
+        assert waited < 1.0, f"the button was held for {waited:.1f} s"
+        assert not asked.finished, "it cannot have happened yet"
+        assert not receiver.audio_output.recording
+
+        stuck.set()
+        assert asked.wait(5), "the recording never started"
+        assert receiver.audio_output.recording
     finally:
         stuck.set()
         sdr.set_center_frequency = real_set
@@ -2511,20 +2512,45 @@ def test_a_frequency_write_that_fails_still_finishes_what_it_took(receiver,
     assert audio.record_wave is None, "the file was left open"
 
 
-def test_naming_and_starting_a_recording_can_be_one_step(receiver, tmp_path):
-    """A caller that reads the frequency for the name keeps the tuner still.
+def test_a_recording_is_named_for_the_station_it_will_contain(
+        receiver, tmp_path, monkeypatch):
+    """Not for the one the button was pressed on.
 
-    The name claims a station as much as the sidecar does, so the two
-    are chosen together - which means taking the tuner's lock around a
-    start_recording that takes it again.
+    The name claims a station as much as the sidecar does, and a tune
+    can be in front of the recording on the worker.  Both are decided
+    there, after the tune, so all three agree.
     """
-    with receiver.while_the_tuner_is_still():
-        mhz = receiver.get_frequency() / 1e6
-        receiver.start_recording(str(tmp_path / f"{mhz:.1f}MHz.wav"))
+    monkeypatch.chdir(tmp_path)
+    sdr = receiver.sdr_receiver
+    let_the_write_land = threading.Event()
+    writing = threading.Event()
+    real_set = sdr.set_center_frequency
 
-    assert receiver.audio_output.recording, "the recording never started"
+    def slow_write(freq_hz):
+        writing.set()
+        assert let_the_write_land.wait(10), "the test never let it land"
+        return real_set(freq_hz)
+
+    sdr.set_center_frequency = slow_write
+
+    try:
+        tuned = receiver.tune(81.3e6)
+        assert writing.wait(5), "the write never started"
+
+        # Asked for while the receiver is still on 80.0, by a caller
+        # that names nothing.
+        asked = receiver.start_recording()
+        let_the_write_land.set()
+
+        assert tuned.wait(5) and asked.wait(5), "nothing landed"
+        assert not asked.failed, asked.error
+    finally:
+        let_the_write_land.set()
+        sdr.set_center_frequency = real_set
+
+    assert "81.3MHz" in asked.result, asked.result
     assert receiver.audio_output._record_meta["center_freq_hz"] == \
-        pytest.approx(mhz * 1e6)
+        pytest.approx(81.3e6)
 
 
 def a_close_held_at_the_door(receiver):
@@ -2583,9 +2609,7 @@ def test_a_recording_that_is_closing_does_not_close_the_next_one(receiver,
 
     asked = a_start_that_says_when_it_asks(
         audio, "wait_for_the_recording_to_close")
-    starting = threading.Thread(target=receiver.start_recording,
-                                args=(str(second),), daemon=True)
-    starting.start()
+    request = receiver.start_recording(str(second))
 
     assert asked.wait(5), \
         "the start never asked whether the last recording was still closing"
@@ -2593,8 +2617,8 @@ def test_a_recording_that_is_closing_does_not_close_the_next_one(receiver,
         "the second recording was installed under the first one's close"
 
     let_it_close.set()
-    starting.join(10)
-    assert not starting.is_alive(), "the second recording never started"
+    assert request.wait(10), "the second recording never started"
+    assert not request.failed, request.error
 
     assert audio.recording, "the second recording is not running"
     assert audio.record_wave is not None, \
@@ -2626,9 +2650,7 @@ def test_an_iq_recording_that_is_closing_does_not_close_the_next_one(
 
     asked = a_start_that_says_when_it_asks(
         sdr, "wait_for_the_iq_recording_to_close")
-    starting = threading.Thread(target=receiver.start_iq_recording,
-                                args=(str(second),), daemon=True)
-    starting.start()
+    request = receiver.start_iq_recording(str(second))
 
     assert asked.wait(5), \
         "the start never asked whether the last one was still closing"
@@ -2636,8 +2658,8 @@ def test_an_iq_recording_that_is_closing_does_not_close_the_next_one(
         "the second IQ recording was installed under the first one's close"
 
     let_it_close.set()
-    starting.join(10)
-    assert not starting.is_alive(), "the second IQ recording never started"
+    assert request.wait(10), "the second IQ recording never started"
+    assert not request.failed, request.error
 
     assert sdr.iq_recording, "the second IQ recording is not running"
     assert sdr.iq_record_wave is not None, \
@@ -2657,12 +2679,10 @@ def test_a_recording_is_refused_when_the_last_one_will_not_finish_closing(
         assert receiver.tune(81.3e6).wait(5), "the tune never landed"
         assert audio.finalising
 
-        started = time.monotonic()
-        with pytest.raises(RecordingError):
-            receiver.start_recording(str(tmp_path / "refused.wav"))
-        waited = time.monotonic() - started
+        asked = receiver.start_recording(str(tmp_path / "refused.wav"))
 
-        assert waited < 5.0, f"the button was held for {waited:.1f} s"
+        assert asked.wait(5), "the request never answered"
+        assert isinstance(asked.error, RecordingError), asked.error
         assert audio.record_wave is not None, \
             "the refused recording took the closing one's handle"
     finally:
@@ -2683,7 +2703,9 @@ def test_an_iq_recording_is_refused_when_the_last_one_will_not_close(
         assert receiver.tune(81.3e6).wait(5), "the tune never landed"
         assert sdr.iq_finalising
 
-        with pytest.raises(RecordingError):
-            receiver.start_iq_recording(str(tmp_path / "refused_iq.wav"))
+        asked = receiver.start_iq_recording(str(tmp_path / "refused_iq.wav"))
+
+        assert asked.wait(5), "the request never answered"
+        assert isinstance(asked.error, RecordingError), asked.error
     finally:
         let_it_close.set()

@@ -10,7 +10,6 @@ Qt runs offscreen (see the ``qt_app`` fixture), so these need no display.
 
 from __future__ import annotations
 
-import contextlib
 import logging
 import threading
 import time
@@ -27,13 +26,9 @@ pytest.importorskip("PySide6.QtWidgets", reason="the GUI is optional")
 
 from PySide6.QtCore import Qt                                  # noqa: E402
 
-from fm_radio.controller import (                         # noqa: E402
-    _TUNER_SETTLE_TIMEOUT_SEC,
-)
 from fm_radio.device_worker import (                      # noqa: E402
-    GAIN, GAIN_MODE, TUNE, DeviceWorker,
+    GAIN, GAIN_MODE, RECORDING, TUNE, DeviceWorker,
 )
-from fm_radio.exceptions import RecordingError            # noqa: E402
 from fm_radio.gui.main_window import (                         # noqa: E402
     METER_FLOOR_DBFS, REFRESH_INTERVAL_MS, ReceiverWindow, _level_percent,
 )
@@ -66,9 +61,6 @@ class FakeController:
         self.presets = [("TOKYO FM", 80.0e6), ("J-WAVE", 81.3e6)]
         self.tune_error: Exception | None = None
         self.record_error: Exception | None = None
-        # As in the controller: held while the frequency is being
-        # written, and by anything naming or installing a recording.
-        self._tuner_lock = threading.RLock()
 
     # --- reading ---
     def get_status(self):
@@ -120,10 +112,9 @@ class FakeController:
         self.calls.append(("tune", freq_hz))
 
         def write():
-            with self._tuner_lock:
-                if self.tune_error is not None:
-                    raise self.tune_error
-                self.frequency = freq_hz
+            if self.tune_error is not None:
+                raise self.tune_error
+            self.frequency = freq_hz
 
         self.last_tune = self.device_worker.submit(
             TUNE, f"Tuned to {freq_hz / 1e6:.1f} MHz", write)
@@ -173,34 +164,43 @@ class FakeController:
             GAIN, f"Gain set to {gain_db:.1f} dB", write)
         return self.last_write
 
-    @contextlib.contextmanager
-    def while_the_tuner_is_still(self):
-        """Mirror the controller: held, or the recording is refused."""
-        if not self._tuner_lock.acquire(
-                timeout=_TUNER_SETTLE_TIMEOUT_SEC):
-            raise RecordingError(
-                "Cannot start recording: the tuner is not answering")
-        self.calls.append(("tuner held",))
-        try:
-            yield
-        finally:
-            self._tuner_lock.release()
+    def start_recording(self, path=None):
+        """Ask the worker, as the real one does, and name it there.
 
-    def start_recording(self, path):
+        The name comes from the frequency the worker finds when it gets
+        round to it - not the one the window saw when the button was
+        pressed - which is the whole reason this is a request.
+        """
         self.calls.append(("start_recording", path))
-        if self.record_error is not None:
-            raise self.record_error
-        self.recording = True
+
+        def start():
+            if self.record_error is not None:
+                raise self.record_error
+            made = path or f"recordings/{self.frequency / 1e6:.1f}MHz.wav"
+            self.recording = True
+            return made
+
+        self.last_write = self.device_worker.submit(
+            RECORDING, "Starting the recording", start)
+        return self.last_write
 
     def stop_recording(self):
         self.calls.append(("stop_recording",))
         self.recording = False
 
-    def start_iq_recording(self, path):
+    def start_iq_recording(self, path=None):
         self.calls.append(("start_iq_recording", path))
-        if self.record_error is not None:
-            raise self.record_error
-        self.iq_recording = True
+
+        def start():
+            if self.record_error is not None:
+                raise self.record_error
+            made = path or f"recordings/{self.frequency / 1e6:.1f}MHz_IQ.wav"
+            self.iq_recording = True
+            return made
+
+        self.last_write = self.device_worker.submit(
+            RECORDING, "Starting the IQ recording", start)
+        return self.last_write
 
     def stop_iq_recording(self):
         self.calls.append(("stop_iq_recording",))
@@ -464,26 +464,52 @@ def test_recording_starts_and_stops_through_the_facade(window, tmp_path,
     view, controller = window()
 
     view._record_audio.click()
+    controller.settled()
+    view.refresh()
+
     started = [c for c in controller.calls if c[0] == "start_recording"]
-    assert len(started) == 1 and started[0][1].endswith(".wav")
+    assert len(started) == 1, controller.calls
+    assert started[0][1] is None, "the window named the file itself"
     assert "recording audio" in view._recording_status.text()
 
     view._record_audio.click()
     assert ("stop_recording",) in controller.calls
 
 
-def test_iq_recording_uses_the_iq_filename(window, tmp_path, monkeypatch):
+def test_the_receiver_is_the_one_that_names_the_recording(window, tmp_path,
+                                                          monkeypatch):
+    """Not the window.
+
+    The name says which station this is, and which station that will
+    be is settled by the receiver - a tune may be in front of the
+    recording on the worker.  The window passes no path and reads the
+    one that comes back.
+    """
+    monkeypatch.chdir(tmp_path)
+    view, controller = window()
+
+    view._record_audio.click()
+    controller.settled()
+
+    assert controller.last_write.result.endswith("MHz.wav"), \
+        controller.last_write.result
+
+
+def test_iq_recording_asks_for_an_iq_file(window, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     view, controller = window()
     view._record_iq.click()
+    controller.settled()
 
     started = [c for c in controller.calls if c[0] == "start_iq_recording"]
-    assert len(started) == 1 and "_IQ" in started[0][1]
+    assert len(started) == 1 and started[0][1] is None
+    assert "_IQ" in controller.last_write.result
 
 
 def test_a_recording_that_will_not_start_releases_the_button(window,
                                                               tmp_path,
                                                               monkeypatch):
+    """The failure arrives on a later refresh now, not out of the slot."""
     from fm_radio.exceptions import RecordingError
 
     monkeypatch.chdir(tmp_path)
@@ -492,9 +518,55 @@ def test_a_recording_that_will_not_start_releases_the_button(window,
     view, _ = window(controller)
 
     view._record_audio.click()          # must not raise
+    controller.settled()
+    view.refresh()
+
     assert not view._record_audio.isChecked()
-    assert "recording failed" in view._health.text()
+    assert "disk full" in view._health.text(), view._health.text()
     assert view._recording_status.text() == ""
+
+
+def test_a_recording_that_has_been_asked_for_keeps_the_button_down(window):
+    """The receiver decides when it starts; until then it looks pressed.
+
+    A button that springs back up while the request is still on the
+    worker reads as a button that did nothing.
+    """
+    view, controller = window()
+    release = held(controller)
+    try:
+        view._record_audio.click()
+        view.refresh()
+
+        assert view._record_audio.isChecked(), "the button sprang back up"
+        assert not controller.is_recording(), "it is not recording yet"
+        assert "starting audio" in view._recording_status.text(), \
+            view._recording_status.text()
+    finally:
+        release.set()
+    controller.settled()
+    view.refresh()
+
+    assert "recording audio" in view._recording_status.text()
+
+
+def test_a_recording_that_fails_lets_the_button_go(window, tmp_path,
+                                                   monkeypatch):
+    """And the line that said it was starting goes with it."""
+    from fm_radio.exceptions import RecordingError
+
+    monkeypatch.chdir(tmp_path)
+    controller = FakeController(snapshot())
+    controller.record_error = RecordingError("disk full")
+    view, _ = window(controller)
+
+    view._record_audio.click()
+    controller.settled()
+    view.refresh()
+
+    assert not view._record_audio.isChecked()
+    assert view._recording_status.text() == "", \
+        view._recording_status.text()
 
 
 def test_a_recording_that_stops_by_itself_releases_the_button(window):
@@ -670,21 +742,22 @@ def test_following_the_receiver_still_does_not_echo_the_gain_back(window):
 ])
 def test_a_recordings_folder_that_cannot_be_made_is_reported(
         window, monkeypatch, button, call):
-    """build_recording_path creates recordings/ and raises OSError, not
-    RecordingError, before the controller is reached."""
-    from fm_radio.gui import main_window
+    """Naming the file creates recordings/, and that can fail.
 
-    def refuse(freq_mhz, iq=False):
-        raise PermissionError(13, "permission denied")
-
-    monkeypatch.setattr(main_window, "build_recording_path", refuse)
-    view, controller = window()
+    It happens on the worker now, with everything else about starting a
+    recording, so it arrives as a failed request rather than out of the
+    slot.
+    """
+    controller = FakeController(snapshot())
+    controller.record_error = PermissionError(13, "permission denied")
+    view, _ = window(controller)
 
     getattr(view, button).click()       # must not raise out of the slot
+    controller.settled()
+    view.refresh()
 
     assert not getattr(view, button).isChecked()
-    assert "failed" in view._health.text()
-    assert not [c for c in controller.calls if c[0] == call]
+    assert "permission denied" in view._health.text(), view._health.text()
 
 
 # ----------------------------------------------------------------------
@@ -861,28 +934,3 @@ def test_turning_auto_off_is_true_before_the_write_lands(window):
         release.set()
 
 
-def test_the_window_holds_the_tuner_while_it_names_a_recording(window):
-    """The frequency in the name and the station in the file are one.
-
-    The window reads the frequency to build the filename and then asks
-    for the recording; a tune landing between the two would leave a file
-    called 80.0 MHz with the next station in it.  So both happen with
-    the tuner held.
-    """
-    view, controller = window()
-
-    view._record_audio.click()
-
-    assert controller.calls[:1] == [("tuner held",)], controller.calls
-    assert controller.calls[1][0] == "start_recording", controller.calls
-    assert "80.0MHz" in controller.calls[1][1], controller.calls[1][1]
-
-
-def test_the_window_holds_the_tuner_while_it_names_an_iq_recording(window):
-    """The same for the IQ file, whose sidecar names a frequency too."""
-    view, controller = window()
-
-    view._record_iq.click()
-
-    assert controller.calls[:1] == [("tuner held",)], controller.calls
-    assert controller.calls[1][0] == "start_iq_recording", controller.calls
