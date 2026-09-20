@@ -50,11 +50,16 @@ MISSING_QT_MESSAGE = (
 )
 
 
-def run(controller) -> int:
+def run(controller, start=None) -> int:
     """Show the window and run the Qt event loop until it is closed.
 
     Args:
-        controller: A started :class:`~fm_radio.controller.FMReceiverController`.
+        controller: The :class:`~fm_radio.controller.FMReceiverController`
+            the window is of.
+        start: What switches the receiver on, called once the window is
+            up; None for a caller that has started it already.  See
+            :func:`fm_radio.gui.main_window.run_window` for why the
+            order matters.
 
     Returns:
         The exit code for the process: 0 normally, 1 if PySide6 is missing.
@@ -65,4 +70,4 @@ def run(controller) -> int:
         logger.error("Could not start the GUI: %s", exc)
         print(MISSING_QT_MESSAGE, file=sys.stderr)
         return 1
-    return run_window(controller)
+    return run_window(controller, start)

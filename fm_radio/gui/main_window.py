@@ -685,9 +685,47 @@ class ReceiverWindow(QMainWindow):
         super().closeEvent(event)
 
 
-def run_window(controller) -> int:
-    """Create the application, show the window, and run the event loop."""
+def run_window(controller, start=None) -> int:
+    """Create the application, show the window, and run the event loop.
+
+    Args:
+        controller: The receiver the window is of.
+        start: What switches the receiver on, called once the window
+            is up.  Building a window is the most expensive thing this
+            program does after the JIT pre-warm - fonts, a graphics
+            context, several hundred widgets' worth of layout - and
+            doing it while audio is playing is a gap in the audio.
+            Doing it first costs nothing, because there is nothing to
+            interrupt yet.  None leaves the receiver alone, for a
+            caller that has already started it.
+
+    Returns:
+        The exit code for the process.
+    """
     app = QApplication.instance() or QApplication([])
     window = ReceiverWindow(controller)
     window.show()
+    if start is not None:
+        # On the event loop rather than here, so the window is painted
+        # before the receiver takes the thread back.
+        QTimer.singleShot(0, lambda: _switch_the_receiver_on(window,
+                                                             controller,
+                                                             start))
     return app.exec()
+
+
+def _switch_the_receiver_on(window: "ReceiverWindow", controller,
+                            start) -> None:
+    """Start the receiver, and say so in the window if it will not.
+
+    A receiver that cannot start is the same state as one whose device
+    has gone: nothing is coming, the window says why, and the device -
+    whatever was opened of it - is given back.
+    """
+    try:
+        start()
+    except Exception as e:
+        logger.critical("The receiver would not start: %s", e, exc_info=True)
+        if getattr(controller, "device_failure", None) is None:
+            controller.device_failure = str(e)
+        window.refresh()

@@ -740,11 +740,30 @@ def test_run_passes_the_controller_to_the_window(monkeypatch):
     from fm_radio.gui import main_window
 
     seen = []
-    monkeypatch.setattr(main_window, "run_window",
-                        lambda controller: seen.append(controller) or 0)
+    monkeypatch.setattr(
+        main_window, "run_window",
+        lambda controller, start=None: seen.append((controller, start)) or 0)
     controller = object()
     assert gui.run(controller) == 0
-    assert seen == [controller]
+    assert seen == [(controller, None)]
+
+
+def test_run_passes_the_switch_through_as_well(monkeypatch):
+    """Whatever starts the receiver is the window's to call, when it is up."""
+    from fm_radio import gui
+    from fm_radio.gui import main_window
+
+    seen = []
+    monkeypatch.setattr(
+        main_window, "run_window",
+        lambda controller, start=None: seen.append((controller, start)) or 0)
+    controller = object()
+
+    def switch():
+        pass
+
+    assert gui.run(controller, switch) == 0
+    assert seen == [(controller, switch)]
 
 
 # ----------------------------------------------------------------------
@@ -1108,3 +1127,70 @@ def test_a_recording_can_be_started_again_while_the_last_one_finishes(window):
         assert view._record_audio.isChecked()
     finally:
         release.set()
+
+
+# ----------------------------------------------------------------------
+# The window is built before the radio is switched on
+# ----------------------------------------------------------------------
+
+def test_the_window_is_up_before_the_receiver_starts(qt_app, monkeypatch):
+    """Building a window is a gap in the audio, if there is audio.
+
+    Fonts, a graphics context, a few hundred widgets' worth of layout:
+    long enough to be heard.  Done first it costs nothing, because
+    there is nothing to interrupt yet.
+    """
+    from fm_radio.gui import main_window
+
+    order = []
+    controller = FakeController(snapshot())
+
+    real_show = main_window.ReceiverWindow.show
+
+    def watched_show(self):
+        order.append("window shown")
+        return real_show(self)
+
+    def switch_on():
+        order.append("receiver started")
+
+    monkeypatch.setattr(main_window.ReceiverWindow, "show", watched_show)
+    monkeypatch.setattr(main_window.QApplication, "exec",
+                        lambda self: (qt_app.processEvents(), 0)[1])
+
+    assert main_window.run_window(controller, switch_on) == 0
+
+    assert order == ["window shown", "receiver started"], order
+
+
+def test_the_receiver_is_left_alone_when_nobody_hands_over_a_switch(
+        qt_app, monkeypatch):
+    """A caller that started it already gets the old behaviour."""
+    from fm_radio.gui import main_window
+
+    controller = FakeController(snapshot())
+    monkeypatch.setattr(main_window.QApplication, "exec",
+                        lambda self: (qt_app.processEvents(), 0)[1])
+
+    assert main_window.run_window(controller) == 0
+
+
+def test_a_receiver_that_will_not_start_is_shown_in_the_window(qt_app,
+                                                               monkeypatch):
+    """There is a window by then, so there is somewhere to say it."""
+    from fm_radio.gui import main_window
+
+    from fm_radio.exceptions import SDRDeviceError
+
+    controller = FakeController(snapshot())
+    controller.device_failure = None
+
+    def refuse():
+        raise SDRDeviceError("no radio here")
+
+    monkeypatch.setattr(main_window.QApplication, "exec",
+                        lambda self: (qt_app.processEvents(), 0)[1])
+
+    assert main_window.run_window(controller, refuse) == 0
+
+    assert controller.device_failure == "no radio here"

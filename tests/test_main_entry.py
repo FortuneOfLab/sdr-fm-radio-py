@@ -68,8 +68,19 @@ def entry_point(monkeypatch):
             built.append(controller)
             return controller
 
-        def run_gui(controller):
+        def run_gui(controller, start=None):
+            """Stand in for the window, including when it starts things.
+
+            The real one builds the window, shows it, and only then
+            switches the receiver on - and catches a start that will
+            not, because by then there is a window to say so in.
+            """
             gui_calls.append(controller)
+            if start is not None:
+                try:
+                    start()
+                except Exception as e:
+                    controller.device_failure = str(e)
             if device_failure is not None:
                 # The window closed because the radio went, not because
                 # anybody asked it to.
@@ -114,7 +125,21 @@ def test_a_failure_starting_the_threads_still_cleans_up(entry_point):
         ["--gui"], fail_at="start_background")
 
     assert controller.calls == ["start_background", "cleanup"]
-    assert gui_calls == [], "the window opened over a receiver that never started"
+    assert code == 1
+
+
+def test_a_receiver_that_will_not_start_is_said_in_the_window(entry_point):
+    """Rather than a traceback where the window should have been.
+
+    The window is up by the time the receiver is switched on - that is
+    the point of the order - so there is somewhere to put the reason,
+    and the exit status still says something went wrong.
+    """
+    controller, gui_calls, code = entry_point(
+        ["--gui"], fail_at="start_background")
+
+    assert gui_calls == [controller], "the window never opened"
+    assert controller.device_failure, "nothing was said about the failure"
     assert code == 1
 
 
