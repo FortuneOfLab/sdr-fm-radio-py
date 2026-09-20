@@ -16,6 +16,7 @@ import time
 
 import pytest
 
+from fm_radio.multipath import CLEAN_AM_DEPTH, NOISE_AM_DEPTH
 from fm_radio.telemetry import SILENCE_DBFS, StatusSnapshot
 
 # QtWidgets, not just PySide6: the package imports fine on a machine
@@ -517,6 +518,87 @@ def test_the_bar_empties_when_there_is_no_snapshot(window):
 
     assert view._blend.value() == 0
     assert view._mode.text() == "--"
+
+
+# ----------------------------------------------------------------------
+# How clean the channel is
+# ----------------------------------------------------------------------
+
+@pytest.mark.parametrize("depth,figure", [
+    (0.0, "0.000"),
+    (0.016, "0.016"),
+    (0.067, "0.067"),
+    (0.592, "0.592"),
+])
+def test_the_am_depth_is_shown_as_it_was_measured(window, depth, figure):
+    view, _ = window(FakeController(snapshot(am_depth=depth)))
+
+    assert view._am_depth_value.text() == figure
+
+
+@pytest.mark.parametrize("depth,expected", [
+    (0.0, 0),
+    (0.016, 3),                     # 82.5 MHz, the cleanest measured
+    (0.067, 13),                    # 80.0 MHz
+    (NOISE_AM_DEPTH, 100),          # what noise reads
+    (0.9, 100),                     # past it, and the bar stops
+])
+def test_the_bar_fills_towards_what_noise_reads(window, depth, expected):
+    """Everything worth telling apart is between clean and noise.
+
+    Scaling to 1.0 - a figure nothing reaches - would put every real
+    station in the bottom tenth of the bar and the difference
+    between a good one and a bad one inside a pixel.
+    """
+    view, _ = window(FakeController(snapshot(am_depth=depth)))
+
+    assert view._am_depth.value() == expected
+
+
+def test_a_clean_station_barely_moves_the_bar(window):
+    """The reading a listener wants at a glance: empty is good."""
+    view, _ = window(FakeController(snapshot(am_depth=CLEAN_AM_DEPTH)))
+
+    assert view._am_depth.value() < 20
+
+
+def test_an_unmeasurable_am_depth_is_not_shown_as_clean(window):
+    """None is "nothing to measure", and 0.000 is the best signal
+    there is.  Showing the second for the first is the mistake the
+    measurement itself made before it was fixed.
+    """
+    view, _ = window(FakeController(snapshot(am_depth=None)))
+
+    assert view._am_depth_value.text() == "--"
+    assert view._am_depth.value() == 0
+
+
+def test_the_am_depth_empties_when_there_is_no_snapshot(window):
+    controller = FakeController(snapshot(am_depth=0.5))
+    view, _ = window(controller)
+    assert view._am_depth.value() > 0
+
+    controller.status = None
+    view.refresh()
+
+    assert view._am_depth.value() == 0
+    assert view._am_depth_value.text() == "--"
+
+
+def test_every_reading_that_can_be_missing_says_so_the_same_way(window):
+    """One mark, one place: see NOTHING_MEASURED.
+
+    Two of these can come back unmeasurable and more are coming, and
+    the mistake to avoid is a display that prints a number for one
+    of them - on both of these zero is the best possible signal.
+    """
+    from fm_radio.gui import main_window
+
+    view, _ = window(FakeController(snapshot(pilot_snr_db=None,
+                                             am_depth=None)))
+
+    assert view._pilot.text() == main_window.NOTHING_MEASURED
+    assert view._am_depth_value.text() == main_window.NOTHING_MEASURED
 
 
 def test_an_unmeasured_pilot_reads_as_unknown(window):

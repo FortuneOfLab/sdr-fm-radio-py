@@ -54,6 +54,7 @@ from PySide6.QtWidgets import (
 
 from fm_radio.exceptions import SDRDeviceError
 from fm_radio.gui.band_view import BandView
+from fm_radio.multipath import NOISE_AM_DEPTH
 from fm_radio.device_worker import TUNE
 from fm_radio.telemetry import SILENCE_DBFS, StatusSnapshot
 
@@ -76,6 +77,22 @@ METER_FLOOR_DBFS = -60.0
 #: every refresh, so without this a message about something the user just
 #: tried would be gone in 50 ms - faster than they can read it.
 NOTICE_SECONDS = 5.0
+
+#: What the window shows for a reading there is not.  Every
+#: diagnostic here can come back unmeasurable - a pilot SNR before
+#: the first pilot, an AM depth of a block that was not finite - and
+#: they all say it the same way, through _reading.  One place,
+#: because the mistake to avoid is a display that prints 0.0 for
+#: "nothing to measure": on these two readings zero is the best
+#: possible signal, which is the opposite of what happened.
+NOTHING_MEASURED = "--"
+
+#: Where the AM depth bar is full.  Noise measures about this - the
+#: envelope of complex Gaussian noise has a spread over its mean of
+#: 0.52 - so a bar that fills at the noise figure reads as "how far
+#: along the way to no signal at all", and a well-received station
+#: sits near the bottom of it at 0.06.
+AM_DEPTH_FULL_SCALE = NOISE_AM_DEPTH
 
 #: Everything the blend line can say: the three words, and every
 #: figure between them - 1.00 is never printed, because a full bar
@@ -124,6 +141,25 @@ def _blend_percent(blend: float, stereo: bool) -> int:
     if not stereo:
         return 0
     return int(round(min(100.0, max(0.0, float(blend) * 100.0))))
+
+
+def _reading(value: "float | None", pattern: str) -> str:
+    """A number for the window, or the mark for one there is not."""
+    return NOTHING_MEASURED if value is None else pattern % value
+
+
+def _am_depth_percent(depth: "float | None") -> int:
+    """Map the AM depth onto a meter's 0-100.
+
+    Full at the noise figure rather than at 1.0: everything worth
+    telling apart happens between a clean station and an empty
+    channel, and scaling to a number nothing reaches would put all
+    of it in the bottom tenth of the bar.
+    """
+    if depth is None:
+        return 0
+    return int(round(min(100.0, max(
+        0.0, float(depth) / AM_DEPTH_FULL_SCALE * 100.0))))
 
 
 def _level_percent(dbfs: float) -> int:
@@ -276,9 +312,29 @@ class ReceiverWindow(QMainWindow):
         grid.addWidget(self._blend, 0, 1)
         grid.addWidget(self._mode, 0, 2)
 
-        self._pilot = QLabel("--", box)
+        self._pilot = QLabel(NOTHING_MEASURED, box)
         grid.addWidget(QLabel("Pilot SNR", box), 1, 0)
         grid.addWidget(self._pilot, 1, 1)
+
+        # How far the channel is from the one thing FM promises.  A
+        # bar that fills as things get worse: empty is a carrier
+        # holding its amplitude, full is an envelope moving as much
+        # as noise does.  It does not say what moved it - an empty
+        # channel looks like the worst multipath - so it is here
+        # beside the pilot SNR, which says whether there is a
+        # station there to be spoiled.
+        self._am_depth = QProgressBar(box)
+        self._am_depth.setRange(0, 100)
+        self._am_depth.setTextVisible(False)
+        self._am_depth.setToolTip(
+            "How much the envelope moves, against how much it moves on "
+            "noise. FM holds its amplitude, so empty is a clean signal. "
+            "Read with the pilot SNR: this cannot tell multipath from "
+            "an empty channel.")
+        self._am_depth_value = QLabel(NOTHING_MEASURED, box)
+        grid.addWidget(QLabel("AM depth", box), 2, 0)
+        grid.addWidget(self._am_depth, 2, 1)
+        grid.addWidget(self._am_depth_value, 2, 2)
 
         self._left = QProgressBar(box)
         self._right = QProgressBar(box)
@@ -287,12 +343,12 @@ class ReceiverWindow(QMainWindow):
             meter.setTextVisible(False)
         self._left_db = QLabel("--", box)
         self._right_db = QLabel("--", box)
-        grid.addWidget(QLabel("L", box), 2, 0)
-        grid.addWidget(self._left, 2, 1)
-        grid.addWidget(self._left_db, 2, 2)
-        grid.addWidget(QLabel("R", box), 3, 0)
-        grid.addWidget(self._right, 3, 1)
-        grid.addWidget(self._right_db, 3, 2)
+        grid.addWidget(QLabel("L", box), 3, 0)
+        grid.addWidget(self._left, 3, 1)
+        grid.addWidget(self._left_db, 3, 2)
+        grid.addWidget(QLabel("R", box), 4, 0)
+        grid.addWidget(self._right, 4, 1)
+        grid.addWidget(self._right_db, 4, 2)
         grid.setColumnStretch(1, 1)
         return box
 
@@ -628,12 +684,14 @@ class ReceiverWindow(QMainWindow):
         station = self.controller.current_station()
         self._station.setText(station.name if station else "")
         self._blend.setValue(0)
-        self._mode.setText("--")
-        self._pilot.setText("--")
+        self._mode.setText(NOTHING_MEASURED)
+        self._pilot.setText(NOTHING_MEASURED)
+        self._am_depth.setValue(0)
+        self._am_depth_value.setText(NOTHING_MEASURED)
         for meter, label in ((self._left, self._left_db),
                              (self._right, self._right_db)):
             meter.setValue(0)
-            label.setText("--")
+            label.setText(NOTHING_MEASURED)
         self._show_gain(self.controller.get_gain(),
                         not self.controller.is_manual_gain())
         self._iq_peak.setText("peak --")
@@ -645,15 +703,15 @@ class ReceiverWindow(QMainWindow):
 
         self._show_blend(status)
 
-        self._pilot.setText(
-            "--" if status.pilot_snr_db is None
-            else f"{status.pilot_snr_db:.1f} dB")
+        self._pilot.setText(_reading(status.pilot_snr_db, "%.1f dB"))
+        self._am_depth.setValue(_am_depth_percent(status.am_depth))
+        self._am_depth_value.setText(_reading(status.am_depth, "%.3f"))
 
         for meter, label, level in (
                 (self._left, self._left_db, status.level_left_dbfs),
                 (self._right, self._right_db, status.level_right_dbfs)):
             meter.setValue(_level_percent(level))
-            label.setText("--" if level <= SILENCE_DBFS
+            label.setText(NOTHING_MEASURED if level <= SILENCE_DBFS
                           else f"{level:.1f} dBFS")
 
         self._show_gain(status.gain_db, status.auto_gain)
