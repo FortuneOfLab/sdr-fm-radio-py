@@ -19,6 +19,8 @@ import wave as wave_mod
 import numpy as np
 import pytest
 
+from fm_radio.exceptions import RecordingError
+
 import fm_radio.audio_output as ao_mod
 
 
@@ -101,29 +103,53 @@ def test_duplicate_start_does_not_truncate_target(audio_output, tmp_path):
     ao.stop_recording()
 
 
-def test_concurrent_start_truncates_exactly_one_file(audio_output, tmp_path):
+def test_concurrent_starts_leave_exactly_one_recording(audio_output,
+                                                       tmp_path):
+    """Two at once: one records, and the other leaves nothing behind.
+
+    Neither may touch a file that was already there - a start makes
+    its file rather than taking one over - so the loser's path is the
+    one it never created.
+    """
     ao = audio_output
     f1 = tmp_path / "c1.wav"
     f2 = tmp_path / "c2.wav"
-    for f in (f1, f2):
-        f.write_bytes(b"X" * 1200)
 
     barrier = threading.Barrier(2)
+    refused: list = []
 
     def starter(path):
         barrier.wait()
-        ao.start_recording(str(path))
+        try:
+            ao.start_recording(str(path))
+        except RecordingError as e:
+            refused.append(e)
 
     threads = [threading.Thread(target=starter, args=(f,)) for f in (f1, f2)]
     for t in threads:
         t.start()
     for t in threads:
         t.join(timeout=5)
-    ao.stop_recording()  # winner's file gets a valid header on close
 
-    sizes = sorted([f1.stat().st_size, f2.stat().st_size])
-    assert sizes[1] == 1200, "loser's file must be untouched"
-    assert sizes[0] != 1200, "winner's file must have been recreated"
+    made = [f for f in (f1, f2) if f.exists()]
+    assert len(made) == 1, f"{len(made)} files were made: {made}"
+    assert ao._record_base_path == str(made[0])
+    ao.stop_recording()
+    assert made[0].stat().st_size > 0
+
+
+def test_a_start_will_not_take_over_a_file_that_is_already_there(
+        audio_output, tmp_path):
+    """The file it would truncate can be one somebody is recording to."""
+    ao = audio_output
+    path = tmp_path / "theirs.wav"
+    path.write_bytes(b"X" * 1200)
+
+    with pytest.raises(RecordingError):
+        ao.start_recording(str(path))
+
+    assert path.stat().st_size == 1200, "it truncated a file it did not make"
+    assert not ao.recording
 
 
 def test_rotation_preserves_every_sample(audio_output, tmp_path, monkeypatch):

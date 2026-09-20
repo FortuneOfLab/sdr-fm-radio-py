@@ -130,7 +130,12 @@ class SDRReceiver(SDRReceiverInterface):
         # one reaches ``wave.open`` (the file-truncating step).
         # Distinct from ``_iq_enqueue_lock`` so the SDR callback is
         # never blocked during the slow file open.
-        self._iq_start_lock: threading.Lock = threading.Lock()
+        # Reentrant: start_iq_recording takes it and then calls
+        # install, which takes it again to decide against a teardown.
+        self._iq_start_lock: threading.RLock = threading.RLock()
+        # One recording after another, counted; see AudioOutput.
+        self._iq_record_session: int = 0
+        self._iq_sidecar_lock: threading.Lock = threading.Lock()
         # Cumulative count of dropped IQ blocks (queue full). Bumped from
         # the SDR callback thread; only read for diagnostic logging.
         self._dropped_count: int = 0
@@ -412,7 +417,12 @@ class SDRReceiver(SDRReceiverInterface):
                 )
                 return
             ready = self.prepare_an_iq_recording(filename)
-            self.install_a_prepared_iq_recording(ready)
+            try:
+                session = self.install_a_prepared_iq_recording(ready)
+            except BaseException:
+                self.discard_a_prepared_iq_recording(ready)
+                raise
+        self.write_the_iq_recording_sidecar(session)
 
     def prepare_an_iq_recording(self, filename: str) -> "_ReadyIQRecording":
         """Get a file ready to record IQ into, without starting anything.
@@ -439,6 +449,26 @@ class SDRReceiver(SDRReceiverInterface):
 
         self._let_the_last_iq_recording_go(filename)
 
+        # Made, not opened; see AudioOutput.prepare_a_recording.  The
+        # file wave.open would truncate can be one that is being
+        # recorded into at this moment.
+        try:
+            os.close(os.open(filename,
+                             os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666))
+        except FileExistsError as e:
+            self.logger.error(
+                "IQ recording start failed: %s exists", filename)
+            raise RecordingError(
+                f"IQ recording start failed: {filename} already exists",
+            ) from e
+        except OSError as e:
+            self.logger.error(
+                f"IQ recording start failed: {e}", exc_info=True,
+            )
+            raise RecordingError(
+                f"IQ recording start failed: {e}",
+            ) from e
+
         try:
             wf = wave.open(filename, 'wb')
             wf.setnchannels(2)           # I/Q
@@ -448,45 +478,85 @@ class SDRReceiver(SDRReceiverInterface):
             self.logger.error(
                 f"IQ recording start failed: {e}", exc_info=True,
             )
+            self._remove_the_file_we_made(filename)
             raise RecordingError(
                 f"IQ recording start failed: {e}",
             ) from e
         return _ReadyIQRecording(filename, wf)
 
-    def install_a_prepared_iq_recording(self,
-                                        ready: "_ReadyIQRecording") -> None:
-        """Put a prepared file in and start recording IQ into it."""
-        # Atomic install w.r.t. the SDR callback's enqueue path.
-        with self._iq_enqueue_lock:
-            self._drain_iq_record_queue()
-            self._iq_flush_event.clear()
-            self._iq_record_drop_count = 0
-            with self.iq_record_lock:
-                self.iq_record_wave = ready.wave
-                self._iq_record_base_path = ready.path
-                self._iq_record_part_index = 0
-                self._iq_record_bytes_written = 0
-            self.iq_recording = True
-
-        # Metadata sidecar (CLI-thread only, never the SDR callback).
+    def _remove_the_file_we_made(self, filename: str) -> None:
+        """Take back a file this class created and is not going to use."""
         try:
-            gain_db = float(self.get_gain())
-        except Exception:
-            gain_db = None
-        self._iq_record_meta = {
-            "type": "iq",
-            "file": recording_meta.part_list(
-                ready.path, 0, self._make_rotated_iq_path,
-            )[0],
-            "sample_rate_hz": int(self.sample_rate),
-            "center_freq_hz": float(self.center_freq),
-            "gain_db": gain_db,
-            "started_at": recording_meta.now_iso(),
-        }
-        recording_meta.write_sidecar(
-            ready.path, self._iq_record_meta, self.logger,
-        )
+            os.remove(filename)
+        except OSError as e:                    # pragma: no cover - guard
+            self.logger.debug("Could not remove %s: %s", filename, e)
+
+    def install_a_prepared_iq_recording(self,
+                                        ready: "_ReadyIQRecording") -> int:
+        """Put a prepared file in and start recording IQ into it.
+
+        Under ``_iq_start_lock``, which the teardown also takes, so a
+        recording cannot be installed into a receiver that has been
+        stopped and leave a handle nothing will close.  No file is
+        touched here; the sidecar is
+        :meth:`write_the_iq_recording_sidecar`, afterwards.
+
+        Returns:
+            The session number for that call.
+
+        Raises:
+            RecordingError: The receiver was stopped while this was
+                being prepared.
+        """
+        with self._iq_start_lock:
+            if not self.handle.usable:
+                raise RecordingError(
+                    "Cannot start IQ recording: the receiver has been "
+                    "stopped")
+            # Atomic install w.r.t. the SDR callback's enqueue path.
+            with self._iq_enqueue_lock:
+                self._drain_iq_record_queue()
+                self._iq_flush_event.clear()
+                self._iq_record_drop_count = 0
+                with self.iq_record_lock:
+                    self.iq_record_wave = ready.wave
+                    self._iq_record_base_path = ready.path
+                    self._iq_record_part_index = 0
+                    self._iq_record_bytes_written = 0
+                self.iq_recording = True
+
+            try:
+                gain_db = float(self.get_gain())
+            except Exception:
+                gain_db = None
+            self._iq_record_session += 1
+            session = self._iq_record_session
+            self._iq_record_meta = {
+                "type": "iq",
+                "file": recording_meta.part_list(
+                    ready.path, 0, self._make_rotated_iq_path,
+                )[0],
+                "sample_rate_hz": int(self.sample_rate),
+                "center_freq_hz": float(self.center_freq),
+                "gain_db": gain_db,
+                "started_at": recording_meta.now_iso(),
+            }
         self.logger.info(f"IQ recording started: {ready.path}")
+        return session
+
+    def write_the_iq_recording_sidecar(self, session: int) -> None:
+        """Write the sidecar for the IQ recording *session* started."""
+        with self._iq_sidecar_lock:
+            if session != self._iq_record_session:
+                self.logger.debug(
+                    "Not writing the sidecar for IQ recording %d; the "
+                    "current one is %d", session, self._iq_record_session)
+                return
+            path = self._iq_record_base_path
+            if path is None or not self._iq_record_meta:
+                return
+            recording_meta.write_sidecar(path, self._iq_record_meta,
+                                         self.logger)
 
     def discard_a_prepared_iq_recording(self,
                                         ready: "_ReadyIQRecording") -> None:
@@ -495,10 +565,8 @@ class SDRReceiver(SDRReceiverInterface):
             ready.wave.close()
         except Exception as e:                  # pragma: no cover - guard
             self.logger.debug("Could not close %s: %s", ready.path, e)
-        try:
-            os.remove(ready.path)
-        except OSError as e:                    # pragma: no cover - guard
-            self.logger.debug("Could not remove %s: %s", ready.path, e)
+        # Only ever the file prepare_an_iq_recording created.
+        self._remove_the_file_we_made(ready.path)
 
     def _let_the_last_iq_recording_go(self, filename: str) -> None:
         """Wait for an IQ recording that is still closing, or refuse this.
@@ -618,18 +686,21 @@ class SDRReceiver(SDRReceiverInterface):
                 finally:
                     self.iq_record_wave = None
 
-        # Finalise the metadata sidecar with the session outcome.
-        if base_path is not None and self._iq_record_meta:
-            self._iq_record_meta.update({
-                "stopped_at": recording_meta.now_iso(),
-                "parts": recording_meta.part_list(
-                    base_path, part_index, self._make_rotated_iq_path,
-                ),
-                "dropped_blocks": int(drops),
-            })
-            recording_meta.write_sidecar(
-                base_path, self._iq_record_meta, self.logger,
-            )
+        # Finalise the metadata sidecar with the session outcome; see
+        # AudioOutput for why the session is moved on afterwards.
+        with self._iq_sidecar_lock:
+            if base_path is not None and self._iq_record_meta:
+                self._iq_record_meta.update({
+                    "stopped_at": recording_meta.now_iso(),
+                    "parts": recording_meta.part_list(
+                        base_path, part_index, self._make_rotated_iq_path,
+                    ),
+                    "dropped_blocks": int(drops),
+                })
+                recording_meta.write_sidecar(
+                    base_path, self._iq_record_meta, self.logger,
+                )
+            self._iq_record_session += 1
 
     # ------------------------------------------------------------------
     # IQ recording worker (runs disk writes off the SDR callback thread)

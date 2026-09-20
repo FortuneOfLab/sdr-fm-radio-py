@@ -591,7 +591,8 @@ class FMReceiverController:
                 self._the_start_is_still_wanted(
                     wanted, self._audio_recording_wanted,
                     self.audio_output.recording, "recording")
-                self.audio_output.install_a_prepared_recording(ready)
+                session = self.audio_output.install_a_prepared_recording(
+                    ready)
                 self._starting_audio = None
         except BaseException:
             # Nobody is going to record into it, so it does not stay:
@@ -599,6 +600,9 @@ class FMReceiverController:
             # would be the only sign of one.
             self.audio_output.discard_a_prepared_recording(ready)
             raise
+        # Outside the lock: the sidecar is a file opened, written and
+        # closed, and nobody should be waiting behind that.
+        self.audio_output.write_the_recording_sidecar(session)
         return filename
 
     @staticmethod
@@ -685,11 +689,13 @@ class FMReceiverController:
                 self._the_start_is_still_wanted(
                     wanted, self._iq_recording_wanted,
                     self.sdr_receiver.iq_recording, "IQ recording")
-                self.sdr_receiver.install_a_prepared_iq_recording(ready)
+                session = self.sdr_receiver.install_a_prepared_iq_recording(
+                    ready)
                 self._starting_iq = None
         except BaseException:
             self.sdr_receiver.discard_a_prepared_iq_recording(ready)
             raise
+        self.sdr_receiver.write_the_iq_recording_sidecar(session)
         return filename
 
     def stop_iq_recording(self) -> bool:

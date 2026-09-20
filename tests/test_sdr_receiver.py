@@ -16,6 +16,8 @@ import wave as wave_mod
 import numpy as np
 import pytest
 
+from fm_radio.exceptions import RecordingError
+
 import fm_radio.sdr_receiver as sr_mod
 
 
@@ -109,29 +111,45 @@ def test_duplicate_start_does_not_truncate_target(sdr_receiver, tmp_path):
     recv.stop_iq_recording()
 
 
-def test_concurrent_start_truncates_exactly_one_file(sdr_receiver, tmp_path):
+def test_concurrent_starts_leave_exactly_one_recording(sdr_receiver,
+                                                       tmp_path):
+    """Two at once: one records, and the other leaves nothing behind."""
     recv = sdr_receiver
     f1 = tmp_path / "c1.wav"
     f2 = tmp_path / "c2.wav"
-    for f in (f1, f2):
-        f.write_bytes(b"Y" * 1200)
 
     barrier = threading.Barrier(2)
 
     def starter(path):
         barrier.wait()
-        recv.start_iq_recording(str(path))
+        try:
+            recv.start_iq_recording(str(path))
+        except RecordingError:
+            pass
 
     threads = [threading.Thread(target=starter, args=(f,)) for f in (f1, f2)]
     for t in threads:
         t.start()
     for t in threads:
         t.join(timeout=5)
+
+    made = [f for f in (f1, f2) if f.exists()]
+    assert len(made) == 1, f"{len(made)} files were made: {made}"
+    assert recv._iq_record_base_path == str(made[0])
     recv.stop_iq_recording()
 
-    sizes = sorted([f1.stat().st_size, f2.stat().st_size])
-    assert sizes[1] == 1200
-    assert sizes[0] != 1200
+
+def test_a_start_will_not_take_over_a_file_that_is_already_there(
+        sdr_receiver, tmp_path):
+    recv = sdr_receiver
+    path = tmp_path / "theirs.wav"
+    path.write_bytes(b"Y" * 1200)
+
+    with pytest.raises(RecordingError):
+        recv.start_iq_recording(str(path))
+
+    assert path.stat().st_size == 1200
+    assert not recv.iq_recording
 
 
 def test_rotation_preserves_every_sample(sdr_receiver, tmp_path, monkeypatch):

@@ -573,10 +573,12 @@ def test_a_recording_starting_as_the_receiver_stops_is_not_left_behind(
         receiver, monkeypatch, tmp_path):
     """The overlap the flag check on its own cannot cover.
 
-    A start that is already inside wave.open has passed every check there
-    is.  Shutdown waits for it to finish installing itself and then tears
-    it down properly, rather than racing past and leaving an open file
-    with nothing to write to it.
+    A start that is already inside wave.open has passed the check it
+    made on the way in.  Two endings are allowed and both are fine:
+    the install finds, under the start lock, that the receiver has
+    been stopped and refuses; or it gets in first and shutdown tears
+    it down properly.  What is not allowed is an open file with
+    nothing left to write to it.
     """
     sdr = receiver.sdr_receiver
     opening = threading.Event()
@@ -592,8 +594,16 @@ def test_a_recording_starting_as_the_receiver_stops_is_not_left_behind(
     monkeypatch.setattr("fm_radio.sdr_receiver.wave.open", slow_open)
 
     path = tmp_path / "overlap.wav"
-    starter = threading.Thread(target=sdr.start_iq_recording,
-                               args=(str(path),), daemon=True)
+    how_it_went: list = []
+
+    def start():
+        try:
+            sdr.start_iq_recording(str(path))
+            how_it_went.append("started")
+        except RecordingError as e:
+            how_it_went.append(e)
+
+    starter = threading.Thread(target=start, daemon=True)
     starter.start()
     assert opening.wait(5), "the recording never reached wave.open"
 
@@ -605,8 +615,12 @@ def test_a_recording_starting_as_the_receiver_stops_is_not_left_behind(
     stopper.join(timeout=10)
 
     assert not starter.is_alive() and not stopper.is_alive()
+    assert how_it_went, "the start neither finished nor failed"
     assert not sdr.iq_recording, "still marked as recording after shutdown"
     assert sdr.iq_record_wave is None, "a wave handle was left open"
+    if isinstance(how_it_went[0], RecordingError):
+        assert not path.exists(), \
+            "the file it prepared was left behind when it was refused"
 
 
 def test_stopping_a_recording_does_not_wait_for_a_worker_that_is_gone(
@@ -3125,3 +3139,193 @@ def test_the_wait_for_the_last_recording_happens_once(receiver, tmp_path,
         assert waited < 1.0, f"it waited {waited:.1f} s in total"
     finally:
         let_it_close.set()
+
+
+# ----------------------------------------------------------------------
+# A recording that is refused must leave the one that is running alone
+# ----------------------------------------------------------------------
+
+def test_a_refused_recording_does_not_empty_the_one_that_is_running(
+        receiver, tmp_path):
+    """wave.open truncates, and it used to do so before the refusal.
+
+    The file it emptied could be the one being written to at that
+    moment: a second start on the same path took 300 bytes of audio
+    down to a 44-byte header, and then failed.
+    """
+    audio = receiver.audio_output
+    path = tmp_path / "in_use.wav"
+
+    assert receiver.start_recording(str(path)).wait(5)
+    audio.record(np.zeros((2048, 2), dtype=np.float32))
+    receiver.stop_recording()                   # flushed and closed
+    was = path.stat().st_size
+    assert was > 1000, f"the first recording wrote nothing: {was}"
+
+    asked = receiver.start_recording(str(path))
+
+    assert asked.wait(5)
+    assert isinstance(asked.error, RecordingError), asked.error
+    assert path.stat().st_size == was, "the refused start emptied the file"
+
+
+def test_a_second_start_on_the_path_being_recorded_is_refused(receiver,
+                                                              tmp_path):
+    """The live one, not just a finished one."""
+    audio = receiver.audio_output
+    path = tmp_path / "live.wav"
+
+    assert receiver.start_recording(str(path)).wait(5)
+    audio.record(np.zeros((2048, 2), dtype=np.float32))
+
+    asked = receiver.start_recording(str(path))
+
+    assert asked.wait(5)
+    assert isinstance(asked.error, RecordingError), asked.error
+    assert audio.recording, "the running recording was disturbed"
+    assert audio._record_base_path == str(path)
+
+    receiver.stop_recording()
+    with wave.open(str(path), "rb") as f:
+        assert f.getnframes() == 2048, "the audio was lost"
+
+
+def test_an_iq_recording_will_not_take_over_a_file_that_exists(receiver,
+                                                               tmp_path):
+    path = tmp_path / "taken.wav"
+    path.write_bytes(b"not a wav, but somebody's")
+
+    asked = receiver.start_iq_recording(str(path))
+
+    assert asked.wait(5)
+    assert isinstance(asked.error, RecordingError), asked.error
+    assert path.read_bytes() == b"not a wav, but somebody's"
+
+
+# ----------------------------------------------------------------------
+# A recording installed into an output that has gone
+# ----------------------------------------------------------------------
+
+def test_a_recording_prepared_before_cleanup_is_not_installed_after_it(
+        receiver, tmp_path):
+    """Otherwise the handle is left open with nothing to close it.
+
+    The controller's start does not go through the recorder's own
+    start lock any more, so the install has to take it itself - and
+    find, under it, that the output has been closed.
+    """
+    audio = receiver.audio_output
+    path = tmp_path / "too_late.wav"
+    preparing, go = a_disk_that_is_thinking(audio)
+
+    asked = receiver.start_recording(str(path))
+    assert preparing.wait(5), "the start never reached the slow half"
+
+    receiver.cleanup()
+    go.set()
+
+    assert asked.wait(5), "nobody answered for the start"
+    assert isinstance(asked.error, RecordingError), asked.error
+    assert not audio.recording, "it installed itself into a closed output"
+    assert audio.record_wave is None, "a handle was left open"
+    assert not path.exists(), "the file it prepared was left behind"
+
+
+def test_an_iq_recording_prepared_before_the_stop_is_not_installed_after(
+        receiver, tmp_path):
+    """The same on the IQ side, where the receiver is what goes."""
+    sdr = receiver.sdr_receiver
+    path = tmp_path / "too_late_iq.wav"
+    preparing, go = a_disk_that_is_thinking(
+        sdr, "_let_the_last_iq_recording_go")
+
+    asked = receiver.start_iq_recording(str(path))
+    assert preparing.wait(5), "the start never reached the slow half"
+
+    receiver.cleanup()
+    go.set()
+
+    assert asked.wait(5)
+    assert isinstance(asked.error, RecordingError), asked.error
+    assert not sdr.iq_recording
+    assert sdr.iq_record_wave is None, "a handle was left open"
+    assert not path.exists()
+
+
+# ----------------------------------------------------------------------
+# The sidecar is a file too
+# ----------------------------------------------------------------------
+
+def test_a_slow_sidecar_does_not_hold_up_another_recording(receiver,
+                                                            tmp_path):
+    """Writing it opens, writes and closes; that is not lock work.
+
+    It used to happen under the lock that orders a start against a
+    stop, so a disk that was thinking stopped the other recording from
+    even being asked for.
+    """
+    audio = receiver.audio_output
+    writing = threading.Event()
+    go = threading.Event()
+    real_write = audio.write_the_recording_sidecar
+
+    def slow_sidecar(session):
+        writing.set()
+        assert go.wait(10), "the test never let the sidecar go"
+        return real_write(session)
+
+    audio.write_the_recording_sidecar = slow_sidecar
+
+    receiver.start_recording(str(tmp_path / "with_sidecar.wav"))
+    assert writing.wait(5), "the sidecar was never written"
+
+    try:
+        started = time.monotonic()
+        asked = receiver.start_iq_recording(str(tmp_path / "other.wav"))
+        waited = time.monotonic() - started
+
+        assert waited < 1.0, f"the ask waited {waited:.1f} s for a sidecar"
+    finally:
+        go.set()
+
+    assert asked.wait(5), "the IQ recording never started"
+    assert not asked.failed, asked.error
+
+
+def test_the_sidecar_of_a_recording_that_has_stopped_is_the_last_word(
+        receiver, tmp_path):
+    """A start still on its way to writing must not undo the stop.
+
+    Both write the same file.  The one that ends the recording has the
+    outcome in it - stopped_at, the parts, the drops - and a start
+    that was slow to get there would otherwise put its own beginning
+    back over the top.
+    """
+    audio = receiver.audio_output
+    path = tmp_path / "ordered.wav"
+    writing = threading.Event()
+    go = threading.Event()
+    real_write = audio.write_the_recording_sidecar
+
+    def slow_sidecar(session):
+        writing.set()
+        assert go.wait(10), "the test never let the sidecar go"
+        return real_write(session)
+
+    audio.write_the_recording_sidecar = slow_sidecar
+
+    asked = receiver.start_recording(str(path))
+    assert writing.wait(5), "the sidecar was never written"
+
+    # The whole recording happens and ends while the start's sidecar
+    # is still waiting to be written.
+    receiver.stop_recording()
+    go.set()
+    assert asked.wait(5)
+
+    import json
+    with open(str(path)[:-4] + ".json", encoding="utf-8") as f:
+        meta = json.load(f)
+
+    assert "stopped_at" in meta, \
+        "the start's sidecar was written over the stop's"
