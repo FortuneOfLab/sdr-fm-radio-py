@@ -230,13 +230,24 @@ def test_the_waterfall_is_still_placed_right_after_the_band_changes(view):
     assert placed.height() == pytest.approx(float(HISTORY_FRAMES), abs=1e-6)
 
 
-def where_on_screen(plot, mhz: float, row: float):
-    """The pixel in *plot* that shows *mhz* at history row *row*."""
-    from PySide6.QtCore import QPointF
+def where_on_screen(plot, picture, mhz: float, row: float):
+    """The pixel of *picture* that shows *mhz* at history row *row*.
+
+    Two coordinate systems meet here.  Qt lays widgets out in
+    logical points, which is what mapFromScene gives back, and
+    grab() renders at the screen's device pixel ratio, so on a
+    display scaled to 150% the image is half as big again as the
+    widget and a logical point lands somewhere else entirely - at
+    200% it read the floor where the loud bin is and the test
+    passed on a picture that was wrong.
+    """
+    from PySide6.QtCore import QPoint, QPointF
 
     box = plot.getPlotItem().getViewBox()
     scene = box.mapViewToScene(QPointF(float(mhz), float(row)))
-    return plot.mapFromScene(scene)
+    logical = plot.mapFromScene(scene)
+    ratio = picture.devicePixelRatio()
+    return QPoint(round(logical.x() * ratio), round(logical.y() * ratio))
 
 
 def test_a_loud_bin_is_drawn_in_a_different_colour(view, qt_app):
@@ -264,8 +275,8 @@ def test_a_loud_bin_is_drawn_in_a_different_colour(view, qt_app):
     megahertz = frame.frequencies_hz() / 1e6
     # The newest rows are the top ones; look at the middle of them.
     row = HISTORY_FRAMES - rows / 2.0
-    loud = where_on_screen(view._fall, megahertz[peak_at], row)
-    quiet = where_on_screen(view._fall, megahertz[peak_at // 2], row)
+    loud = where_on_screen(view._fall, picture, megahertz[peak_at], row)
+    quiet = where_on_screen(view._fall, picture, megahertz[peak_at // 2], row)
 
     for name, point in (("loud", loud), ("quiet", quiet)):
         assert picture.rect().contains(point), (
