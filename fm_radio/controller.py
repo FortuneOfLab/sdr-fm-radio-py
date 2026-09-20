@@ -918,9 +918,13 @@ class FMReceiverController:
         """Capture the receiver's state for whatever is watching it.
 
         Called from the processing thread, only on a block where the
-        publisher is due.  The three measurements taken here — IQ peak and
-        the two audio levels — are the only work this adds to the realtime
-        path; everything else is reading a value the receiver already keeps.
+        publisher is due.  The four measurements taken here — IQ peak,
+        the two audio levels, and the AM depth of the channel's
+        envelope — are the only work this adds to the realtime path;
+        everything else is reading a value the receiver already keeps.
+        The AM depth is the expensive one at 0.138 ms, and the count is
+        worth keeping right: it is what anybody costing this path will
+        read before they measure it.
         """
         demod = self.fm_demodulator
         audio = self.audio_output
