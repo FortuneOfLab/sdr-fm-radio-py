@@ -340,6 +340,78 @@ def test_the_reason_still_reaches_the_log(receiver, monkeypatch, caplog):
     assert any("LIBUSB_ERROR_NOT_FOUND" in r.message for r in caplog.records)
 
 
+def a_reader_that_cannot_be_woken(receiver, monkeypatch):
+    """A command thread stuck in a read nothing can interrupt.
+
+    Windows with a piped stdin, or any stdin without a file
+    descriptor: stop_reading() has nowhere to write, the thread stays
+    where it is, and os._exit is what is left.
+    """
+    asked: list[str] = []
+    monkeypatch.setattr(receiver.cmd_interface, "is_alive", lambda: True)
+    monkeypatch.setattr(receiver.cmd_interface, "stop_reading",
+                        lambda: asked.append("stop"))
+    monkeypatch.setattr(receiver.cmd_interface, "join",
+                        lambda timeout=None: None)
+    return asked
+
+
+def a_reader_that_stops_when_asked(receiver, monkeypatch):
+    """The ordinary case: the wait ends and the thread returns."""
+    alive = [True]
+    asked: list[str] = []
+
+    def stop_reading():
+        asked.append("stop")
+        alive[0] = False            # the read ends and run() returns
+
+    monkeypatch.setattr(receiver.cmd_interface, "is_alive",
+                        lambda: alive[0])
+    monkeypatch.setattr(receiver.cmd_interface, "stop_reading", stop_reading)
+    monkeypatch.setattr(receiver.cmd_interface, "join",
+                        lambda timeout=None: None)
+    return asked
+
+
+def test_a_command_line_that_stops_when_asked_is_not_exited_past(receiver,
+                                                                 monkeypatch):
+    """The whole point: an ordinary shutdown unwinds like any other.
+
+    os._exit skips everything Python would do on the way out.  It was
+    there because a thread blocked in input() cannot be woken - so the
+    wait is arranged to be endable, and where it ends, this does
+    nothing but end it.
+    """
+    import fm_radio.controller as controller_module
+
+    left: list[int] = []
+    monkeypatch.setattr(controller_module.os, "_exit", left.append)
+    asked = a_reader_that_stops_when_asked(receiver, monkeypatch)
+    receiver.device_failure = "LIBUSB_ERROR_NOT_FOUND (-5)"
+
+    receiver._leave_past_the_blocked_reader()
+
+    assert asked == ["stop"], "the command line was never asked to stop"
+    assert left == [], f"the process was taken down anyway: {left}"
+
+
+def test_a_command_line_already_gone_is_not_asked_for_anything(receiver,
+                                                               monkeypatch):
+    """It often is: it saw quit_event, or stdin ended."""
+    import fm_radio.controller as controller_module
+
+    left: list[int] = []
+    monkeypatch.setattr(controller_module.os, "_exit", left.append)
+    asked: list[str] = []
+    monkeypatch.setattr(receiver.cmd_interface, "is_alive", lambda: False)
+    monkeypatch.setattr(receiver.cmd_interface, "stop_reading",
+                        lambda: asked.append("stop"))
+
+    receiver._leave_past_the_blocked_reader()
+
+    assert asked == [] and left == []
+
+
 def test_a_closed_pipe_does_not_keep_the_process_alive(receiver, monkeypatch):
     """The last flushes before leaving can fail on the same pipe."""
     import fm_radio.controller as controller_module
@@ -348,7 +420,7 @@ def test_a_closed_pipe_does_not_keep_the_process_alive(receiver, monkeypatch):
     monkeypatch.setattr(controller_module.os, "_exit", left.append)
     monkeypatch.setattr(sys, "stdout", _ClosedPipe())
     monkeypatch.setattr(sys, "stderr", _ClosedPipe())
-    monkeypatch.setattr(receiver.cmd_interface, "is_alive", lambda: True)
+    a_reader_that_cannot_be_woken(receiver, monkeypatch)
     receiver.device_failure = "LIBUSB_ERROR_NOT_FOUND (-5)"
 
     receiver._leave_past_the_blocked_reader()
@@ -362,11 +434,31 @@ def test_leaving_on_purpose_says_so(receiver, monkeypatch):
 
     left: list[int] = []
     monkeypatch.setattr(controller_module.os, "_exit", left.append)
-    monkeypatch.setattr(receiver.cmd_interface, "is_alive", lambda: True)
+    a_reader_that_cannot_be_woken(receiver, monkeypatch)
 
     receiver._leave_past_the_blocked_reader()
 
     assert left == [0]
+
+
+def test_a_reader_that_will_not_stop_is_left_behind(receiver, monkeypatch,
+                                                    caplog):
+    """And the log says why the blunt instrument came out."""
+    import fm_radio.controller as controller_module
+
+    left: list[int] = []
+    monkeypatch.setattr(controller_module.os, "_exit", left.append)
+    monkeypatch.setattr("fm_radio.controller.READER_STOP_TIMEOUT_SEC", 0.05)
+    asked = a_reader_that_cannot_be_woken(receiver, monkeypatch)
+
+    with caplog.at_level("WARNING",
+                         logger="fm_receiver.FMReceiverController"):
+        receiver._leave_past_the_blocked_reader()
+
+    assert asked == ["stop"], "it was not even asked"
+    assert left == [0]
+    assert any("cannot be interrupted" in r.message for r in caplog.records), \
+        [r.message for r in caplog.records]
 
 
 # ----------------------------------------------------------------------
