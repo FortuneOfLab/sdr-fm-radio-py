@@ -1177,23 +1177,73 @@ def test_the_receiver_is_left_alone_when_nobody_hands_over_a_switch(
 
 def test_a_receiver_that_will_not_start_is_shown_in_the_window(qt_app,
                                                                monkeypatch):
-    """There is a window by then, so there is somewhere to say it."""
+    """There is a window by then, so there is somewhere to say it.
+
+    The whole way through, not just as far as the controller: the
+    reason is recorded, the notice reaches the GUI thread, and the
+    window shows it and goes quiet.  Checking the controller alone
+    passes even when nothing is ever shown, because run_window joins
+    the starting thread before it returns.
+    """
     from fm_radio.gui import main_window
 
     from fm_radio.exceptions import SDRDeviceError
 
     controller = FakeController(snapshot())
     controller.device_failure = None
+    window = []
+    refreshed_on = []
+
+    real_refresh = main_window.ReceiverWindow.refresh
+
+    def watched_refresh(self):
+        refreshed_on.append(threading.current_thread())
+        window.append(self)
+        return real_refresh(self)
 
     def refuse():
         raise SDRDeviceError("no radio here")
 
-    monkeypatch.setattr(main_window.QApplication, "exec",
-                        lambda self: (qt_app.processEvents(), 0)[1])
+    def exec_(self):
+        # The notice is queued to this thread from the starting
+        # thread, so there has to be something to queue before the
+        # events are run.  Bounded, and the assertions are out here
+        # rather than in the switch, where the start-failure handler
+        # would swallow them.
+        told = shown.wait(5)
+        qt_app.processEvents()
+        ran.append(told)
+        return 0
+
+    shown = threading.Event()
+    ran = []
+
+    monkeypatch.setattr(main_window.ReceiverWindow, "refresh", watched_refresh)
+    monkeypatch.setattr(main_window.QApplication, "exec", exec_)
+
+    original_emit = main_window.ReceiverSwitch._run
+
+    def watched_run(self):
+        try:
+            original_emit(self)
+        finally:
+            shown.set()
+
+    monkeypatch.setattr(main_window.ReceiverSwitch, "_run", watched_run)
 
     assert main_window.run_window(controller, refuse) == 0
 
+    assert ran == [True], "the switch never reported the failure"
     assert controller.device_failure == "no radio here"
+    assert refreshed_on, "the window was never told"
+    assert all(t is threading.main_thread() for t in refreshed_on), (
+        "the widgets were touched from %s" % refreshed_on)
+    view = window[0]
+    assert view._health.text() == (
+        "SDR disconnected - the receiver has stopped"), view._health.text()
+    assert view._health.toolTip() == "no radio here", view._health.toolTip()
+    assert not view._record_audio.isEnabled(),         "the controls still offer to reach a radio that is not there"
+    assert not view._presets.isEnabled()
 
 
 def test_the_receiver_is_not_started_on_the_gui_thread(qt_app, monkeypatch):

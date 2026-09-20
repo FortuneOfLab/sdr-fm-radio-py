@@ -23,7 +23,7 @@ from fm_radio.exceptions import RecordingError
 
 import fm_radio.audio_output as ao_mod
 from fm_radio.constants import (
-    AUDIO_CHANNELS, AUDIO_FRAMES_PER_BUFFER, AUDIO_PREROLL_FRAMES,
+    AUDIO_CHANNELS, AUDIO_FRAMES_PER_BUFFER, AUDIO_OUTPUT_RATE,
 )
 
 
@@ -275,8 +275,14 @@ def test_the_stream_does_not_run_before_there_is_audio(audio_output):
 
 
 #: A block the size the receiver really produces: one SDR block of
-#: 16 ms is 768 frames at 48 kHz, and the card asks for 1024.
+#: 16384 samples at 1.024 MHz is 16 ms, which is 768 frames at
+#: 48 kHz, and the card asks for 1024 at a time.
 BLOCK_FRAMES = 768
+
+#: The two modes, as (name, seconds between blocks).  Light mode
+#: reads the same 16384 samples at 250 kHz, so its blocks are four
+#: times as far apart and four times as big.
+MODES = [("standard", 16384 / 1.024e6), ("light", 16384 / 0.25e6)]
 
 
 def _feed(audio_output, frames, block=BLOCK_FRAMES):
@@ -287,6 +293,48 @@ def _feed(audio_output, frames, block=BLOCK_FRAMES):
         audio_output.enqueue_audio(one, one)
         sent += block
     return sent
+
+
+def _play_out(audio_output, interval_sec, seconds=2.0):
+    """Run the producer and the card against each other on the clock.
+
+    No sleeping and no jitter: blocks go in every ``interval_sec`` of
+    simulated time and the card asks every 1024 frames' worth from
+    the moment the stream starts, which is the schedule both really
+    keep.  The point is that the two schedules do not line up, and
+    that alone is enough to run a thin cushion dry.
+    """
+    rate = float(AUDIO_OUTPUT_RATE)
+    callback_sec = AUDIO_FRAMES_PER_BUFFER / rate
+    block = 0                       # next block's index
+    produced = 0                    # frames handed over so far
+    t_block = 0.0
+    t_callback = None               # set when the card starts asking
+    while min(t_block, t_callback if t_callback is not None else t_block)             <= seconds:
+        # The card goes first when the two fall together: a block due
+        # at the same instant may be a hair late, and that is the
+        # case that costs a gap.
+        if t_callback is not None and t_callback <= t_block:
+            if t_callback > seconds:
+                break
+            audio_output.callback(None, AUDIO_FRAMES_PER_BUFFER, {}, 0)
+            t_callback += callback_sec
+            continue
+        if t_block > seconds:
+            break
+        # The receiver produces at exactly the audio rate; the block
+        # boundaries only decide how it is parcelled up, so each one
+        # carries whatever is needed to keep the running total right.
+        block += 1
+        want = int(round(block * interval_sec * rate))
+        one = np.zeros(want - produced, dtype=np.float32)
+        produced = want
+        audio_output.enqueue_audio(one, one)
+        if t_callback is None and audio_output._playing:
+            # PortAudio asks for the first buffer as soon as it is
+            # started, so the card's clock starts here.
+            t_callback = t_block
+        t_block += interval_sec
 
 
 def test_one_block_is_not_enough_to_start_on(audio_output):
@@ -305,10 +353,54 @@ def test_one_block_is_not_enough_to_start_on(audio_output):
 
 
 def test_the_stream_starts_once_there_is_a_cushion(audio_output):
-    _feed(audio_output, AUDIO_PREROLL_FRAMES)
+    _feed(audio_output, audio_output._preroll_frames)
 
     assert audio_output.stream.started is True
     assert audio_output._playing is True
+
+
+@pytest.mark.parametrize("name, interval", MODES)
+def test_the_card_is_never_left_short_in_either_mode(name, interval):
+    """The whole point, measured the way it goes wrong: on the clock.
+
+    Blocks arrive every interval and the card asks every 21.3 ms
+    from the moment the stream starts.  Nothing here is late - there
+    is no jitter in this at all - and a cushion that does not cover
+    a block interval still runs dry, because the two schedules do
+    not line up.  In light mode blocks are 65.5 ms apart, so a
+    stream started on one block is empty by the fourth callback.
+    """
+    ao = ao_mod.AudioOutput(block_interval_sec=interval)
+    try:
+        _play_out(ao, interval)
+
+        assert ao._playing, "the stream never started"
+        assert ao.underruns == 0, (
+            "%s mode: %d gaps with nothing late, starting on %d frames"
+            % (name, ao.underruns, ao._preroll_frames))
+    finally:
+        ao.cleanup()
+
+
+@pytest.mark.parametrize("name, interval", MODES)
+def test_the_cushion_covers_a_whole_block_interval(name, interval):
+    """Where the number comes from, said as arithmetic.
+
+    The deficit at the worst moment is everything the card takes
+    during one block interval - the rates are equal, so that is one
+    block - and the callbacks do not line up with the blocks, so one
+    of them can fall entirely inside that moment.
+    """
+    ao = ao_mod.AudioOutput(block_interval_sec=interval)
+    try:
+        one_interval = interval * AUDIO_OUTPUT_RATE
+
+        assert ao._preroll_frames >= one_interval + AUDIO_FRAMES_PER_BUFFER, (
+            "%s mode starts on %d frames; a block interval is %.0f and a "
+            "callback %d" % (name, ao._preroll_frames, one_interval,
+                             AUDIO_FRAMES_PER_BUFFER))
+    finally:
+        ao.cleanup()
 
 
 def test_a_whole_callback_is_still_in_hand_after_the_first_one(audio_output):
@@ -324,7 +416,7 @@ def test_a_whole_callback_is_still_in_hand_after_the_first_one(audio_output):
     the queue: a cushion the callback cannot actually draw on is not a
     cushion.
     """
-    _feed(audio_output, AUDIO_PREROLL_FRAMES)
+    _feed(audio_output, audio_output._preroll_frames)
     before = audio_output.underruns
 
     audio_output.callback(None, AUDIO_FRAMES_PER_BUFFER, {}, 0)
@@ -356,11 +448,12 @@ def test_the_blocks_are_queued_before_the_stream_is_started(audio_output):
     audio_output.stream.start_stream = watched_start
     audio_output.audio_buffer_queue.put = watched_put
 
-    _feed(audio_output, AUDIO_PREROLL_FRAMES)
+    _feed(audio_output, audio_output._preroll_frames)
 
     assert when[-1] == "start", when
     assert when.count("start") == 1, when
-    assert when.count("queue") * BLOCK_FRAMES >= AUDIO_PREROLL_FRAMES, when
+    assert (when.count("queue") * BLOCK_FRAMES
+            >= audio_output._preroll_frames), when
 
 
 def test_the_stream_is_only_started_once(audio_output):
@@ -369,7 +462,7 @@ def test_the_stream_is_only_started_once(audio_output):
     audio_output.stream.start_stream = lambda: (starts.append(1),
                                                 real_start())
 
-    _feed(audio_output, AUDIO_PREROLL_FRAMES * 3)
+    _feed(audio_output, audio_output._preroll_frames * 3)
 
     assert len(starts) == 1, f"started {len(starts)} times"
 
@@ -378,7 +471,7 @@ def test_a_closed_output_does_not_start_the_stream(audio_output):
     """A block arriving after shutdown has nowhere to go."""
     audio_output.cleanup()
 
-    _feed(audio_output, AUDIO_PREROLL_FRAMES)
+    _feed(audio_output, audio_output._preroll_frames)
 
     assert audio_output.stream.started is False
 
@@ -391,7 +484,7 @@ def test_cleanup_does_not_stop_a_stream_that_never_started(audio_output):
 
 
 def test_cleanup_stops_a_stream_that_did_start(audio_output):
-    _feed(audio_output, AUDIO_PREROLL_FRAMES)
+    _feed(audio_output, audio_output._preroll_frames)
 
     audio_output.cleanup()
 

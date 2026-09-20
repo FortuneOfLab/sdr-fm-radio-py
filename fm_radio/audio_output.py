@@ -43,7 +43,8 @@ from fm_radio.interfaces import AudioOutputInterface
 from fm_radio.exceptions import AudioOutputError, RecordingError
 from fm_radio.constants import (
     AUDIO_OUTPUT_RATE, AUDIO_FRAMES_PER_BUFFER, AUDIO_QUEUE_MAXSIZE,
-    AUDIO_CHANNELS, AUDIO_ENQUEUE_TIMEOUT, AUDIO_PREROLL_FRAMES,
+    AUDIO_CHANNELS, AUDIO_ENQUEUE_TIMEOUT,
+    AUDIO_PREROLL_SLACK_FRAMES, AUDIO_BLOCK_INTERVAL_DEFAULT_SEC,
     RECORD_SAMPLE_WIDTH, RECORD_MAX_INT16,
     RECORD_QUEUE_MAXSIZE, AUDIO_RECORD_ROTATE_THRESHOLD_BYTES,
 )
@@ -103,6 +104,7 @@ class AudioOutput(AudioOutputInterface):
         self,
         output_rate: int = AUDIO_OUTPUT_RATE,
         frames_per_buffer: int = AUDIO_FRAMES_PER_BUFFER,
+        block_interval_sec: float = AUDIO_BLOCK_INTERVAL_DEFAULT_SEC,
     ) -> None:
         self.logger: logging.Logger = logging.getLogger('fm_receiver.AudioOutput')
         self.output_rate: int = output_rate
@@ -202,8 +204,17 @@ class AudioOutput(AudioOutputInterface):
         self._play_lock: threading.Lock = threading.Lock()
         # Frames queued so far, counted only until the stream starts:
         # nothing is taking them out before that, so the sum of what
-        # has gone in is what is waiting.  See AUDIO_PREROLL_FRAMES.
+        # has gone in is what is waiting.
         self._frames_ready: int = 0
+        # ...and how many of them there have to be first.  Derived
+        # from how often blocks arrive rather than from how big they
+        # are: the resampler's output length varies by a couple of
+        # hundred frames either way, and a cushion measured against a
+        # short first block would be short too.  See
+        # AUDIO_PREROLL_SLACK_FRAMES for the arithmetic.
+        self._preroll_frames: int = (
+            int(round(float(block_interval_sec) * float(output_rate)))
+            + AUDIO_PREROLL_SLACK_FRAMES)
 
         # Opened but not started.  A stream that is running is a sound
         # card asking for a buffer every few milliseconds, and until
@@ -297,8 +308,8 @@ class AudioOutput(AudioOutputInterface):
     def _play_from_now_on(self) -> None:
         """Start the stream, now that there is enough to play.
 
-        Called once AUDIO_PREROLL_FRAMES are in the queue, so that
-        what the card asks for is already waiting: starting the stream
+        Called once ``_preroll_frames`` are in the queue, so that what
+        the card asks for is already waiting: starting the stream
         before that would cost exactly the underruns this is here to
         avoid.
 
@@ -354,7 +365,7 @@ class AudioOutput(AudioOutputInterface):
         # card consumes and never catches up from behind.
         if not self._playing:
             self._frames_ready += left32.size
-            if self._frames_ready >= AUDIO_PREROLL_FRAMES:
+            if self._frames_ready >= self._preroll_frames:
                 self._play_from_now_on()
 
     @property
