@@ -194,6 +194,20 @@ class AudioOutput(AudioOutputInterface):
         )
         self._record_worker.start()
 
+        # Whether the sound card has been told to start asking for
+        # buffers.  Set once, by the first block of audio; read on the
+        # realtime path, which is why it is a plain flag and the lock
+        # below is only taken on the one call that changes it.
+        self._playing: bool = False
+        self._play_lock: threading.Lock = threading.Lock()
+
+        # Opened but not started.  A stream that is running is a sound
+        # card asking for a buffer every few milliseconds, and until
+        # the receiver has produced anything there is nothing to give
+        # it: each of those is an underrun, and on this machine there
+        # were forty-three of them before the first block arrived -
+        # through the JIT pre-warm, which is the better part of a
+        # second of nothing.  See _play_from_now_on.
         try:
             self.pyaudio_instance = pyaudio.PyAudio()
             self.stream = self.pyaudio_instance.open(
@@ -202,9 +216,9 @@ class AudioOutput(AudioOutputInterface):
                 rate=int(self.output_rate),
                 output=True,
                 frames_per_buffer=self.frames_per_buffer,
-                stream_callback=self.callback
+                stream_callback=self.callback,
+                start=False,
             )
-            self.stream.start_stream()
             self.logger.info(f"Audio output initialized: rate={output_rate}Hz, buffer={frames_per_buffer}")
         except OSError as e:
             self.logger.error(f"Failed to initialize audio output: {e}")
@@ -276,6 +290,30 @@ class AudioOutput(AudioOutputInterface):
         """True once :meth:`cleanup` has run; the stream is gone after that."""
         return self._closed.is_set()
 
+    def _play_from_now_on(self) -> None:
+        """Start the stream, now that there is a block to play.
+
+        Called once the first block is in the queue, so that the first
+        buffer the card asks for is already waiting: starting the
+        stream before that would cost exactly the underrun this is
+        here to avoid.
+
+        Called from the realtime path, so the flag is checked outside
+        the lock and again inside it: two threads can both see a
+        stopped stream, and only one of them should start it.
+        """
+        with self._play_lock:
+            if self._playing or self._closed.is_set():
+                return
+            try:
+                self.stream.start_stream()
+            except Exception as e:             # pragma: no cover - guard
+                self.logger.error("Could not start the audio stream: %s", e,
+                                  exc_info=True)
+                return
+            self._playing = True
+            self.logger.info("Audio output started")
+
     def enqueue_audio(self, left: np.ndarray, right: np.ndarray) -> None:
         """Hand a block to the output, unless it has been closed.
 
@@ -301,8 +339,15 @@ class AudioOutput(AudioOutputInterface):
         except queue.Full:
             self._enqueue_drop_count += 1
             self.logger.debug("Audio buffer queue full, dropping audio data")
+            return
         except Exception as e:
             self.logger.error(f"Error enqueueing audio: {e}", exc_info=True)
+            return
+        # After the block is in, not before: starting the stream is
+        # telling the card to ask, and the first thing it asks for
+        # should already be waiting.
+        if not self._playing:
+            self._play_from_now_on()
 
     @property
     def dropped_blocks(self) -> int:
@@ -934,7 +979,10 @@ class AudioOutput(AudioOutputInterface):
                 if self._record_worker.is_alive():
                     self._record_worker.join(timeout=1.0)
 
-            self.stream.stop_stream()
+            # A stream that was never started has nothing to stop, and
+            # PortAudio is entitled to object to being asked.
+            if self._playing:
+                self.stream.stop_stream()
             self.stream.close()
             self.pyaudio_instance.terminate()
             self.logger.info("Audio output cleaned up successfully")

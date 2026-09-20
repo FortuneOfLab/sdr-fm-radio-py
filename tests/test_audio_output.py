@@ -254,3 +254,89 @@ def test_a_dropped_block_is_counted(audio_output, monkeypatch):
     audio_output.enqueue_audio(block, block)
 
     assert audio_output.dropped_blocks == 2
+
+
+# ----------------------------------------------------------------------
+# Nothing plays until there is something to play
+# ----------------------------------------------------------------------
+
+def test_the_stream_does_not_run_before_there_is_audio(audio_output):
+    """A running stream with nothing behind it is an underrun a buffer.
+
+    On this machine there were forty-three of them between the
+    receiver being built and its first block arriving, most of them
+    during the JIT pre-warm.
+    """
+    assert audio_output.stream.started is False
+    assert audio_output._playing is False
+
+
+def test_the_first_block_starts_the_stream(audio_output):
+    left = np.zeros(256, dtype=np.float32)
+
+    audio_output.enqueue_audio(left, left)
+
+    assert audio_output.stream.started is True
+    assert audio_output._playing is True
+
+
+def test_the_block_is_queued_before_the_stream_is_started(audio_output):
+    """Or the card asks once before there is anything to give it."""
+    when = []
+    real_start = audio_output.stream.start_stream
+    real_put = audio_output.audio_buffer_queue.put
+
+    def watched_start():
+        when.append("start")
+        return real_start()
+
+    def watched_put(*args, **kwargs):
+        when.append("queue")
+        return real_put(*args, **kwargs)
+
+    audio_output.stream.start_stream = watched_start
+    audio_output.audio_buffer_queue.put = watched_put
+
+    left = np.zeros(256, dtype=np.float32)
+    audio_output.enqueue_audio(left, left)
+
+    assert when == ["queue", "start"], when
+
+
+def test_the_stream_is_only_started_once(audio_output):
+    starts = []
+    real_start = audio_output.stream.start_stream
+    audio_output.stream.start_stream = lambda: (starts.append(1),
+                                                real_start())
+
+    left = np.zeros(256, dtype=np.float32)
+    for _ in range(5):
+        audio_output.enqueue_audio(left, left)
+
+    assert len(starts) == 1, f"started {len(starts)} times"
+
+
+def test_a_closed_output_does_not_start_the_stream(audio_output):
+    """A block arriving after shutdown has nowhere to go."""
+    audio_output.cleanup()
+    left = np.zeros(256, dtype=np.float32)
+
+    audio_output.enqueue_audio(left, left)
+
+    assert audio_output.stream.started is False
+
+
+def test_cleanup_does_not_stop_a_stream_that_never_started(audio_output):
+    """PortAudio is entitled to object to being asked."""
+    audio_output.cleanup()
+
+    assert audio_output.stream.stopped is False
+
+
+def test_cleanup_stops_a_stream_that_did_start(audio_output):
+    left = np.zeros(256, dtype=np.float32)
+    audio_output.enqueue_audio(left, left)
+
+    audio_output.cleanup()
+
+    assert audio_output.stream.stopped is True
