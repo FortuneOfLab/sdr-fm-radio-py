@@ -155,11 +155,15 @@ def main() -> None:
             # the background and shut down when the window closes.
             from fm_radio import gui
             try:
-                # start_background() is inside the try: it starts the SDR
-                # thread before the processing thread, so a failure between
-                # the two leaves threads running that only cleanup() stops.
-                controller.start_background()
-                exit_code = gui.run(controller)
+                # The window first and the receiver second: building a
+                # window takes long enough to be a gap in the audio if
+                # there is audio to interrupt, and there is none yet.
+                # start_background is handed over rather than called
+                # here because it also has to be inside the try - it
+                # starts the SDR thread before the processing thread,
+                # so a failure between the two leaves threads running
+                # that only cleanup() stops.
+                exit_code = gui.run(controller, controller.start_background)
             finally:
                 # The window sets quit_event when it closes, but it may
                 # never have opened; cleanup() sets it either way and waits

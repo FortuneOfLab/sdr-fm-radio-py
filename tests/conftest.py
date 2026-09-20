@@ -23,14 +23,44 @@ import pytest
 # ----------------------------------------------------------------------
 
 class _FakeStream:
-    def start_stream(self) -> None: ...
-    def stop_stream(self) -> None: ...
+    """As much of a PortAudio stream as the receiver asks for.
+
+    Including whether it has been started: pyaudio opens a stream
+    running unless told otherwise, and the difference matters - a
+    running stream asks for a buffer every few milliseconds whether
+    or not anybody has made one.
+    """
+
+    #: What a card says it holds.  PortAudio reports the device's
+    #: own buffer and fills all of it the moment the stream starts;
+    #: the USB DAC these numbers come from holds 107 ms, which is
+    #: five callbacks pulled back to back.  A fake that says nothing
+    #: would let the output believe the card takes nothing.
+    output_latency: float = 0.1067
+
+    def __init__(self, start: bool = True) -> None:
+        self.started = bool(start)
+        self.stopped = False
+
+    def start_stream(self) -> None:
+        self.started = True
+
+    def stop_stream(self) -> None:
+        self.started = False
+        self.stopped = True
+
+    def is_active(self) -> bool:
+        return self.started
+
+    def get_output_latency(self) -> float:
+        return self.output_latency
+
     def close(self) -> None: ...
 
 
 class _FakePyAudio:
     def open(self, **kwargs):
-        return _FakeStream()
+        return _FakeStream(start=kwargs.get("start", True))
 
     def terminate(self) -> None: ...
 

@@ -2142,7 +2142,11 @@ def test_cleanup_waits_for_a_recording_that_is_still_closing(receiver,
     def slow_flush(timeout=None):
         closing.set()
         finish.wait(10)
-        return real_wait(0)
+        # The real wait, once the hold is let go.  Polling with a
+        # zero timeout instead is a race the worker loses on a
+        # loaded machine, and the close then finishes a file the
+        # flush has not reached: 0 frames out of 2048 on a CI runner.
+        return real_wait(timeout)
 
     audio._flush_event.wait = slow_flush
     threading.Thread(target=audio.stop_recording, daemon=True).start()
@@ -2202,7 +2206,11 @@ def test_tuning_does_not_put_the_recording_close_on_the_device_worker(
     def slow_flush(timeout=None):
         closing.set()
         finish.wait(10)
-        return real_wait(0)
+        # The real wait, once the hold is let go.  Polling with a
+        # zero timeout instead is a race the worker loses on a
+        # loaded machine, and the close then finishes a file the
+        # flush has not reached: 0 frames out of 2048 on a CI runner.
+        return real_wait(timeout)
 
     audio._flush_event.wait = slow_flush
 
@@ -2233,7 +2241,11 @@ def a_close_that_will_not_finish(audio):
     def slow_flush(timeout=None):
         closing.set()
         finish.wait(10)
-        return real_wait(0)
+        # The real wait, once the hold is let go.  Polling with a
+        # zero timeout instead is a race the worker loses on a
+        # loaded machine, and the close then finishes a file the
+        # flush has not reached: 0 frames out of 2048 on a CI runner.
+        return real_wait(timeout)
 
     audio._flush_event.wait = slow_flush
     return closing, finish
