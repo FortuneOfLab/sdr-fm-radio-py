@@ -1194,3 +1194,90 @@ def test_a_receiver_that_will_not_start_is_shown_in_the_window(qt_app,
     assert main_window.run_window(controller, refuse) == 0
 
     assert controller.device_failure == "no radio here"
+
+
+def test_the_receiver_is_not_started_on_the_gui_thread(qt_app, monkeypatch):
+    """Starting takes about a second and a quarter, nearly all of it
+    the JIT pre-warm.  On the GUI thread that is a second and a
+    quarter of a window that is up and has never painted: a white
+    rectangle that looks like a program that has hung.
+    """
+    from fm_radio.gui import main_window
+
+    where = []
+    controller = FakeController(snapshot())
+
+    def switch_on():
+        where.append(threading.current_thread())
+
+    monkeypatch.setattr(main_window.QApplication, "exec",
+                        lambda self: (qt_app.processEvents(), 0)[1])
+
+    main_window.run_window(controller, switch_on)
+
+    assert where, "the receiver was never started"
+    assert where[0] is not threading.main_thread(),         "the receiver was started on the thread that has to paint"
+
+
+def test_the_window_gets_on_with_things_while_the_receiver_starts(
+        qt_app, monkeypatch):
+    """The point of the other thread: the GUI thread is free meanwhile.
+
+    The start blocks until the window has serviced its events, which
+    it can only do if the start is not what it is doing.
+    """
+    from fm_radio.gui import main_window
+
+    starting = threading.Event()
+    serviced = threading.Event()
+    got_a_turn = []
+    controller = FakeController(snapshot())
+
+    def switch_on():
+        # Reported back rather than asserted here: an assert on this
+        # thread is caught by the same handler that catches a radio
+        # that will not start, and the test would never see it.
+        starting.set()
+        got_a_turn.append(serviced.wait(5))
+
+    def exec_(self):
+        assert starting.wait(5), "the receiver never began starting"
+        qt_app.processEvents()
+        serviced.set()
+        return 0
+
+    monkeypatch.setattr(main_window.QApplication, "exec", exec_)
+
+    assert main_window.run_window(controller, switch_on) == 0
+    assert got_a_turn == [True],         "the window never got a turn while the receiver was starting"
+
+
+def test_the_window_does_not_return_while_the_receiver_is_starting(
+        qt_app, monkeypatch):
+    """Whoever runs cleanup() next would be tearing down a receiver
+    that is still being built.
+    """
+    from fm_radio.gui import main_window
+
+    still_starting = threading.Lock()
+    entered = threading.Event()
+    never = threading.Event()
+    controller = FakeController(snapshot())
+
+    def switch_on():
+        still_starting.acquire()
+        entered.set()
+        try:
+            never.wait(0.2)         # a start that has not finished yet
+        finally:
+            still_starting.release()
+
+    def exec_(self):
+        assert entered.wait(5), "the receiver never began starting"
+        return 0
+
+    monkeypatch.setattr(main_window.QApplication, "exec", exec_)
+
+    main_window.run_window(controller, switch_on)
+
+    assert still_starting.acquire(blocking=False),         "the window returned while the receiver was still starting"

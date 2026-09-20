@@ -306,6 +306,15 @@ AUDIO_FINAL_LP_CUTOFF_HZ = 15000.0  # Passband edge (Hz)
 AUDIO_FINAL_LP_STOP_HZ = 16500.0    # Stopband edge (Hz)
 AUDIO_FRAMES_PER_BUFFER = 1024     # Frames per audio callback
 AUDIO_QUEUE_MAXSIZE = 50            # Max queued audio blocks
+# Frames queued before the stream is started.  A block of audio is
+# 16 ms (768 frames at 48 kHz, one SDR block) and a callback asks for
+# 1024, so the two rates match exactly and a stream started on the
+# first block runs with no cushion at all: every piece of jitter in
+# the first seconds - the SDR settling, the window painting, the JIT
+# that was not warmed - is an underrun, and there were three of them.
+# Two callbacks' worth is three blocks, so the card is 48 ms behind
+# the receiver instead of 16, which is inaudible and absorbs them.
+AUDIO_PREROLL_FRAMES = 2 * AUDIO_FRAMES_PER_BUFFER
 AUDIO_CHANNELS = 2                  # Stereo output channels
 AUDIO_ENQUEUE_TIMEOUT = 0.01       # Timeout for audio queue put (seconds)
 

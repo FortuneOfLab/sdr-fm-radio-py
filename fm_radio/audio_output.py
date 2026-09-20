@@ -43,7 +43,7 @@ from fm_radio.interfaces import AudioOutputInterface
 from fm_radio.exceptions import AudioOutputError, RecordingError
 from fm_radio.constants import (
     AUDIO_OUTPUT_RATE, AUDIO_FRAMES_PER_BUFFER, AUDIO_QUEUE_MAXSIZE,
-    AUDIO_CHANNELS, AUDIO_ENQUEUE_TIMEOUT,
+    AUDIO_CHANNELS, AUDIO_ENQUEUE_TIMEOUT, AUDIO_PREROLL_FRAMES,
     RECORD_SAMPLE_WIDTH, RECORD_MAX_INT16,
     RECORD_QUEUE_MAXSIZE, AUDIO_RECORD_ROTATE_THRESHOLD_BYTES,
 )
@@ -200,6 +200,10 @@ class AudioOutput(AudioOutputInterface):
         # below is only taken on the one call that changes it.
         self._playing: bool = False
         self._play_lock: threading.Lock = threading.Lock()
+        # Frames queued so far, counted only until the stream starts:
+        # nothing is taking them out before that, so the sum of what
+        # has gone in is what is waiting.  See AUDIO_PREROLL_FRAMES.
+        self._frames_ready: int = 0
 
         # Opened but not started.  A stream that is running is a sound
         # card asking for a buffer every few milliseconds, and until
@@ -291,12 +295,12 @@ class AudioOutput(AudioOutputInterface):
         return self._closed.is_set()
 
     def _play_from_now_on(self) -> None:
-        """Start the stream, now that there is a block to play.
+        """Start the stream, now that there is enough to play.
 
-        Called once the first block is in the queue, so that the first
-        buffer the card asks for is already waiting: starting the
-        stream before that would cost exactly the underrun this is
-        here to avoid.
+        Called once AUDIO_PREROLL_FRAMES are in the queue, so that
+        what the card asks for is already waiting: starting the stream
+        before that would cost exactly the underruns this is here to
+        avoid.
 
         Called from the realtime path, so the flag is checked outside
         the lock and again inside it: two threads can both see a
@@ -344,10 +348,14 @@ class AudioOutput(AudioOutputInterface):
             self.logger.error(f"Error enqueueing audio: {e}", exc_info=True)
             return
         # After the block is in, not before: starting the stream is
-        # telling the card to ask, and the first thing it asks for
-        # should already be waiting.
+        # telling the card to ask, and what it asks for should already
+        # be waiting - not just the first buffer but a cushion behind
+        # it, because the receiver produces at exactly the rate the
+        # card consumes and never catches up from behind.
         if not self._playing:
-            self._play_from_now_on()
+            self._frames_ready += left32.size
+            if self._frames_ready >= AUDIO_PREROLL_FRAMES:
+                self._play_from_now_on()
 
     @property
     def dropped_blocks(self) -> int:

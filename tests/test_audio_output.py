@@ -22,6 +22,9 @@ import pytest
 from fm_radio.exceptions import RecordingError
 
 import fm_radio.audio_output as ao_mod
+from fm_radio.constants import (
+    AUDIO_CHANNELS, AUDIO_FRAMES_PER_BUFFER, AUDIO_PREROLL_FRAMES,
+)
 
 
 CHUNK = np.zeros(768 * 2, dtype=np.float32) + 0.25
@@ -271,17 +274,73 @@ def test_the_stream_does_not_run_before_there_is_audio(audio_output):
     assert audio_output._playing is False
 
 
-def test_the_first_block_starts_the_stream(audio_output):
-    left = np.zeros(256, dtype=np.float32)
+#: A block the size the receiver really produces: one SDR block of
+#: 16 ms is 768 frames at 48 kHz, and the card asks for 1024.
+BLOCK_FRAMES = 768
+
+
+def _feed(audio_output, frames, block=BLOCK_FRAMES):
+    """Enqueue at least ``frames`` frames, a receiver block at a time."""
+    sent = 0
+    while sent < frames:
+        one = np.zeros(block, dtype=np.float32)
+        audio_output.enqueue_audio(one, one)
+        sent += block
+    return sent
+
+
+def test_one_block_is_not_enough_to_start_on(audio_output):
+    """The receiver produces at exactly the rate the card consumes.
+
+    768 frames every 16 ms against 1024 every 21.3: the same rate, so
+    a stream started on the first block never gets ahead, and the
+    first thing that runs late is a gap.
+    """
+    left = np.zeros(BLOCK_FRAMES, dtype=np.float32)
 
     audio_output.enqueue_audio(left, left)
+
+    assert audio_output.stream.started is False
+    assert audio_output._playing is False
+
+
+def test_the_stream_starts_once_there_is_a_cushion(audio_output):
+    _feed(audio_output, AUDIO_PREROLL_FRAMES)
 
     assert audio_output.stream.started is True
     assert audio_output._playing is True
 
 
-def test_the_block_is_queued_before_the_stream_is_started(audio_output):
-    """Or the card asks once before there is anything to give it."""
+def test_a_whole_callback_is_still_in_hand_after_the_first_one(audio_output):
+    """What the card asks for first is there, and so is the next one.
+
+    The second one is the point.  The receiver never catches up from
+    behind - it produces at exactly the rate the card consumes - so
+    whatever is in hand when the stream starts is all there will ever
+    be to absorb a late block, and one callback of it is used up
+    immediately.
+
+    Asked through the real callback rather than by counting what is in
+    the queue: a cushion the callback cannot actually draw on is not a
+    cushion.
+    """
+    _feed(audio_output, AUDIO_PREROLL_FRAMES)
+    before = audio_output.underruns
+
+    audio_output.callback(None, AUDIO_FRAMES_PER_BUFFER, {}, 0)
+
+    assert audio_output.underruns == before, "the first callback went short"
+    left_over = (audio_output._buffer_len
+                 + sum(a.size for a, _ in
+                       list(audio_output.audio_buffer_queue.queue)) * 2)
+    assert left_over >= AUDIO_FRAMES_PER_BUFFER * AUDIO_CHANNELS, (
+        "only %d samples behind the first buffer, less than the %d the "
+        "next callback will ask for"
+        % (left_over, AUDIO_FRAMES_PER_BUFFER * AUDIO_CHANNELS))
+
+
+def test_the_blocks_are_queued_before_the_stream_is_started(audio_output):
+    """Or the card asks before there is anything to give it."""
     when = []
     real_start = audio_output.stream.start_stream
     real_put = audio_output.audio_buffer_queue.put
@@ -297,10 +356,11 @@ def test_the_block_is_queued_before_the_stream_is_started(audio_output):
     audio_output.stream.start_stream = watched_start
     audio_output.audio_buffer_queue.put = watched_put
 
-    left = np.zeros(256, dtype=np.float32)
-    audio_output.enqueue_audio(left, left)
+    _feed(audio_output, AUDIO_PREROLL_FRAMES)
 
-    assert when == ["queue", "start"], when
+    assert when[-1] == "start", when
+    assert when.count("start") == 1, when
+    assert when.count("queue") * BLOCK_FRAMES >= AUDIO_PREROLL_FRAMES, when
 
 
 def test_the_stream_is_only_started_once(audio_output):
@@ -309,9 +369,7 @@ def test_the_stream_is_only_started_once(audio_output):
     audio_output.stream.start_stream = lambda: (starts.append(1),
                                                 real_start())
 
-    left = np.zeros(256, dtype=np.float32)
-    for _ in range(5):
-        audio_output.enqueue_audio(left, left)
+    _feed(audio_output, AUDIO_PREROLL_FRAMES * 3)
 
     assert len(starts) == 1, f"started {len(starts)} times"
 
@@ -319,9 +377,8 @@ def test_the_stream_is_only_started_once(audio_output):
 def test_a_closed_output_does_not_start_the_stream(audio_output):
     """A block arriving after shutdown has nowhere to go."""
     audio_output.cleanup()
-    left = np.zeros(256, dtype=np.float32)
 
-    audio_output.enqueue_audio(left, left)
+    _feed(audio_output, AUDIO_PREROLL_FRAMES)
 
     assert audio_output.stream.started is False
 
@@ -334,8 +391,7 @@ def test_cleanup_does_not_stop_a_stream_that_never_started(audio_output):
 
 
 def test_cleanup_stops_a_stream_that_did_start(audio_output):
-    left = np.zeros(256, dtype=np.float32)
-    audio_output.enqueue_audio(left, left)
+    _feed(audio_output, AUDIO_PREROLL_FRAMES)
 
     audio_output.cleanup()
 
