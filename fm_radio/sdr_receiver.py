@@ -65,13 +65,19 @@ _PREVIOUS_IQ_CLOSE_WAIT_SEC: float = 2.0
 
 
 class _ReadyIQRecording:
-    """An IQ file that is open and waiting to be recorded into."""
+    """An IQ file that is open and waiting to be recorded into.
 
-    __slots__ = ("path", "wave")
+    Carries the gain as well, because reading it is a USB transfer
+    and the install is not the place for one; it is read while this
+    is being prepared, with nothing held.
+    """
 
-    def __init__(self, path: str, wave_file) -> None:
+    __slots__ = ("path", "wave", "gain_db")
+
+    def __init__(self, path: str, wave_file, gain_db: float | None) -> None:
         self.path = path
         self.wave = wave_file
+        self.gain_db = gain_db
 
 
 class SDRReceiver(SDRReceiverInterface):
@@ -493,7 +499,15 @@ class SDRReceiver(SDRReceiverInterface):
             raise RecordingError(
                 f"IQ recording start failed: {e}",
             ) from e
-        return _ReadyIQRecording(filename, wf)
+
+        # Here rather than in the install: this is a control transfer
+        # to the device when the device lock is free, and the install
+        # runs with the caller's lock held.
+        try:
+            gain_db = float(self.get_gain())
+        except Exception:
+            gain_db = None
+        return _ReadyIQRecording(filename, wf, gain_db)
 
     def _shut_a_file_that_never_started(self, wave_file,
                                         filename: str) -> None:
@@ -517,8 +531,9 @@ class SDRReceiver(SDRReceiverInterface):
 
         Under ``_iq_start_lock``, which the teardown also takes, so a
         recording cannot be installed into a receiver that has been
-        stopped and leave a handle nothing will close.  No file is
-        touched here; the sidecar is
+        stopped and leave a handle nothing will close.  Nothing here
+        touches a file or the device: the gain was read while the
+        recording was being prepared, and the sidecar and the log are
         :meth:`finish_starting_the_iq_recording`, afterwards.
 
         Returns:
@@ -545,10 +560,6 @@ class SDRReceiver(SDRReceiverInterface):
                     self._iq_record_bytes_written = 0
                 self.iq_recording = True
 
-            try:
-                gain_db = float(self.get_gain())
-            except Exception:
-                gain_db = None
             self._iq_record_session += 1
             session = self._iq_record_session
             self._iq_record_meta = {
@@ -558,7 +569,7 @@ class SDRReceiver(SDRReceiverInterface):
                 )[0],
                 "sample_rate_hz": int(self.sample_rate),
                 "center_freq_hz": float(self.center_freq),
-                "gain_db": gain_db,
+                "gain_db": ready.gain_db,
                 "started_at": recording_meta.now_iso(),
             }
         return session

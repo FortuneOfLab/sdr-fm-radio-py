@@ -3368,6 +3368,26 @@ def test_a_slow_log_line_does_not_hold_up_another_recording(receiver,
     assert not asked.failed, asked.error
 
 
+def a_wave_open_that_is_watched(module):
+    """Record the file object each wave.open hands out, in *module*.
+
+    The file object itself rather than the Wave_write around it: asking
+    it afterwards whether it is closed says what happened to the
+    handle, and does not depend on close() having tidied up after
+    itself.
+    """
+    handed_out: list = []
+    real_open = module.wave.open
+
+    def watched_open(*args, **kwargs):
+        handle = real_open(*args, **kwargs)
+        handed_out.append(handle._i_opened_the_file)
+        return handle
+
+    module.wave.open = watched_open
+    return handed_out, real_open
+
+
 def test_a_header_that_will_not_be_written_leaves_no_file_and_no_handle(
         receiver, tmp_path):
     """The failure that happens after the file has been made.
@@ -3378,49 +3398,159 @@ def test_a_header_that_will_not_be_written_leaves_no_file_and_no_handle(
     open, and the next attempt at the same name would then be refused
     for a file nobody is using.
     """
+    import fm_radio.audio_output as ao_mod
+
     audio = receiver.audio_output
     path = tmp_path / "half_made.wav"
-    opened: list = []
-    real_open = wave.open
-
-    def watched_open(*args, **kwargs):
-        handle = real_open(*args, **kwargs)
-        opened.append(handle)
-        return handle
 
     def refuse(*args, **kwargs):
         raise wave.Error("this header is not going to be written")
 
-    monkey = wave.Wave_write.setframerate
+    handed_out, real_open = a_wave_open_that_is_watched(ao_mod)
+    real_setframerate = wave.Wave_write.setframerate
     wave.Wave_write.setframerate = refuse
-    audio_wave_open = None
     try:
-        import fm_radio.audio_output as ao_mod
-        audio_wave_open = ao_mod.wave.open
-        ao_mod.wave.open = watched_open
-
         asked = receiver.start_recording(str(path))
         assert asked.wait(5)
     finally:
-        wave.Wave_write.setframerate = monkey
-        if audio_wave_open is not None:
-            ao_mod.wave.open = audio_wave_open
+        wave.Wave_write.setframerate = real_setframerate
+        ao_mod.wave.open = real_open
 
     assert isinstance(asked.error, RecordingError), asked.error
-    assert opened, "wave.open was never reached"
-    assert opened[0]._i_opened_the_file is None, \
-        "the handle on the half-made file was left open"
+    assert handed_out, "wave.open was never reached"
+    assert handed_out[0].closed, \
+        "the file under the half-made recording was left open"
     assert not path.exists(), "the half-made file was left behind"
     assert not audio.recording
 
 
+def test_an_iq_header_that_will_not_be_written_leaves_nothing_behind(
+        receiver, tmp_path):
+    """The same on the IQ side, which opens its own files."""
+    import fm_radio.sdr_receiver as sr_mod
+
+    path = tmp_path / "half_made_iq.wav"
+
+    def refuse(*args, **kwargs):
+        raise wave.Error("this header is not going to be written")
+
+    handed_out, real_open = a_wave_open_that_is_watched(sr_mod)
+    real_setframerate = wave.Wave_write.setframerate
+    wave.Wave_write.setframerate = refuse
+    try:
+        asked = receiver.start_iq_recording(str(path))
+        assert asked.wait(5)
+    finally:
+        wave.Wave_write.setframerate = real_setframerate
+        sr_mod.wave.open = real_open
+
+    assert isinstance(asked.error, RecordingError), asked.error
+    assert handed_out and handed_out[0].closed, \
+        "the file under the half-made recording was left open"
+    assert not path.exists()
+    assert not receiver.sdr_receiver.iq_recording
+
+
 def test_a_channel_count_the_wave_module_will_not_take_makes_no_file(
         receiver, tmp_path):
-    """Checked before anything is created, so there is nothing to undo."""
+    """Refused before anything is created, not created and taken back.
+
+    Asking only whether the file is there afterwards cannot tell those
+    apart - the tidying up that follows a failed header would remove
+    it either way - so what is watched is whether the file was ever
+    made at all.
+    """
+    import fm_radio.audio_output as ao_mod
+
     audio = receiver.audio_output
     path = tmp_path / "no_channels.wav"
+    made: list = []
+    real_os_open = ao_mod.os.open
 
-    with pytest.raises(RecordingError):
-        audio.prepare_a_recording(str(path), channels=0)
+    def watched_os_open(name, *args, **kwargs):
+        made.append(name)
+        return real_os_open(name, *args, **kwargs)
 
+    ao_mod.os.open = watched_os_open
+    try:
+        with pytest.raises(RecordingError):
+            audio.prepare_a_recording(str(path), channels=0)
+    finally:
+        ao_mod.os.open = real_os_open
+
+    assert str(path) not in made, \
+        "it made the file and then had to take it back"
     assert not path.exists(), "it made a file for a recording it refused"
+
+
+def test_a_slow_gain_read_does_not_hold_up_another_recording(receiver,
+                                                              tmp_path):
+    """Reading the gain is a control transfer to the device.
+
+    The IQ sidecar records it, and reading it used to happen in the
+    install - with the lock held that every other start has to take to
+    ask for anything at all.
+    """
+    sdr = receiver.sdr_receiver
+    reading = threading.Event()
+    go = threading.Event()
+    real_gain = sdr.get_gain
+
+    def slow_gain():
+        reading.set()
+        assert go.wait(10), "the test never let the gain read finish"
+        return real_gain()
+
+    sdr.get_gain = slow_gain
+    try:
+        receiver.start_iq_recording(str(tmp_path / "with_a_gain.wav"))
+        assert reading.wait(5), "the gain was never read"
+
+        started = time.monotonic()
+        asked = receiver.start_recording(str(tmp_path / "audio.wav"))
+        waited = time.monotonic() - started
+
+        assert waited < 1.0, f"the ask waited {waited:.1f} s for the device"
+    finally:
+        go.set()
+        sdr.get_gain = real_gain
+
+    assert asked.wait(5), "the recording never started"
+    assert not asked.failed, asked.error
+
+
+def test_the_gain_for_the_iq_sidecar_is_read_before_the_install(receiver,
+                                                                tmp_path):
+    """Once, and while nothing is held.
+
+    Reading it is a control transfer to the device.  The install runs
+    with the caller's lock held, so the read belongs in the
+    preparation, before it - and only there, because two reads mean
+    one of them is in the wrong place.
+    """
+    sdr = receiver.sdr_receiver
+    when: list[str] = []
+    real_gain = sdr.get_gain
+    real_install = sdr.install_a_prepared_iq_recording
+
+    def watched_gain():
+        when.append("gain")
+        return real_gain()
+
+    def watched_install(ready):
+        when.append("install")
+        return real_install(ready)
+
+    sdr.get_gain = watched_gain
+    sdr.install_a_prepared_iq_recording = watched_install
+    try:
+        asked = receiver.start_iq_recording(str(tmp_path / "gain_order.wav"))
+        assert asked.wait(5), "the recording never started"
+        assert not asked.failed, asked.error
+    finally:
+        sdr.get_gain = real_gain
+        sdr.install_a_prepared_iq_recording = real_install
+
+    assert when.count("gain") == 1, f"the gain was read {when.count('gain')} times: {when}"
+    assert when.index("gain") < when.index("install"), when
+    assert sdr._iq_record_meta["gain_db"] is not None
