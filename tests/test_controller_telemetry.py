@@ -688,3 +688,76 @@ def test_a_stale_block_is_dropped_before_the_new_tuning_is_started(receiver):
     assert watched.kinds == ["reset", "process"], \
         f"the stale block reached the demodulator: {watched.kinds}"
     assert receiver._stale_blocks == 1
+
+
+# ----------------------------------------------------------------------
+# The picture of the band
+# ----------------------------------------------------------------------
+
+def test_a_block_produces_a_picture_of_the_band(receiver):
+    """Out of the same IQ the demodulator gets."""
+    receiver.spectrum.interval_sec = 0.0
+    run_blocks(receiver, 2)
+
+    frame = receiver.get_spectrum()
+
+    assert frame is not None, "no picture was published"
+    assert frame.span_hz == receiver.sdr_receiver.sample_rate
+    assert frame.center_hz == pytest.approx(
+        receiver.sdr_receiver.center_freq)
+    assert len(frame.dbfs) > 0
+
+
+def test_the_picture_is_not_made_for_every_block(receiver):
+    """Ten a second, not one per block: it costs more than a snapshot."""
+    receiver.spectrum.interval_sec = 10.0
+    run_blocks(receiver, 6)
+
+    assert receiver.spectrum.published_count == 1, \
+        "a picture was made for more than the first block"
+
+
+def test_a_picture_from_before_a_retune_is_never_handed_out(receiver):
+    """The same rule the snapshots follow, for the same reason.
+
+    A picture of the station the receiver has just left is not one to
+    show above a tuner that says it is somewhere else.
+    """
+    tuned(receiver, 80.0e6)
+    receiver.spectrum.interval_sec = 0.0
+    run_blocks(receiver, 2)
+    assert receiver.get_spectrum() is not None
+
+    tuned(receiver, 81.3e6)
+
+    assert receiver.get_spectrum() is None, "the old station's picture"
+
+
+def test_a_picture_that_cannot_be_built_costs_one_block(receiver):
+    """Not one failure per block for ever afterwards."""
+    receiver.spectrum.interval_sec = 0.0
+    tries = []
+
+    def refuse(*args, **kwargs):
+        tries.append(1)
+        raise ValueError("no picture today")
+
+    receiver._spectrum_maker.frame = refuse
+    run_blocks(receiver, 4)
+
+    assert receiver.get_spectrum() is None
+    assert len(tries) == 4, f"it stopped trying after {len(tries)}"
+
+
+def test_a_picture_that_cannot_be_built_does_not_stop_the_block(receiver):
+    """The audio matters more than the display."""
+    receiver.spectrum.interval_sec = 0.0
+    receiver.telemetry.interval_sec = 0.0
+
+    def refuse(*args, **kwargs):
+        raise ValueError("no picture today")
+
+    receiver._spectrum_maker.frame = refuse
+    run_blocks(receiver, 2)
+
+    assert receiver.get_status() is not None, "the block died with the picture"

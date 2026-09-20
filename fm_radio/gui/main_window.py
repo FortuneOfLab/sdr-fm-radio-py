@@ -51,6 +51,7 @@ from PySide6.QtWidgets import (
 )
 
 from fm_radio.exceptions import SDRDeviceError
+from fm_radio.gui.band_view import BandView
 from fm_radio.device_worker import TUNE
 from fm_radio.telemetry import SILENCE_DBFS, StatusSnapshot
 
@@ -116,6 +117,10 @@ class ReceiverWindow(QMainWindow):
         central = QWidget(self)
         layout = QVBoxLayout(central)
         layout.addWidget(self._build_tuner())
+        # Directly under the tuner: it is a picture of where the tuner
+        # is, and the controls that follow are about what to do there.
+        self._band = BandView(central)
+        layout.addWidget(self._band)
         layout.addWidget(self._build_signal())
         layout.addWidget(self._build_gain())
         layout.addWidget(self._build_recording())
@@ -421,6 +426,7 @@ class ReceiverWindow(QMainWindow):
         else:
             self._show_status(status)
         self._show_recording()
+        self._band.show_the_frame(self.controller.get_spectrum())
         # A failure the user just caused outranks the health line until it
         # has been up long enough to read.
         self._show_the_device_worker()

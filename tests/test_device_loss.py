@@ -159,6 +159,9 @@ class _FakeController:
     def get_status(self):
         return None
 
+    def get_spectrum(self):
+        return None
+
     def get_stations_list(self):
         return []
 
