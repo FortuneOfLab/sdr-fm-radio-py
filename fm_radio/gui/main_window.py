@@ -31,8 +31,10 @@ The window holds no receiver state of its own, so a refresh that arrives
 while the user is mid-gesture cannot fight them for a widget — except for the
 two controls that would, which say so where they are handled.
 
-Spectrum, waterfall, the blend bar and the DSP settings are the next step and
-are deliberately not here.
+The spectrum and waterfall are in ``band_view``; the blend bar is here,
+because it reads off the same snapshot as the rest of the Signal group.
+The DSP settings and the recordings browser are the next step and are
+deliberately not here.
 """
 
 from __future__ import annotations
@@ -75,9 +77,53 @@ METER_FLOOR_DBFS = -60.0
 #: tried would be gone in 50 ms - faster than they can read it.
 NOTICE_SECONDS = 5.0
 
+#: Everything the blend line can say: the three words, and every
+#: figure between them - 1.00 is never printed, because a full bar
+#: says STEREO.  The widest of them is measured and kept, so that
+#: the bar beside it does not change width as the receiver settles.
+#: All hundred of the figures, rather than one as a stand-in: the
+#: digits are only the same width in a font that says they are, and
+#: "0.88" is wider than "0.00" in one that does not.
+_BLEND_WORDS = ("--", "MONO", "STEREO") + tuple(
+    "%.2f" % (hundredths / 100.0) for hundredths in range(100))
+
 #: Gain slider resolution: the widget is integral, the tuner is in dB.
 _GAIN_SCALE = 10.0
 _GAIN_MAX_DB = 49.6
+
+
+def _room_for_the_widest(label: QLabel) -> int:
+    """How wide *label* has to be to hold any of _BLEND_WORDS.
+
+    Measured rather than guessed.  A minimum width only holds until
+    the text is wider than it, so a number picked by eye is not a
+    fixed width at all: the column grows for the longest word and
+    the bar beside it shrinks, which is the flicker this is here to
+    prevent.  Asking the label itself covers the font it is really
+    going to use and whatever margins it has.
+    """
+    was = label.text()
+    try:
+        widest = 0
+        for word in _BLEND_WORDS:
+            label.setText(word)
+            widest = max(widest, label.sizeHint().width())
+        return widest
+    finally:
+        label.setText(was)
+
+
+def _blend_percent(blend: float, stereo: bool) -> int:
+    """Map the stereo blend onto a meter's 0-100.
+
+    Mono is empty whatever the blend says.  The blend factor is only
+    meaningful while stereo is being attempted: it starts at 1.0 and
+    the mono path never moves it, so a receiver asked for mono would
+    otherwise show a full bar.
+    """
+    if not stereo:
+        return 0
+    return int(round(min(100.0, max(0.0, float(blend) * 100.0))))
 
 
 def _level_percent(dbfs: float) -> int:
@@ -214,9 +260,21 @@ class ReceiverWindow(QMainWindow):
         box = QGroupBox("Signal", self)
         grid = QGridLayout(box)
 
+        # How much stereo there is, rather than whether there is any:
+        # the blend moves continuously with the pilot, and a receiver
+        # that is halfway is the interesting case - a word for it can
+        # only say STEREO or MONO, both of which would be wrong.
+        self._blend = QProgressBar(box)
+        self._blend.setRange(0, 100)
+        self._blend.setTextVisible(False)
+        self._blend.setToolTip(
+            "How much of the stereo image is being let through: "
+            "empty is mono, full is the whole of it")
         self._mode = QLabel("--", box)
-        grid.addWidget(QLabel("Mode", box), 0, 0)
-        grid.addWidget(self._mode, 0, 1)
+        self._mode.setMinimumWidth(_room_for_the_widest(self._mode))
+        grid.addWidget(QLabel("Blend", box), 0, 0)
+        grid.addWidget(self._blend, 0, 1)
+        grid.addWidget(self._mode, 0, 2)
 
         self._pilot = QLabel("--", box)
         grid.addWidget(QLabel("Pilot SNR", box), 1, 0)
@@ -569,6 +627,7 @@ class ReceiverWindow(QMainWindow):
         self._frequency.setText(f"{freq_hz / 1e6:.1f} MHz")
         station = self.controller.current_station()
         self._station.setText(station.name if station else "")
+        self._blend.setValue(0)
         self._mode.setText("--")
         self._pilot.setText("--")
         for meter, label in ((self._left, self._left_db),
@@ -584,12 +643,7 @@ class ReceiverWindow(QMainWindow):
         self._frequency.setText(f"{status.freq_hz / 1e6:.1f} MHz")
         self._station.setText(status.station)
 
-        if not status.stereo:
-            self._mode.setText("MONO")
-        elif status.stereo_locked:
-            self._mode.setText("STEREO")
-        else:
-            self._mode.setText(f"BLENDING ({status.blend_factor:.2f})")
+        self._show_blend(status)
 
         self._pilot.setText(
             "--" if status.pilot_snr_db is None
@@ -605,6 +659,30 @@ class ReceiverWindow(QMainWindow):
         self._show_gain(status.gain_db, status.auto_gain)
         self._iq_peak.setText(f"peak {status.iq_peak:.2f}")
         self._health.setText(self._health_text(status))
+
+    def _show_blend(self, status: StatusSnapshot) -> None:
+        """The bar, and a word for what the bar amounts to.
+
+        Both off the same number, so that they cannot disagree.  The
+        word said STEREO from a blend of 0.5 up, which is what the
+        receiver calls stereo, and beside a bar half way along it
+        read as a contradiction; and it printed the raw blend while
+        the bar clamped it, so a blend of -0.2 was an empty bar
+        labelled -0.20.
+
+        The word is still worth having.  MONO says something the bar
+        cannot - that nobody asked for stereo, rather than that the
+        pilot is too poor for it - and a number is worth more than a
+        bar to read a figure off.
+        """
+        percent = _blend_percent(status.blend_factor, status.stereo)
+        self._blend.setValue(percent)
+        if not status.stereo:
+            self._mode.setText("MONO")
+        elif percent >= 100:
+            self._mode.setText("STEREO")
+        else:
+            self._mode.setText(f"{percent / 100.0:.2f}")
 
     def _show_gain(self, gain_db: float, auto: bool) -> None:
         """Show the gain without fighting the user for the slider.
