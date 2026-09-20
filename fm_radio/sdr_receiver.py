@@ -422,7 +422,7 @@ class SDRReceiver(SDRReceiverInterface):
             except BaseException:
                 self.discard_a_prepared_iq_recording(ready)
                 raise
-        self.write_the_iq_recording_sidecar(session)
+        self.finish_starting_the_iq_recording(session)
 
     def prepare_an_iq_recording(self, filename: str) -> "_ReadyIQRecording":
         """Get a file ready to record IQ into, without starting anything.
@@ -471,9 +471,6 @@ class SDRReceiver(SDRReceiverInterface):
 
         try:
             wf = wave.open(filename, 'wb')
-            wf.setnchannels(2)           # I/Q
-            wf.setsampwidth(2)           # int16
-            wf.setframerate(int(self.sample_rate))
         except (OSError, wave.Error) as e:
             self.logger.error(
                 f"IQ recording start failed: {e}", exc_info=True,
@@ -482,7 +479,30 @@ class SDRReceiver(SDRReceiverInterface):
             raise RecordingError(
                 f"IQ recording start failed: {e}",
             ) from e
+
+        try:
+            wf.setnchannels(2)           # I/Q
+            wf.setsampwidth(2)           # int16
+            wf.setframerate(int(self.sample_rate))
+        except Exception as e:
+            # See AudioOutput._shut_a_file_that_never_started.
+            self.logger.error(
+                f"IQ recording start failed: {e}", exc_info=True,
+            )
+            self._shut_a_file_that_never_started(wf, filename)
+            raise RecordingError(
+                f"IQ recording start failed: {e}",
+            ) from e
         return _ReadyIQRecording(filename, wf)
+
+    def _shut_a_file_that_never_started(self, wave_file,
+                                        filename: str) -> None:
+        """Close a handle with no header on it, and take the file back."""
+        try:
+            wave_file.close()
+        except Exception as e:
+            self.logger.debug("Could not close %s cleanly: %s", filename, e)
+        self._remove_the_file_we_made(filename)
 
     def _remove_the_file_we_made(self, filename: str) -> None:
         """Take back a file this class created and is not going to use."""
@@ -499,7 +519,7 @@ class SDRReceiver(SDRReceiverInterface):
         recording cannot be installed into a receiver that has been
         stopped and leave a handle nothing will close.  No file is
         touched here; the sidecar is
-        :meth:`write_the_iq_recording_sidecar`, afterwards.
+        :meth:`finish_starting_the_iq_recording`, afterwards.
 
         Returns:
             The session number for that call.
@@ -541,11 +561,10 @@ class SDRReceiver(SDRReceiverInterface):
                 "gain_db": gain_db,
                 "started_at": recording_meta.now_iso(),
             }
-        self.logger.info(f"IQ recording started: {ready.path}")
         return session
 
-    def write_the_iq_recording_sidecar(self, session: int) -> None:
-        """Write the sidecar for the IQ recording *session* started."""
+    def finish_starting_the_iq_recording(self, session: int) -> None:
+        """Write the sidecar and say so; see AudioOutput for why here."""
         with self._iq_sidecar_lock:
             if session != self._iq_record_session:
                 self.logger.debug(
@@ -557,6 +576,7 @@ class SDRReceiver(SDRReceiverInterface):
                 return
             recording_meta.write_sidecar(path, self._iq_record_meta,
                                          self.logger)
+        self.logger.info(f"IQ recording started: {path}")
 
     def discard_a_prepared_iq_recording(self,
                                         ready: "_ReadyIQRecording") -> None:

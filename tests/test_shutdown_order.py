@@ -3267,14 +3267,14 @@ def test_a_slow_sidecar_does_not_hold_up_another_recording(receiver,
     audio = receiver.audio_output
     writing = threading.Event()
     go = threading.Event()
-    real_write = audio.write_the_recording_sidecar
+    real_write = audio.finish_starting_the_recording
 
     def slow_sidecar(session):
         writing.set()
         assert go.wait(10), "the test never let the sidecar go"
         return real_write(session)
 
-    audio.write_the_recording_sidecar = slow_sidecar
+    audio.finish_starting_the_recording = slow_sidecar
 
     receiver.start_recording(str(tmp_path / "with_sidecar.wav"))
     assert writing.wait(5), "the sidecar was never written"
@@ -3305,14 +3305,14 @@ def test_the_sidecar_of_a_recording_that_has_stopped_is_the_last_word(
     path = tmp_path / "ordered.wav"
     writing = threading.Event()
     go = threading.Event()
-    real_write = audio.write_the_recording_sidecar
+    real_write = audio.finish_starting_the_recording
 
     def slow_sidecar(session):
         writing.set()
         assert go.wait(10), "the test never let the sidecar go"
         return real_write(session)
 
-    audio.write_the_recording_sidecar = slow_sidecar
+    audio.finish_starting_the_recording = slow_sidecar
 
     asked = receiver.start_recording(str(path))
     assert writing.wait(5), "the sidecar was never written"
@@ -3329,3 +3329,98 @@ def test_the_sidecar_of_a_recording_that_has_stopped_is_the_last_word(
 
     assert "stopped_at" in meta, \
         "the start's sidecar was written over the stop's"
+
+
+def test_a_slow_log_line_does_not_hold_up_another_recording(receiver,
+                                                            tmp_path):
+    """"Recording started" is written to a file too.
+
+    The handlers this program installs are the synchronous ones, so a
+    log that is slow to be written is a lock held - and it was held
+    across the one that orders a start against a stop.
+    """
+    audio = receiver.audio_output
+    writing = threading.Event()
+    go = threading.Event()
+    real_info = audio.logger.info
+
+    def slow_info(msg, *args, **kwargs):
+        if "Recording started" in str(msg):
+            writing.set()
+            assert go.wait(10), "the test never let the log line go"
+        return real_info(msg, *args, **kwargs)
+
+    audio.logger.info = slow_info
+    try:
+        receiver.start_recording(str(tmp_path / "with_a_log.wav"))
+        assert writing.wait(5), "the start was never logged"
+
+        started = time.monotonic()
+        asked = receiver.start_iq_recording(str(tmp_path / "other_iq.wav"))
+        waited = time.monotonic() - started
+
+        assert waited < 1.0, f"the ask waited {waited:.1f} s for a log line"
+    finally:
+        go.set()
+        audio.logger.info = real_info
+
+    assert asked.wait(5), "the IQ recording never started"
+    assert not asked.failed, asked.error
+
+
+def test_a_header_that_will_not_be_written_leaves_no_file_and_no_handle(
+        receiver, tmp_path):
+    """The failure that happens after the file has been made.
+
+    wave.open has succeeded and the header has not been set, so there
+    is an open handle on a file this call created.  Both have to go:
+    on Windows the file cannot even be removed while the handle is
+    open, and the next attempt at the same name would then be refused
+    for a file nobody is using.
+    """
+    audio = receiver.audio_output
+    path = tmp_path / "half_made.wav"
+    opened: list = []
+    real_open = wave.open
+
+    def watched_open(*args, **kwargs):
+        handle = real_open(*args, **kwargs)
+        opened.append(handle)
+        return handle
+
+    def refuse(*args, **kwargs):
+        raise wave.Error("this header is not going to be written")
+
+    monkey = wave.Wave_write.setframerate
+    wave.Wave_write.setframerate = refuse
+    audio_wave_open = None
+    try:
+        import fm_radio.audio_output as ao_mod
+        audio_wave_open = ao_mod.wave.open
+        ao_mod.wave.open = watched_open
+
+        asked = receiver.start_recording(str(path))
+        assert asked.wait(5)
+    finally:
+        wave.Wave_write.setframerate = monkey
+        if audio_wave_open is not None:
+            ao_mod.wave.open = audio_wave_open
+
+    assert isinstance(asked.error, RecordingError), asked.error
+    assert opened, "wave.open was never reached"
+    assert opened[0]._i_opened_the_file is None, \
+        "the handle on the half-made file was left open"
+    assert not path.exists(), "the half-made file was left behind"
+    assert not audio.recording
+
+
+def test_a_channel_count_the_wave_module_will_not_take_makes_no_file(
+        receiver, tmp_path):
+    """Checked before anything is created, so there is nothing to undo."""
+    audio = receiver.audio_output
+    path = tmp_path / "no_channels.wav"
+
+    with pytest.raises(RecordingError):
+        audio.prepare_a_recording(str(path), channels=0)
+
+    assert not path.exists(), "it made a file for a recording it refused"

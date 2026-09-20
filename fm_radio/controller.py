@@ -601,8 +601,9 @@ class FMReceiverController:
             self.audio_output.discard_a_prepared_recording(ready)
             raise
         # Outside the lock: the sidecar is a file opened, written and
-        # closed, and nobody should be waiting behind that.
-        self.audio_output.write_the_recording_sidecar(session)
+        # closed, and so, on this program's settings, is the log line
+        # that goes with it.  Nobody should be waiting behind either.
+        self.audio_output.finish_starting_the_recording(session)
         return filename
 
     @staticmethod
@@ -695,7 +696,7 @@ class FMReceiverController:
         except BaseException:
             self.sdr_receiver.discard_a_prepared_iq_recording(ready)
             raise
-        self.sdr_receiver.write_the_iq_recording_sidecar(session)
+        self.sdr_receiver.finish_starting_the_iq_recording(session)
         return filename
 
     def stop_iq_recording(self) -> bool:
