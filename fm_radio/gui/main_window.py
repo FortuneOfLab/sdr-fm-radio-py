@@ -42,7 +42,7 @@ import threading
 import logging
 import time
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QGridLayout, QGroupBox, QHBoxLayout,
     QLabel, QMainWindow, QProgressBar, QPushButton, QSizePolicy, QSlider,
@@ -692,9 +692,95 @@ class ReceiverWindow(QMainWindow):
         super().closeEvent(event)
 
 
-def run_window(controller) -> int:
-    """Create the application, show the window, and run the event loop."""
+class ReceiverSwitch(QObject):
+    """Switches the receiver on without holding up the window.
+
+    Starting takes about a second and a quarter, nearly all of it the
+    JIT pre-warm, and on the GUI thread that is a second and a quarter
+    of a window that is up but has never painted: a white rectangle
+    that looks like a program that has hung.  It happens off the GUI
+    thread instead, so the window paints while the compiler works.
+
+    A start that fails records why on the controller, the same as a
+    device that goes mid-listen does, and asks for the window through
+    a signal: Qt queues that onto the GUI thread rather than letting
+    this one touch widgets.
+    """
+
+    #: Emitted from the starting thread when the receiver would not go.
+    failed = Signal(str)
+
+    def __init__(self, window: "ReceiverWindow", controller, start) -> None:
+        super().__init__(window)
+        self._window = window
+        self._controller = controller
+        self._start = start
+        self.failed.connect(self._say_so)
+        self._thread = threading.Thread(
+            target=self._run, name="ReceiverStart", daemon=True)
+
+    def go(self) -> None:
+        """Begin starting the receiver."""
+        self._thread.start()
+
+    def wait(self) -> None:
+        """Block until the start has finished, one way or the other.
+
+        The window can be closed while the receiver is still coming up,
+        and whoever runs cleanup() next would otherwise be tearing down
+        a receiver that is still being built.
+        """
+        if self._thread.ident is not None:
+            self._thread.join()
+
+    def _run(self) -> None:
+        """The starting thread: throw the switch, record a failure.
+
+        The reason is written down here rather than in the slot below,
+        because a window that is closing may never run the slot and
+        the exit status is taken from the controller either way.  A
+        receiver that cannot start is the same state as one whose
+        device has gone, and it is recorded in the same place.
+        """
+        try:
+            self._start()
+        except Exception as e:
+            logger.critical("The receiver would not start: %s", e,
+                            exc_info=True)
+            if getattr(self._controller, "device_failure", None) is None:
+                self._controller.device_failure = str(e)
+            self.failed.emit(str(e))
+
+    def _say_so(self, why: str) -> None:
+        """On the GUI thread: show it now, not at the next refresh."""
+        self._window.refresh()
+
+
+def run_window(controller, start=None) -> int:
+    """Create the application, show the window, and run the event loop.
+
+    Args:
+        controller: The receiver the window is of.
+        start: What switches the receiver on, called on a thread of its
+            own once the window is up.  Building a window is expensive
+            enough to be a gap in the audio - fonts, a graphics
+            context, several hundred widgets' worth of layout - so it
+            is done first, while there is no audio to interrupt.  None
+            leaves the receiver alone, for a caller that has already
+            started it.
+
+    Returns:
+        The exit code for the process.
+    """
     app = QApplication.instance() or QApplication([])
     window = ReceiverWindow(controller)
     window.show()
-    return app.exec()
+    switch = None
+    if start is not None:
+        switch = ReceiverSwitch(window, controller, start)
+        switch.go()
+    try:
+        return app.exec()
+    finally:
+        if switch is not None:
+            switch.wait()

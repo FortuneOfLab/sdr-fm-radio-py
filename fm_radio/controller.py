@@ -336,8 +336,15 @@ class FMReceiverController:
                     stereo=True
                 )
             # AudioOutput instance manages its own internal queue
+            # The output is told how often blocks will arrive: it
+            # decides how much to have in hand before it starts the
+            # card, and light mode's blocks are four times as far
+            # apart as standard mode's.
             self.audio_output: AudioOutput = AudioOutput(
-                output_rate=AUDIO_OUTPUT_RATE, frames_per_buffer=AUDIO_FRAMES_PER_BUFFER,
+                output_rate=AUDIO_OUTPUT_RATE,
+                frames_per_buffer=AUDIO_FRAMES_PER_BUFFER,
+                block_interval_sec=(self.sdr_receiver.block_size
+                                    / self.sdr_receiver.sample_rate),
             )
             # Auto gain controller (replaces hardware AGC)
             # One thread for every write to the device, so that no

@@ -306,6 +306,36 @@ AUDIO_FINAL_LP_CUTOFF_HZ = 15000.0  # Passband edge (Hz)
 AUDIO_FINAL_LP_STOP_HZ = 16500.0    # Stopband edge (Hz)
 AUDIO_FRAMES_PER_BUFFER = 1024     # Frames per audio callback
 AUDIO_QUEUE_MAXSIZE = 50            # Max queued audio blocks
+# What the stream starts on, over and above one block interval's
+# worth of audio.  The receiver produces exactly as fast as the card
+# consumes - a block every 16 ms carries the 768 frames the card will
+# ask for in that time - so the cushion the stream starts with is the
+# whole of what it will ever have to absorb a late block with, and a
+# stream started on the first block has none.
+#
+# One block interval is the deficit at the worst moment: the instant
+# before the next block, having served every callback due by then.
+# The callbacks do not line up with the blocks, so one of them can
+# fall entirely inside that moment, which is the slack here.  Below
+# this the arithmetic alone underruns, with no jitter needed: in
+# light mode blocks are 65.5 ms apart and callbacks 21.3 ms, so a
+# stream started on one block runs dry at the fourth callback.
+AUDIO_PREROLL_SLACK_FRAMES = AUDIO_FRAMES_PER_BUFFER
+# The gap between blocks, when nobody says.  16 ms is the standard
+# mode's; light mode's is four times that, which is why the receiver
+# tells the output rather than letting it guess.
+AUDIO_BLOCK_INTERVAL_DEFAULT_SEC = SDR_BLOCK_SIZE / SDR_SAMPLE_RATE
+# Most of the card's own buffer we will wait to fill before playing.
+# PortAudio fills the device's buffer at stream start by calling back
+# as fast as it is answered - five times in the first 39 ms on the
+# USB DAC this was found on, which holds 107 ms - and then says
+# nothing for as long as it takes to play that.  The queue refills
+# during the quiet, so this is not a standing cost; it is one drain
+# at the worst possible moment, and it empties anything smaller than
+# itself.  The number comes from the driver, so there is a ceiling:
+# a device claiming a second and a half would otherwise be a second
+# and a half of silence at startup, worse than the gaps it saves.
+AUDIO_CARD_BUFFER_MAX_SEC = 0.5
 AUDIO_CHANNELS = 2                  # Stereo output channels
 AUDIO_ENQUEUE_TIMEOUT = 0.01       # Timeout for audio queue put (seconds)
 

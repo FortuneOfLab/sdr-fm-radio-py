@@ -44,6 +44,8 @@ from fm_radio.exceptions import AudioOutputError, RecordingError
 from fm_radio.constants import (
     AUDIO_OUTPUT_RATE, AUDIO_FRAMES_PER_BUFFER, AUDIO_QUEUE_MAXSIZE,
     AUDIO_CHANNELS, AUDIO_ENQUEUE_TIMEOUT,
+    AUDIO_PREROLL_SLACK_FRAMES, AUDIO_BLOCK_INTERVAL_DEFAULT_SEC,
+    AUDIO_CARD_BUFFER_MAX_SEC,
     RECORD_SAMPLE_WIDTH, RECORD_MAX_INT16,
     RECORD_QUEUE_MAXSIZE, AUDIO_RECORD_ROTATE_THRESHOLD_BYTES,
 )
@@ -103,6 +105,7 @@ class AudioOutput(AudioOutputInterface):
         self,
         output_rate: int = AUDIO_OUTPUT_RATE,
         frames_per_buffer: int = AUDIO_FRAMES_PER_BUFFER,
+        block_interval_sec: float = AUDIO_BLOCK_INTERVAL_DEFAULT_SEC,
     ) -> None:
         self.logger: logging.Logger = logging.getLogger('fm_receiver.AudioOutput')
         self.output_rate: int = output_rate
@@ -194,6 +197,34 @@ class AudioOutput(AudioOutputInterface):
         )
         self._record_worker.start()
 
+        # Whether the sound card has been told to start asking for
+        # buffers.  Set once, by the first block of audio; read on the
+        # realtime path, which is why it is a plain flag and the lock
+        # below is only taken on the one call that changes it.
+        self._playing: bool = False
+        self._play_lock: threading.Lock = threading.Lock()
+        # Frames queued so far, counted only until the stream starts:
+        # nothing is taking them out before that, so the sum of what
+        # has gone in is what is waiting.
+        self._frames_ready: int = 0
+        # ...and how many of them there have to be first.  Set below,
+        # once the stream is open and can say how much the card
+        # holds.  Derived from how often blocks arrive rather than
+        # from how big they are: the resampler's output length varies
+        # by a couple of hundred frames either way, and a cushion
+        # measured against a short first block would be short too.
+        self._cushion_frames: int = (
+            int(round(float(block_interval_sec) * float(output_rate)))
+            + AUDIO_PREROLL_SLACK_FRAMES)
+        self._preroll_frames: int = self._cushion_frames
+
+        # Opened but not started.  A stream that is running is a sound
+        # card asking for a buffer every few milliseconds, and until
+        # the receiver has produced anything there is nothing to give
+        # it: each of those is an underrun, and on this machine there
+        # were forty-three of them before the first block arrived -
+        # through the JIT pre-warm, which is the better part of a
+        # second of nothing.  See _play_from_now_on.
         try:
             self.pyaudio_instance = pyaudio.PyAudio()
             self.stream = self.pyaudio_instance.open(
@@ -202,9 +233,11 @@ class AudioOutput(AudioOutputInterface):
                 rate=int(self.output_rate),
                 output=True,
                 frames_per_buffer=self.frames_per_buffer,
-                stream_callback=self.callback
+                stream_callback=self.callback,
+                start=False,
             )
-            self.stream.start_stream()
+            self._preroll_frames = (self._cushion_frames
+                                    + self._what_the_card_takes_at_once())
             self.logger.info(f"Audio output initialized: rate={output_rate}Hz, buffer={frames_per_buffer}")
         except OSError as e:
             self.logger.error(f"Failed to initialize audio output: {e}")
@@ -276,6 +309,63 @@ class AudioOutput(AudioOutputInterface):
         """True once :meth:`cleanup` has run; the stream is gone after that."""
         return self._closed.is_set()
 
+    def _what_the_card_takes_at_once(self) -> int:
+        """Frames the card asks for in one go at stream start.
+
+        PortAudio fills the device's own buffer as soon as the stream
+        is started, calling back as fast as it is answered - five
+        times in the first 39 ms on the USB DAC this was found on,
+        which holds 107 ms - and then asks for nothing at all for as
+        long as it takes to play that.  The queue refills during the
+        quiet, so this is not a standing cost: it is one drain, at
+        the moment there is least to draw on, and it empties any
+        cushion smaller than itself.  Four gaps, on the machine this
+        was reported from.  So the cushion goes on top of it.
+
+        The figure comes from the driver, so it is treated as a claim
+        rather than a fact: nothing, nonsense and silence about it
+        all mean "assume none", and there is a ceiling for a device
+        that claims more than a startup is worth waiting through.
+        """
+        try:
+            held = float(self.stream.get_output_latency())
+        except Exception as e:
+            self.logger.debug("The card would not say how much it holds: %s",
+                              e)
+            return 0
+        if not held > 0.0:
+            return 0
+        if held > AUDIO_CARD_BUFFER_MAX_SEC:
+            self.logger.warning(
+                "The card claims to hold %.0f ms; waiting for %.0f ms of it",
+                held * 1000.0, AUDIO_CARD_BUFFER_MAX_SEC * 1000.0)
+            held = AUDIO_CARD_BUFFER_MAX_SEC
+        return int(round(held * self.output_rate))
+
+    def _play_from_now_on(self) -> None:
+        """Start the stream, now that there is enough to play.
+
+        Called once ``_preroll_frames`` are in the queue, so that what
+        the card asks for is already waiting: starting the stream
+        before that would cost exactly the underruns this is here to
+        avoid.
+
+        Called from the realtime path, so the flag is checked outside
+        the lock and again inside it: two threads can both see a
+        stopped stream, and only one of them should start it.
+        """
+        with self._play_lock:
+            if self._playing or self._closed.is_set():
+                return
+            try:
+                self.stream.start_stream()
+            except Exception as e:             # pragma: no cover - guard
+                self.logger.error("Could not start the audio stream: %s", e,
+                                  exc_info=True)
+                return
+            self._playing = True
+            self.logger.info("Audio output started")
+
     def enqueue_audio(self, left: np.ndarray, right: np.ndarray) -> None:
         """Hand a block to the output, unless it has been closed.
 
@@ -297,12 +387,40 @@ class AudioOutput(AudioOutputInterface):
         try:
             left32 = np.asarray(left, dtype=np.float32, copy=False)
             right32 = np.asarray(right, dtype=np.float32, copy=False)
+        except Exception as e:
+            self.logger.error(f"Error enqueueing audio: {e}", exc_info=True)
+            return
+        if left32.size == 0:
+            # The first block out of the demodulator after a reset
+            # carries no audio at all - the filters have not filled
+            # yet - and every retune resets it.  A slot in the queue
+            # for nothing, and fifty of those is a full queue.
+            return
+        try:
             self.audio_buffer_queue.put((left32, right32), timeout=AUDIO_ENQUEUE_TIMEOUT)
         except queue.Full:
             self._enqueue_drop_count += 1
             self.logger.debug("Audio buffer queue full, dropping audio data")
+            # Nothing more can go in, so waiting for more cannot help.
+            # A stream still holding out for its cushion here would
+            # hold out for good, and drop every block for ever after:
+            # a radio that is silent until it is restarted.  Whatever
+            # is in a full queue is more than the cushion was for.
+            if not self._playing:
+                self._play_from_now_on()
+            return
         except Exception as e:
             self.logger.error(f"Error enqueueing audio: {e}", exc_info=True)
+            return
+        # After the block is in, not before: starting the stream is
+        # telling the card to ask, and what it asks for should already
+        # be waiting - not just the first buffer but a cushion behind
+        # it, because the receiver produces at exactly the rate the
+        # card consumes and never catches up from behind.
+        if not self._playing:
+            self._frames_ready += left32.size
+            if self._frames_ready >= self._preroll_frames:
+                self._play_from_now_on()
 
     @property
     def dropped_blocks(self) -> int:
@@ -934,7 +1052,10 @@ class AudioOutput(AudioOutputInterface):
                 if self._record_worker.is_alive():
                     self._record_worker.join(timeout=1.0)
 
-            self.stream.stop_stream()
+            # A stream that was never started has nothing to stop, and
+            # PortAudio is entitled to object to being asked.
+            if self._playing:
+                self.stream.stop_stream()
             self.stream.close()
             self.pyaudio_instance.terminate()
             self.logger.info("Audio output cleaned up successfully")
