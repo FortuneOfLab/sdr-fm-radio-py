@@ -31,8 +31,10 @@ The window holds no receiver state of its own, so a refresh that arrives
 while the user is mid-gesture cannot fight them for a widget — except for the
 two controls that would, which say so where they are handled.
 
-Spectrum, waterfall, the blend bar and the DSP settings are the next step and
-are deliberately not here.
+The spectrum and waterfall are in ``band_view``; the blend bar is here,
+because it reads off the same snapshot as the rest of the Signal group.
+The DSP settings and the recordings browser are the next step and are
+deliberately not here.
 """
 
 from __future__ import annotations
@@ -76,8 +78,25 @@ METER_FLOOR_DBFS = -60.0
 NOTICE_SECONDS = 5.0
 
 #: Gain slider resolution: the widget is integral, the tuner is in dB.
+#: Room for the widest thing the blend line says, so that the bar
+#: beside it does not change width as the receiver settles.
+_MODE_WIDTH = 60
+
 _GAIN_SCALE = 10.0
 _GAIN_MAX_DB = 49.6
+
+
+def _blend_percent(blend: float, stereo: bool) -> int:
+    """Map the stereo blend onto a meter's 0-100.
+
+    Mono is empty whatever the blend says.  The blend factor is only
+    meaningful while stereo is being attempted: it starts at 1.0 and
+    the mono path never moves it, so a receiver asked for mono would
+    otherwise show a full bar.
+    """
+    if not stereo:
+        return 0
+    return int(round(min(100.0, max(0.0, float(blend) * 100.0))))
 
 
 def _level_percent(dbfs: float) -> int:
@@ -214,9 +233,21 @@ class ReceiverWindow(QMainWindow):
         box = QGroupBox("Signal", self)
         grid = QGridLayout(box)
 
+        # How much stereo there is, rather than whether there is any:
+        # the blend moves continuously with the pilot, and a receiver
+        # that is halfway is the interesting case - a word for it can
+        # only say STEREO or MONO, both of which would be wrong.
+        self._blend = QProgressBar(box)
+        self._blend.setRange(0, 100)
+        self._blend.setTextVisible(False)
+        self._blend.setToolTip(
+            "How much of the stereo image is being let through: "
+            "empty is mono, full is the whole of it")
         self._mode = QLabel("--", box)
-        grid.addWidget(QLabel("Mode", box), 0, 0)
-        grid.addWidget(self._mode, 0, 1)
+        self._mode.setMinimumWidth(_MODE_WIDTH)
+        grid.addWidget(QLabel("Blend", box), 0, 0)
+        grid.addWidget(self._blend, 0, 1)
+        grid.addWidget(self._mode, 0, 2)
 
         self._pilot = QLabel("--", box)
         grid.addWidget(QLabel("Pilot SNR", box), 1, 0)
@@ -569,6 +600,7 @@ class ReceiverWindow(QMainWindow):
         self._frequency.setText(f"{freq_hz / 1e6:.1f} MHz")
         station = self.controller.current_station()
         self._station.setText(station.name if station else "")
+        self._blend.setValue(0)
         self._mode.setText("--")
         self._pilot.setText("--")
         for meter, label in ((self._left, self._left_db),
@@ -584,12 +616,7 @@ class ReceiverWindow(QMainWindow):
         self._frequency.setText(f"{status.freq_hz / 1e6:.1f} MHz")
         self._station.setText(status.station)
 
-        if not status.stereo:
-            self._mode.setText("MONO")
-        elif status.stereo_locked:
-            self._mode.setText("STEREO")
-        else:
-            self._mode.setText(f"BLENDING ({status.blend_factor:.2f})")
+        self._show_blend(status)
 
         self._pilot.setText(
             "--" if status.pilot_snr_db is None
@@ -605,6 +632,23 @@ class ReceiverWindow(QMainWindow):
         self._show_gain(status.gain_db, status.auto_gain)
         self._iq_peak.setText(f"peak {status.iq_peak:.2f}")
         self._health.setText(self._health_text(status))
+
+    def _show_blend(self, status: StatusSnapshot) -> None:
+        """The bar, and a word for what the bar amounts to.
+
+        The word is still worth having: a bar three-quarters along
+        does not say whether the receiver is on its way up to stereo
+        or has settled there, and MONO says something a bar at zero
+        cannot - that nobody asked for stereo in the first place.
+        """
+        self._blend.setValue(_blend_percent(status.blend_factor,
+                                            status.stereo))
+        if not status.stereo:
+            self._mode.setText("MONO")
+        elif status.stereo_locked:
+            self._mode.setText("STEREO")
+        else:
+            self._mode.setText(f"{status.blend_factor:.2f}")
 
     def _show_gain(self, gain_db: float, auto: bool) -> None:
         """Show the gain without fighting the user for the slider.

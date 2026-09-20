@@ -340,12 +340,70 @@ def test_the_frequency_and_station_come_from_the_snapshot(window):
 @pytest.mark.parametrize("overrides,expected", [
     ({"stereo": True, "blend_factor": 1.0}, "STEREO"),
     ({"stereo": False, "blend_factor": 1.0}, "MONO"),
-    ({"stereo": True, "blend_factor": 0.3}, "BLENDING (0.30)"),
+    ({"stereo": True, "blend_factor": 0.3}, "0.30"),
 ])
 def test_the_mode_distinguishes_mono_from_a_half_open_blend(
         window, overrides, expected):
     view, _ = window(FakeController(snapshot(**overrides)))
     assert view._mode.text() == expected
+
+
+# ----------------------------------------------------------------------
+# How much stereo there is
+# ----------------------------------------------------------------------
+
+@pytest.mark.parametrize("blend,expected", [
+    (1.0, 100),
+    (0.75, 75),
+    (0.3, 30),
+    (0.0, 0),
+])
+def test_the_bar_follows_the_blend(window, blend, expected):
+    """The reading the word cannot give: how far along it is."""
+    view, _ = window(FakeController(snapshot(stereo=True,
+                                             blend_factor=blend)))
+
+    assert view._blend.value() == expected
+
+
+def test_mono_shows_an_empty_bar_whatever_the_blend_says(window):
+    """The blend factor starts at 1.0 and the mono path never moves it.
+
+    So a receiver asked for mono reports full blend, and a bar that
+    believed it would sit at the top saying the stereo image is all
+    the way through when there is no stereo image at all.
+    """
+    view, _ = window(FakeController(snapshot(stereo=False,
+                                             blend_factor=1.0)))
+
+    assert view._blend.value() == 0
+    assert view._mode.text() == "MONO"
+
+
+@pytest.mark.parametrize("blend,expected", [
+    (1.4, 100),
+    (-0.2, 0),
+])
+def test_a_blend_outside_its_range_stays_on_the_bar(window, blend,
+                                                    expected):
+    """Qt clamps it anyway; this says what it should clamp to."""
+    view, _ = window(FakeController(snapshot(stereo=True,
+                                             blend_factor=blend)))
+
+    assert view._blend.value() == expected
+
+
+def test_the_bar_empties_when_there_is_no_snapshot(window):
+    """A stale bar is the window saying the radio is still playing."""
+    controller = FakeController(snapshot(stereo=True, blend_factor=1.0))
+    view, _ = window(controller)
+    assert view._blend.value() == 100
+
+    controller.status = None
+    view.refresh()
+
+    assert view._blend.value() == 0
+    assert view._mode.text() == "--"
 
 
 def test_an_unmeasured_pilot_reads_as_unknown(window):
