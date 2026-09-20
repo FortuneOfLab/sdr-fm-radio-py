@@ -45,10 +45,17 @@ on.  Order between kinds is kept, so "manual gain" followed by "30 dB"
 still happens that way round.
 
 Not all of them.  Starting a recording is here for the order it gets -
-the tuner moves on this thread, so a recording cannot be installed
-half way through a retune - and it is an event rather than a state:
-two of them are two recordings, and the second does not replace the
-first.
+the tuner moves on this thread, so a recording cannot be installed half
+way through a retune - and it is an event rather than a state: a start
+and the stop after it are not the same intent expressed twice, so
+neither replaces the other.
+
+An event is also where coalescing stops.  A tune queued before a
+recording is the tune that recording is going to be named for, and a
+later tune must not reach back past the recording and take it away:
+the queue would still run in order, but it would be the wrong order's
+worth of requests.  So the newest request of a coalescing kind only
+replaces others back as far as the last event.
 """
 
 from __future__ import annotations
@@ -108,6 +115,9 @@ class Request:
         #: True when a newer request of the same kind replaced this one
         #: before it was carried out.
         self.superseded: bool = False
+        #: True when whoever asked for this took it back before it was
+        #: carried out - a recording stopped before it started.
+        self.cancelled: bool = False
 
     @property
     def finished(self) -> bool:
@@ -133,8 +143,13 @@ class Request:
         self.superseded = True
         self._done.set()
 
+    def _cancel(self) -> None:
+        self.cancelled = True
+        self._done.set()
+
     def __repr__(self) -> str:                  # pragma: no cover - debug
         state = ("waiting" if not self.finished else
+                 "cancelled" if self.cancelled else
                  "superseded" if self.superseded else
                  f"failed: {self.error}" if self.failed else "done")
         return f"<Request {self.serial} {self.what} ({state})>"
@@ -202,14 +217,19 @@ class DeviceWorker:
                     "Not %s: the device worker has stopped", what)
                 request._supersede()
                 return request
-            # Anything of this kind still waiting was the same intent,
-            # expressed before the user changed their mind.  It goes, and
-            # the new one takes its place at the back - at the back, not
-            # in its place, so a gain asked for after a gain mode still
-            # happens after it.  Kinds outside COALESCING are events
-            # rather than intents, and two of them are two of them.
+            # Anything of this kind still waiting since the last event
+            # was the same intent, expressed before the user changed
+            # their mind.  It goes, and the new one takes its place at
+            # the back - at the back, not in its place, so a gain asked
+            # for after a gain mode still happens after it.
+            #
+            # Since the last event, and no further back: a tune queued
+            # before a recording is the one that recording will be
+            # named for, and reaching past the recording to take it
+            # away would leave the recording named for a station the
+            # receiver was told to leave.
             if kind in COALESCING:
-                for older in [r for r in self._waiting if r.kind == kind]:
+                for older in self._replaceable(kind):
                     self._waiting.remove(older)
                     superseded.append(older)
             self._waiting.append(request)
@@ -217,6 +237,45 @@ class DeviceWorker:
         for older in superseded:
             older._supersede()
         return request
+
+    def _replaceable(self, kind: str) -> list[Request]:
+        """Waiting requests of *kind* that a new one may take the place of.
+
+        Only those after the last event in the queue.  The caller holds
+        ``_gate``.
+        """
+        after = 0
+        for i, waiting in enumerate(self._waiting):
+            if waiting.kind not in COALESCING:
+                after = i + 1
+        return [r for r in list(self._waiting)[after:] if r.kind == kind]
+
+    def cancel(self, request: "Request | None") -> bool:
+        """Take a request back, if it has not begun.
+
+        For a caller that has changed its mind: a recording stopped
+        before the worker got round to starting it.  A request that is
+        being carried out cannot be taken back - the caller has to
+        settle with whatever it did - and one that is finished has
+        nothing to take.
+
+        Args:
+            request: What to take back; None is allowed and does
+                nothing, so a caller need not check.
+
+        Returns:
+            True when it was taken back, and is now finished as
+            cancelled rather than done.
+        """
+        if request is None:
+            return False
+        with self._gate:
+            if request not in self._waiting:
+                return False
+            self._waiting.remove(request)
+        self.logger.debug("Taken back: %s", request.what)
+        request._cancel()
+        return True
 
     @property
     def latest(self) -> Request | None:

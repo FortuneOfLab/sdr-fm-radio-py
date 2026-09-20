@@ -17,6 +17,7 @@ import pytest
 
 from conftest import FakeLibRtlSdr, RTLSDR_INACTIVE, RTLSDR_RUNNING
 
+import fm_radio.controller as controller_module
 import fm_radio.device_handle as device_handle
 from fm_radio.controller import FMReceiverController
 from fm_radio.exceptions import RecordingError, SDRDeviceError
@@ -2709,3 +2710,286 @@ def test_an_iq_recording_is_refused_when_the_last_one_will_not_close(
         assert isinstance(asked.error, RecordingError), asked.error
     finally:
         let_it_close.set()
+
+
+# ----------------------------------------------------------------------
+# A stop reaches a recording that has not started yet
+# ----------------------------------------------------------------------
+
+def a_worker_that_is_busy(receiver, freq_hz: float = 81.3e6):
+    """Hold the device worker, and hand back the release.
+
+    Anything asked of it while this is held waits behind the write,
+    which is the state every one of these tests needs.  Only the first
+    write is held: the ones the test queues behind it run normally once
+    it is let go.
+    """
+    writing = threading.Event()
+    release = threading.Event()
+    sdr = receiver.sdr_receiver
+    real_set = sdr.set_center_frequency
+
+    def slow_write(hz):
+        if not writing.is_set():
+            writing.set()
+            assert release.wait(10), "the test never let the write go"
+        return real_set(hz)
+
+    sdr.set_center_frequency = slow_write
+    receiver.tune(freq_hz)
+    assert writing.wait(5), "the write never started"
+    return release
+
+
+def test_a_recording_stopped_before_it_starts_does_not_start(receiver,
+                                                             tmp_path):
+    """The button was pressed and let go; nothing should be recorded.
+
+    The stop used to reach only a recording that had already begun, so
+    a start still sitting on the worker landed afterwards and recorded
+    against a receiver whose user had said no.
+    """
+    audio = receiver.audio_output
+    path = tmp_path / "never.wav"
+    release = a_worker_that_is_busy(receiver)
+
+    asked = receiver.start_recording(str(path))
+    stopped = receiver.stop_recording()
+    release.set()
+
+    assert asked.wait(5), "nobody answered for the start"
+    assert asked.cancelled, f"it was not taken back: {asked!r}"
+    assert stopped, "stop_recording said there was nothing to stop"
+    assert not audio.recording, "it started after being stopped"
+
+    audio.record(np.ones((64, 2), dtype=np.float32))
+    assert not path.exists(), "a file was made for a recording nobody wanted"
+
+
+def test_an_iq_recording_stopped_before_it_starts_does_not_start(receiver,
+                                                                 tmp_path):
+    """The same on the IQ side, which has its own handle and flag."""
+    sdr = receiver.sdr_receiver
+    path = tmp_path / "never_iq.wav"
+    release = a_worker_that_is_busy(receiver)
+
+    asked = receiver.start_iq_recording(str(path))
+    stopped = receiver.stop_iq_recording()
+    release.set()
+
+    assert asked.wait(5), "nobody answered for the start"
+    assert asked.cancelled, f"it was not taken back: {asked!r}"
+    assert stopped
+    assert not sdr.iq_recording
+    assert not path.exists()
+
+
+def test_a_stop_reaches_a_start_that_is_already_on_its_way(receiver,
+                                                           tmp_path):
+    """Off the queue is not installed yet.
+
+    Taking the request back only works while it is queued.  One that
+    the worker has already picked up has to find out another way, and
+    it does: the number the stop moved.
+    """
+    audio = receiver.audio_output
+    path = tmp_path / "too_late.wav"
+    naming = threading.Event()
+    go = threading.Event()
+    real_build = controller_module.build_recording_path
+
+    def slow_name(*args, **kwargs):
+        naming.set()
+        assert go.wait(10), "the test never let the naming finish"
+        return str(path)
+
+    controller_module.build_recording_path = slow_name
+    try:
+        asked = receiver.start_recording()
+        assert naming.wait(5), "the start never began"
+
+        # Off the queue and running: the request cannot be taken back.
+        stopped = receiver.stop_recording()
+        go.set()
+
+        assert asked.wait(5), "nobody answered for the start"
+        assert isinstance(asked.error, RecordingError), asked.error
+        assert stopped, "stop_recording said there was nothing to stop"
+        assert not audio.recording, "it installed itself after the stop"
+        assert not path.exists(), "it made the file anyway"
+    finally:
+        go.set()
+        controller_module.build_recording_path = real_build
+
+
+def test_a_recording_asked_for_after_a_stop_still_starts(receiver, tmp_path):
+    """The stop is not a latch; it only reaches what came before it."""
+    audio = receiver.audio_output
+    release = a_worker_that_is_busy(receiver)
+    receiver.start_recording(str(tmp_path / "never.wav"))
+    receiver.stop_recording()
+
+    wanted = receiver.start_recording(str(tmp_path / "wanted.wav"))
+    release.set()
+
+    assert wanted.wait(5), "the second recording never answered"
+    assert not wanted.failed, wanted.error
+    assert audio.recording
+    assert (tmp_path / "wanted.wav").exists()
+
+
+# ----------------------------------------------------------------------
+# A second recording over the first
+# ----------------------------------------------------------------------
+
+def test_a_second_recording_is_refused_rather_than_reported_as_started(
+        receiver, tmp_path):
+    """A result has to be a file that exists.
+
+    The recorder ignores a start while it is recording, so the second
+    path was never made - and the request said it had been.
+    """
+    audio = receiver.audio_output
+    first = tmp_path / "first.wav"
+    second = tmp_path / "second.wav"
+
+    assert receiver.start_recording(str(first)).wait(5)
+    audio.record(np.zeros((2048, 2), dtype=np.float32))
+
+    asked = receiver.start_recording(str(second))
+
+    assert asked.wait(5), "nobody answered"
+    assert isinstance(asked.error, RecordingError), asked.error
+    assert not second.exists(), "it claimed a file it did not make"
+    assert audio.recording, "the first recording was disturbed"
+    assert audio._record_base_path == str(first), audio._record_base_path
+
+    receiver.stop_recording()
+    with wave.open(str(first), "rb") as f:
+        assert f.getnframes() == 2048, "the first recording lost its audio"
+
+
+def test_a_second_iq_recording_is_refused_too(receiver, tmp_path):
+    sdr = receiver.sdr_receiver
+    first = tmp_path / "first_iq.wav"
+    second = tmp_path / "second_iq.wav"
+
+    assert receiver.start_iq_recording(str(first)).wait(5)
+    asked = receiver.start_iq_recording(str(second))
+
+    assert asked.wait(5)
+    assert isinstance(asked.error, RecordingError), asked.error
+    assert not second.exists()
+    assert sdr.iq_recording
+
+
+def test_a_recording_after_the_first_has_stopped_is_allowed(receiver,
+                                                            tmp_path):
+    """Refusing the second one is about overlap, not about ever again."""
+    first = tmp_path / "first.wav"
+    second = tmp_path / "second.wav"
+
+    assert receiver.start_recording(str(first)).wait(5)
+    receiver.stop_recording()
+    asked = receiver.start_recording(str(second))
+
+    assert asked.wait(5)
+    assert not asked.failed, asked.error
+    assert second.exists()
+    receiver.stop_recording()
+
+
+def test_the_command_line_stops_a_recording_it_never_saw_start(
+        receiver, capsys, monkeypatch):
+    """"record start" can come back without an answer; "record stop"
+    still has to reach what it asked for.
+
+    Asking the recording flag first would find nothing to stop and
+    leave the start to land afterwards.
+    """
+    monkeypatch.setattr("fm_radio.cli.RECORD_REPORT_TIMEOUT_SEC", 0.1)
+    cli = receiver.cmd_interface
+    audio = receiver.audio_output
+    release = a_worker_that_is_busy(receiver)
+
+    try:
+        cli._dispatch("record start")
+        assert "has not answered yet" in capsys.readouterr().out
+
+        cli._dispatch("record stop")
+
+        assert "Recording stopped." in capsys.readouterr().out
+    finally:
+        release.set()
+
+    assert receiver.tune(80.0e6).wait(5), "the worker never drained"
+    assert not audio.recording, "it started after being stopped"
+
+
+def test_the_command_line_says_so_when_there_is_nothing_to_stop(receiver,
+                                                                capsys):
+    receiver.cmd_interface._dispatch("record stop")
+
+    assert "Not currently recording." in capsys.readouterr().out
+
+
+def test_a_tune_a_recording_and_a_tune_happen_in_that_order(receiver,
+                                                            tmp_path,
+                                                            monkeypatch):
+    """The recording is named for the station that was asked for first.
+
+    Coalescing used to reach the whole queue, so the 81.3 in front of
+    the recording was taken away by the 82.5 behind it.  The worker
+    still ran one thing at a time; it ran the wrong set of things, and
+    the recording was named 80.0 - the station the receiver had
+    already been told to leave.
+    """
+    monkeypatch.chdir(tmp_path)
+    # Held on a write of its own, so the three below are all queued -
+    # a request the worker has already taken is out of reach of
+    # coalescing whatever the coalescing does.
+    release = a_worker_that_is_busy(receiver, 80.0e6)
+
+    receiver.tune(81.3e6)
+    asked = receiver.start_recording()
+    last = receiver.tune(82.5e6)
+    release.set()
+
+    assert last.wait(5) and asked.wait(5), "nothing landed"
+    assert not asked.failed, asked.error
+
+    assert "81.3MHz" in asked.result, asked.result
+    assert receiver.audio_output._record_meta["center_freq_hz"] == \
+        pytest.approx(81.3e6)
+    assert receiver.get_frequency() == pytest.approx(82.5e6)
+
+
+def test_an_iq_recording_between_two_tunes_is_named_for_the_first(
+        receiver, tmp_path, monkeypatch):
+    """The same guarantee on the IQ side."""
+    monkeypatch.chdir(tmp_path)
+    release = a_worker_that_is_busy(receiver, 80.0e6)
+
+    receiver.tune(81.3e6)
+    asked = receiver.start_iq_recording()
+    last = receiver.tune(82.5e6)
+    release.set()
+
+    assert last.wait(5) and asked.wait(5)
+    assert not asked.failed, asked.error
+    assert "81.3MHz" in asked.result, asked.result
+    assert receiver.sdr_receiver._iq_record_meta["center_freq_hz"] == \
+        pytest.approx(81.3e6)
+
+
+def test_two_tunes_with_no_recording_between_them_still_collapse(receiver):
+    """The coalescing that is worth having is untouched."""
+    release = a_worker_that_is_busy(receiver, 80.0e6)
+
+    replaced = receiver.tune(82.5e6)
+    last = receiver.tune(83.7e6)
+    release.set()
+
+    assert last.wait(5)
+    assert replaced.superseded, "a held button should still collapse"
+    assert receiver.get_frequency() == pytest.approx(83.7e6)

@@ -44,7 +44,9 @@ from fm_radio.auto_gain import AutoGainController
 from fm_radio.device_worker import (
     RECORDING, TUNE, DeviceWorker, Request,
 )
-from fm_radio.exceptions import SDRDeviceError, AudioOutputError
+from fm_radio.exceptions import (
+    SDRDeviceError, AudioOutputError, RecordingError,
+)
 from fm_radio.stations import (
     Station, load_stations, favorites, search, in_area, nearest,
 )
@@ -174,6 +176,12 @@ class _BlockProfiler:
             self._win_q_max = 0
 
 
+#: How long a recording that is starting waits for the one before it
+#: to finish closing.  The recorders bound their own waits the same
+#: way; this is the controller asking first, outside the lock a stop
+#: needs, so that a stop is never queued behind a start's waiting.
+PREVIOUS_CLOSE_WAIT_SEC: float = 2.0
+
 #: How long the command line is given to notice that it has been asked
 #: to stop.  Both ways of ending the wait are immediate - a byte down a
 #: pipe, a Return into the console's own buffer - so this is only how
@@ -262,6 +270,22 @@ class FMReceiverController:
         # starts one when the device goes, and closing the window starts
         # another.  It is idempotent, but only one at a time.
         self._cleanup_lock: threading.Lock = threading.Lock()
+        # Held where a recording is installed and where one is stopped,
+        # so that of the two exactly one happens first and both agree
+        # which.  Not held for anything slow: the flush is not under it,
+        # and neither is the wait for a recording that is still closing.
+        self._recording_lock: threading.Lock = threading.Lock()
+        # Bumped by every stop.  A start carries the number it was asked
+        # under, and one that finds the number has moved was stopped
+        # before it began - even if it was already off the queue and on
+        # its way to the disk.
+        self._audio_recording_wanted: int = 0
+        self._iq_recording_wanted: int = 0
+        # The start that has been asked for and not yet carried out, so
+        # a stop can take it back off the queue rather than let it land
+        # behind the stop's back.
+        self._starting_audio: "Request | None" = None
+        self._starting_iq: "Request | None" = None
         # Blocks dropped because the receiver had already moved on from
         # the tuning they were captured under.  A handful per tune is
         # ordinary; a stream of them would not be.
@@ -529,14 +553,25 @@ class FMReceiverController:
         Returns:
             The request.  Its ``result`` is the path once it has one,
             and its ``error`` is why there is no recording if there is
-            not one.
+            not one.  A start that :meth:`stop_recording` overtook
+            finishes as ``cancelled``.
         """
-        return self.device_worker.submit(
-            RECORDING, "Starting the recording",
-            lambda: self._start_recording_now(filename))
+        with self._recording_lock:
+            wanted = self._audio_recording_wanted
+            request = self.device_worker.submit(
+                RECORDING, "Starting the recording",
+                lambda: self._start_recording_now(filename, wanted))
+            self._starting_audio = request
+        return request
 
-    def _start_recording_now(self, filename: str | None) -> str:
-        """Name it if it has no name, and install it.  On the worker."""
+    def _start_recording_now(self, filename: str | None, wanted: int) -> str:
+        """Name it if it has no name, and install it.  On the worker.
+
+        Raises:
+            RecordingError: It was stopped before it started, or there
+                is already a recording running that this must not
+                disturb.
+        """
         if filename is None:
             filename = build_recording_path(self.get_frequency() / 1e6)
         # Capture context for the metadata sidecar; the audio
@@ -549,12 +584,60 @@ class FMReceiverController:
             }
         except Exception:
             metadata = None
-        self.audio_output.start_recording(filename, metadata=metadata)
+        # Outside the lock: the one before this can take two seconds to
+        # finish closing, and a stop waiting to be heard should not
+        # queue behind a wait that belongs to a start.
+        if self.audio_output.finalising:
+            self.audio_output.wait_for_the_recording_to_close(
+                PREVIOUS_CLOSE_WAIT_SEC)
+        with self._recording_lock:
+            self._the_start_is_still_wanted(
+                wanted, self._audio_recording_wanted,
+                self.audio_output.recording, "recording")
+            self.audio_output.start_recording(filename, metadata=metadata)
+            self._starting_audio = None
         return filename
 
-    def stop_recording(self) -> None:
-        """Stop the current recording session."""
+    @staticmethod
+    def _the_start_is_still_wanted(asked_under: int, now: int,
+                                   already: bool, what: str) -> None:
+        """Raise unless this start should go ahead.  Under the lock.
+
+        Two ways it should not.  Somebody stopped the recording after
+        asking for it, which moves the number; or one is already
+        running, and installing over it would leave a file that nothing
+        ever wrote to and a recording nobody asked for still going.
+        """
+        if asked_under != now:
+            raise RecordingError(
+                f"The {what} was stopped before it started")
+        if already:
+            raise RecordingError(
+                f"Already recording; this {what} was not started")
+
+    def stop_recording(self) -> bool:
+        """Stop the recording, including one that has not started yet.
+
+        A start asked for before this is not allowed to land after it:
+        the request is taken back off the worker if it is still queued,
+        and one that is already on its way finds the number changed and
+        refuses to install.
+
+        Returns:
+            True when there was something to stop.
+        """
+        with self._recording_lock:
+            self._audio_recording_wanted += 1
+            asked_for, self._starting_audio = self._starting_audio, None
+            running = self.audio_output.recording
+        taken_back = self.device_worker.cancel(asked_for)
         self.audio_output.stop_recording()
+        return running or taken_back or asked_for is not None
+
+    def is_starting_a_recording(self) -> bool:
+        """True while a recording has been asked for and not started."""
+        asked_for = self._starting_audio
+        return asked_for is not None and not asked_for.finished
 
     def is_recording(self) -> bool:
         """Return True if currently recording."""
@@ -572,23 +655,49 @@ class FMReceiverController:
                 station it will contain.
 
         Returns:
-            The request, whose ``result`` is the path.
+            The request, whose ``result`` is the path.  One that
+            :meth:`stop_iq_recording` overtook finishes as
+            ``cancelled``.
         """
-        return self.device_worker.submit(
-            RECORDING, "Starting the IQ recording",
-            lambda: self._start_iq_recording_now(filename))
+        with self._recording_lock:
+            wanted = self._iq_recording_wanted
+            request = self.device_worker.submit(
+                RECORDING, "Starting the IQ recording",
+                lambda: self._start_iq_recording_now(filename, wanted))
+            self._starting_iq = request
+        return request
 
-    def _start_iq_recording_now(self, filename: str | None) -> str:
+    def _start_iq_recording_now(self, filename: str | None,
+                                wanted: int) -> str:
         """Name it if it has no name, and install it.  On the worker."""
         if filename is None:
             filename = build_recording_path(self.get_frequency() / 1e6,
                                             iq=True)
-        self.sdr_receiver.start_iq_recording(filename)
+        if self.sdr_receiver.iq_finalising:
+            self.sdr_receiver.wait_for_the_iq_recording_to_close(
+                PREVIOUS_CLOSE_WAIT_SEC)
+        with self._recording_lock:
+            self._the_start_is_still_wanted(
+                wanted, self._iq_recording_wanted,
+                self.sdr_receiver.iq_recording, "IQ recording")
+            self.sdr_receiver.start_iq_recording(filename)
+            self._starting_iq = None
         return filename
 
-    def stop_iq_recording(self) -> None:
-        """Stop the current IQ recording session."""
+    def stop_iq_recording(self) -> bool:
+        """Stop the IQ recording, including one that has not started yet."""
+        with self._recording_lock:
+            self._iq_recording_wanted += 1
+            asked_for, self._starting_iq = self._starting_iq, None
+            running = self.sdr_receiver.iq_recording
+        taken_back = self.device_worker.cancel(asked_for)
         self.sdr_receiver.stop_iq_recording()
+        return running or taken_back or asked_for is not None
+
+    def is_starting_an_iq_recording(self) -> bool:
+        """True while an IQ recording has been asked for and not started."""
+        asked_for = self._starting_iq
+        return asked_for is not None and not asked_for.finished
 
     def is_iq_recording(self) -> bool:
         """Return True if raw IQ recording is active."""

@@ -356,6 +356,9 @@ class ReceiverWindow(QMainWindow):
         request, watched like any other.
         """
         if not checked:
+            # The receiver takes back a start it has not carried out,
+            # so a recording asked for a moment ago does not begin
+            # after the button has been let go.
             self.controller.stop_recording()
             self._starting_audio = None
         else:

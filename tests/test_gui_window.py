@@ -29,6 +29,7 @@ from PySide6.QtCore import Qt                                  # noqa: E402
 from fm_radio.device_worker import (                      # noqa: E402
     GAIN, GAIN_MODE, RECORDING, TUNE, DeviceWorker,
 )
+from fm_radio.exceptions import RecordingError            # noqa: E402
 from fm_radio.gui.main_window import (                         # noqa: E402
     METER_FLOOR_DBFS, REFRESH_INTERVAL_MS, ReceiverWindow, _level_percent,
 )
@@ -55,12 +56,19 @@ class FakeController:
         self.auto_gain = True
         self.recording = False
         self.iq_recording = False
+        self.recording_path = None
         self.calls: list[tuple] = []
         self.quit_event = _Event()
         self.station = _Station("TOKYO FM")
         self.presets = [("TOKYO FM", 80.0e6), ("J-WAVE", 81.3e6)]
         self.tune_error: Exception | None = None
         self.record_error: Exception | None = None
+        # As in the controller: bumped by every stop, so a start asked
+        # for before it knows it was overtaken.
+        self.audio_wanted = 0
+        self.iq_wanted = 0
+        self.starting_audio = None
+        self.starting_iq = None
 
     # --- reading ---
     def get_status(self):
@@ -167,44 +175,73 @@ class FakeController:
     def start_recording(self, path=None):
         """Ask the worker, as the real one does, and name it there.
 
-        The name comes from the frequency the worker finds when it gets
-        round to it - not the one the window saw when the button was
-        pressed - which is the whole reason this is a request.
+        Three things the real one does that this has to do too: the
+        name comes from the frequency the worker finds when it gets
+        round to it, a start that a stop overtook does not install, and
+        a second recording over a first is refused rather than reported
+        as a success against a file nobody made.
         """
         self.calls.append(("start_recording", path))
+        wanted = self.audio_wanted
 
         def start():
             if self.record_error is not None:
                 raise self.record_error
+            if wanted != self.audio_wanted:
+                raise RecordingError(
+                    "The recording was stopped before it started")
+            if self.recording:
+                raise RecordingError(
+                    "Already recording; this recording was not started")
             made = path or f"recordings/{self.frequency / 1e6:.1f}MHz.wav"
             self.recording = True
+            self.recording_path = made
             return made
 
         self.last_write = self.device_worker.submit(
             RECORDING, "Starting the recording", start)
+        self.starting_audio = self.last_write
         return self.last_write
 
     def stop_recording(self):
         self.calls.append(("stop_recording",))
+        self.audio_wanted += 1
+        asked_for, self.starting_audio = self.starting_audio, None
+        taken_back = self.device_worker.cancel(asked_for)
+        was = self.recording
         self.recording = False
+        return was or taken_back
 
     def start_iq_recording(self, path=None):
         self.calls.append(("start_iq_recording", path))
+        wanted = self.iq_wanted
 
         def start():
             if self.record_error is not None:
                 raise self.record_error
+            if wanted != self.iq_wanted:
+                raise RecordingError(
+                    "The IQ recording was stopped before it started")
+            if self.iq_recording:
+                raise RecordingError(
+                    "Already recording; this IQ recording was not started")
             made = path or f"recordings/{self.frequency / 1e6:.1f}MHz_IQ.wav"
             self.iq_recording = True
             return made
 
         self.last_write = self.device_worker.submit(
             RECORDING, "Starting the IQ recording", start)
+        self.starting_iq = self.last_write
         return self.last_write
 
     def stop_iq_recording(self):
         self.calls.append(("stop_iq_recording",))
+        self.iq_wanted += 1
+        asked_for, self.starting_iq = self.starting_iq, None
+        taken_back = self.device_worker.cancel(asked_for)
+        was = self.iq_recording
         self.iq_recording = False
+        return was or taken_back
 
 
 class _Event:
@@ -934,3 +971,67 @@ def test_turning_auto_off_is_true_before_the_write_lands(window):
         release.set()
 
 
+
+
+def test_a_recording_let_go_of_before_it_starts_does_not_start(window):
+    """Pressed and pressed again while the receiver was still busy.
+
+    The button is back up, so nothing should be recording - and the
+    start still sitting on the worker must not land behind it.
+    """
+    view, controller = window()
+    release = held(controller)
+    try:
+        view._record_audio.click()
+        asked = controller.last_write
+        view.refresh()
+        assert view._record_audio.isChecked(), "the first press did nothing"
+
+        view._record_audio.click()          # let go before it started
+        view.refresh()
+
+        assert not view._record_audio.isChecked()
+        assert view._recording_status.text() == ""
+    finally:
+        release.set()
+
+    assert asked.wait(5), "nobody answered for the start"
+    assert asked.cancelled, f"it was not taken back: {asked!r}"
+    view.refresh()
+
+    assert not controller.is_recording(), "it started after being let go"
+    assert view._recording_status.text() == ""
+
+
+def test_an_iq_recording_let_go_of_before_it_starts_does_not_start(window):
+    view, controller = window()
+    release = held(controller)
+    try:
+        view._record_iq.click()
+        asked = controller.last_write
+        view._record_iq.click()
+        view.refresh()
+    finally:
+        release.set()
+
+    assert asked.wait(5)
+    assert asked.cancelled, f"it was not taken back: {asked!r}"
+    assert not controller.is_iq_recording()
+
+
+def test_a_second_recording_over_the_first_is_reported_not_claimed(window):
+    """The stand-in refuses it, as the receiver does, and the window says so."""
+    view, controller = window()
+    view._record_audio.click()
+    controller.settled()
+    view.refresh()
+    assert controller.is_recording()
+
+    # A second start without a stop, which only something other than
+    # the button can ask for.
+    asked = controller.start_recording()
+    assert asked.wait(5)
+
+    assert asked.failed, "it claimed a recording it did not make"
+    assert controller.recording_path is not None
+    assert "second" not in str(controller.recording_path)

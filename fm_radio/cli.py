@@ -335,6 +335,8 @@ class CommandLineInterface(threading.Thread):
         """
         if not request.wait(RECORD_REPORT_TIMEOUT_SEC):
             print(f"{what} asked for; the receiver has not answered yet.")
+        elif request.cancelled:
+            print(f"{what} was stopped before it started.")
         elif request.superseded:
             print(f"{what} was dropped: the receiver is stopping.")
         elif request.failed:
@@ -343,9 +345,15 @@ class CommandLineInterface(threading.Thread):
             print(f"{what} started: {request.result}")
 
     def _cmd_record_stop(self, cmd: str) -> bool:
-        """Handle 'record stop' — stop recording."""
-        if self.controller.is_recording():
-            self.controller.stop_recording()
+        """Handle 'record stop' — stop recording, started or not.
+
+        Asked for unconditionally: a recording that was asked for and
+        has not started yet is still a recording to stop, and asking
+        the flag first would leave it to start afterwards.  That is
+        what happens when "record start" printed "has not answered
+        yet" and the user changed their mind.
+        """
+        if self.controller.stop_recording():
             print("Recording stopped.")
         else:
             print("Not currently recording.")
@@ -358,12 +366,11 @@ class CommandLineInterface(threading.Thread):
         return True
 
     def _cmd_iq_record_stop(self, cmd: str) -> bool:
-        """Handle 'iqrec stop' - stop IQ recording."""
-        if self.controller.is_iq_recording():
-            self.controller.stop_iq_recording()
+        """Handle 'iqrec stop' - stop IQ recording, started or not."""
+        if self.controller.stop_iq_recording():
             print("IQ recording stopped.")
         else:
-            print("IQ recording is not active.")
+            print("Not currently IQ recording.")
         return True
 
     def _cmd_agc(self, cmd: str) -> bool:
