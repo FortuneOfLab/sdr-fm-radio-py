@@ -325,6 +325,17 @@ AUDIO_PREROLL_SLACK_FRAMES = AUDIO_FRAMES_PER_BUFFER
 # mode's; light mode's is four times that, which is why the receiver
 # tells the output rather than letting it guess.
 AUDIO_BLOCK_INTERVAL_DEFAULT_SEC = SDR_BLOCK_SIZE / SDR_SAMPLE_RATE
+# Most of the card's own buffer we will wait to fill before playing.
+# PortAudio fills the device's buffer at stream start by calling back
+# as fast as it is answered - five times in the first 39 ms on the
+# USB DAC this was found on, which holds 107 ms - and then says
+# nothing for as long as it takes to play that.  The queue refills
+# during the quiet, so this is not a standing cost; it is one drain
+# at the worst possible moment, and it empties anything smaller than
+# itself.  The number comes from the driver, so there is a ceiling:
+# a device claiming a second and a half would otherwise be a second
+# and a half of silence at startup, worse than the gaps it saves.
+AUDIO_CARD_BUFFER_MAX_SEC = 0.5
 AUDIO_CHANNELS = 2                  # Stereo output channels
 AUDIO_ENQUEUE_TIMEOUT = 0.01       # Timeout for audio queue put (seconds)
 

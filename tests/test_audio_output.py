@@ -23,7 +23,8 @@ from fm_radio.exceptions import RecordingError
 
 import fm_radio.audio_output as ao_mod
 from fm_radio.constants import (
-    AUDIO_CHANNELS, AUDIO_FRAMES_PER_BUFFER, AUDIO_OUTPUT_RATE,
+    AUDIO_CARD_BUFFER_MAX_SEC, AUDIO_CHANNELS, AUDIO_FRAMES_PER_BUFFER,
+    AUDIO_OUTPUT_RATE,
 )
 
 
@@ -295,14 +296,17 @@ def _feed(audio_output, frames, block=BLOCK_FRAMES):
     return sent
 
 
-def _play_out(audio_output, interval_sec, seconds=2.0):
+def _play_out(audio_output, interval_sec, seconds=2.0, card_sec=0.1067):
     """Run the producer and the card against each other on the clock.
 
-    No sleeping and no jitter: blocks go in every ``interval_sec`` of
-    simulated time and the card asks every 1024 frames' worth from
-    the moment the stream starts, which is the schedule both really
-    keep.  The point is that the two schedules do not line up, and
-    that alone is enough to run a thin cushion dry.
+    No sleeping and no jitter.  Blocks go in every ``interval_sec``
+    of simulated time; the card fills its own buffer the instant the
+    stream starts, calling back as fast as it can until it holds
+    ``card_sec``, and asks every 1024 frames' worth after that.  That
+    is what a real one does - five callbacks in the first 39 ms on
+    the USB DAC these numbers come from - and it is the part that was
+    missed: that burst empties any cushion smaller than the card's
+    buffer, at the one moment there is nothing else to draw on.
     """
     rate = float(AUDIO_OUTPUT_RATE)
     callback_sec = AUDIO_FRAMES_PER_BUFFER / rate
@@ -331,8 +335,11 @@ def _play_out(audio_output, interval_sec, seconds=2.0):
         produced = want
         audio_output.enqueue_audio(one, one)
         if t_callback is None and audio_output._playing:
-            # PortAudio asks for the first buffer as soon as it is
-            # started, so the card's clock starts here.
+            # The card fills itself here, back to back, and only
+            # settles into asking on the clock afterwards.
+            for _ in range(int(round(card_sec * rate))
+                           // AUDIO_FRAMES_PER_BUFFER):
+                audio_output.callback(None, AUDIO_FRAMES_PER_BUFFER, {}, 0)
             t_callback = t_block
         t_block += interval_sec
 
@@ -378,6 +385,80 @@ def test_the_card_is_never_left_short_in_either_mode(name, interval):
         assert ao.underruns == 0, (
             "%s mode: %d gaps with nothing late, starting on %d frames"
             % (name, ao.underruns, ao._preroll_frames))
+    finally:
+        ao.cleanup()
+
+
+def _the_stream_class():
+    """The stream class the output will really be handed.
+
+    Taken from the fake pyaudio rather than imported from conftest:
+    tests/ is not a package, so importing it by name would make a
+    second copy of the module and patch a class nobody is given.
+    """
+    return type(ao_mod.pyaudio.PyAudio().open())
+
+
+def _with_a_card_that_holds(monkeypatch, held):
+    """An output whose stream says the device holds ``held`` seconds."""
+    monkeypatch.setattr(_the_stream_class(), "output_latency", held)
+    return ao_mod.AudioOutput()
+
+
+def test_the_cushion_sits_on_top_of_what_the_card_holds(monkeypatch):
+    """Or the card swallows the cushion filling itself.
+
+    PortAudio fills the device's buffer the moment the stream is
+    started - five callbacks back to back on the DAC these numbers
+    come from - and none of that is playing time.
+    """
+    ao = _with_a_card_that_holds(monkeypatch, 0.1067)
+    try:
+        held = int(round(0.1067 * AUDIO_OUTPUT_RATE))
+
+        assert ao._preroll_frames == ao._cushion_frames + held, (
+            "starts on %d; the cushion is %d and the card takes %d"
+            % (ao._preroll_frames, ao._cushion_frames, held))
+    finally:
+        ao.cleanup()
+
+
+@pytest.mark.parametrize("held", [0.0, -1.0])
+def test_a_card_that_says_nothing_useful_is_taken_as_holding_nothing(
+        monkeypatch, held):
+    """Not every host API answers, and none of them have to."""
+    ao = _with_a_card_that_holds(monkeypatch, held)
+    try:
+        assert ao._preroll_frames == ao._cushion_frames
+    finally:
+        ao.cleanup()
+
+
+def test_a_card_that_will_not_say_is_taken_as_holding_nothing(monkeypatch):
+    """A stream that raises is a host API that does not keep the figure."""
+
+    def refuse(self):
+        raise OSError("no such thing here")
+
+    monkeypatch.setattr(_the_stream_class(), "get_output_latency", refuse)
+    ao = ao_mod.AudioOutput()
+    try:
+        assert ao._preroll_frames == ao._cushion_frames
+    finally:
+        ao.cleanup()
+
+
+def test_a_card_that_claims_far_too_much_is_not_believed(monkeypatch):
+    """Waiting out the claim would be worse than the gaps it saves.
+
+    A device that says it holds a second and a half would mean a
+    second and a half of silence before the radio started.
+    """
+    ao = _with_a_card_that_holds(monkeypatch, 1.5)
+    try:
+        ceiling = int(round(AUDIO_CARD_BUFFER_MAX_SEC * AUDIO_OUTPUT_RATE))
+
+        assert ao._preroll_frames == ao._cushion_frames + ceiling
     finally:
         ao.cleanup()
 

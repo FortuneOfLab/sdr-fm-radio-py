@@ -45,6 +45,7 @@ from fm_radio.constants import (
     AUDIO_OUTPUT_RATE, AUDIO_FRAMES_PER_BUFFER, AUDIO_QUEUE_MAXSIZE,
     AUDIO_CHANNELS, AUDIO_ENQUEUE_TIMEOUT,
     AUDIO_PREROLL_SLACK_FRAMES, AUDIO_BLOCK_INTERVAL_DEFAULT_SEC,
+    AUDIO_CARD_BUFFER_MAX_SEC,
     RECORD_SAMPLE_WIDTH, RECORD_MAX_INT16,
     RECORD_QUEUE_MAXSIZE, AUDIO_RECORD_ROTATE_THRESHOLD_BYTES,
 )
@@ -206,15 +207,16 @@ class AudioOutput(AudioOutputInterface):
         # nothing is taking them out before that, so the sum of what
         # has gone in is what is waiting.
         self._frames_ready: int = 0
-        # ...and how many of them there have to be first.  Derived
-        # from how often blocks arrive rather than from how big they
-        # are: the resampler's output length varies by a couple of
-        # hundred frames either way, and a cushion measured against a
-        # short first block would be short too.  See
-        # AUDIO_PREROLL_SLACK_FRAMES for the arithmetic.
-        self._preroll_frames: int = (
+        # ...and how many of them there have to be first.  Set below,
+        # once the stream is open and can say how much the card
+        # holds.  Derived from how often blocks arrive rather than
+        # from how big they are: the resampler's output length varies
+        # by a couple of hundred frames either way, and a cushion
+        # measured against a short first block would be short too.
+        self._cushion_frames: int = (
             int(round(float(block_interval_sec) * float(output_rate)))
             + AUDIO_PREROLL_SLACK_FRAMES)
+        self._preroll_frames: int = self._cushion_frames
 
         # Opened but not started.  A stream that is running is a sound
         # card asking for a buffer every few milliseconds, and until
@@ -234,6 +236,8 @@ class AudioOutput(AudioOutputInterface):
                 stream_callback=self.callback,
                 start=False,
             )
+            self._preroll_frames = (self._cushion_frames
+                                    + self._what_the_card_takes_at_once())
             self.logger.info(f"Audio output initialized: rate={output_rate}Hz, buffer={frames_per_buffer}")
         except OSError as e:
             self.logger.error(f"Failed to initialize audio output: {e}")
@@ -304,6 +308,39 @@ class AudioOutput(AudioOutputInterface):
     def closed(self) -> bool:
         """True once :meth:`cleanup` has run; the stream is gone after that."""
         return self._closed.is_set()
+
+    def _what_the_card_takes_at_once(self) -> int:
+        """Frames the card asks for in one go at stream start.
+
+        PortAudio fills the device's own buffer as soon as the stream
+        is started, calling back as fast as it is answered - five
+        times in the first 39 ms on the USB DAC this was found on,
+        which holds 107 ms - and then asks for nothing at all for as
+        long as it takes to play that.  The queue refills during the
+        quiet, so this is not a standing cost: it is one drain, at
+        the moment there is least to draw on, and it empties any
+        cushion smaller than itself.  Four gaps, on the machine this
+        was reported from.  So the cushion goes on top of it.
+
+        The figure comes from the driver, so it is treated as a claim
+        rather than a fact: nothing, nonsense and silence about it
+        all mean "assume none", and there is a ceiling for a device
+        that claims more than a startup is worth waiting through.
+        """
+        try:
+            held = float(self.stream.get_output_latency())
+        except Exception as e:
+            self.logger.debug("The card would not say how much it holds: %s",
+                              e)
+            return 0
+        if not held > 0.0:
+            return 0
+        if held > AUDIO_CARD_BUFFER_MAX_SEC:
+            self.logger.warning(
+                "The card claims to hold %.0f ms; waiting for %.0f ms of it",
+                held * 1000.0, AUDIO_CARD_BUFFER_MAX_SEC * 1000.0)
+            held = AUDIO_CARD_BUFFER_MAX_SEC
+        return int(round(held * self.output_rate))
 
     def _play_from_now_on(self) -> None:
         """Start the stream, now that there is enough to play.
