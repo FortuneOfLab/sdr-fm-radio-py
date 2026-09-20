@@ -56,6 +56,11 @@ class FakeController:
         self.auto_gain = True
         self.recording = False
         self.iq_recording = False
+        # Stopped but still being written, as the real one is between
+        # the flag going down and the file being closed.  A test that
+        # wants the file finished says so; nothing finishes by itself.
+        self.finishing_audio = False
+        self.finishing_iq = False
         self.recording_path = None
         self.calls: list[tuple] = []
         self.quit_event = _Event()
@@ -88,6 +93,17 @@ class FakeController:
 
     def is_iq_recording(self):
         return self.iq_recording
+
+    def is_finishing_a_recording(self):
+        return self.finishing_audio
+
+    def is_finishing_an_iq_recording(self):
+        return self.finishing_iq
+
+    def finished_the_recordings(self):
+        """What the close thread getting there amounts to, for a test."""
+        self.finishing_audio = False
+        self.finishing_iq = False
 
     def current_station(self):
         return self.station
@@ -204,12 +220,20 @@ class FakeController:
         return self.last_write
 
     def stop_recording(self):
+        """Shut the door and come back, as the real one does.
+
+        The file is not finished when this returns: the flag goes
+        down, and finishing_audio stays up until a test says the close
+        thread got there.
+        """
         self.calls.append(("stop_recording",))
         self.audio_wanted += 1
         asked_for, self.starting_audio = self.starting_audio, None
         taken_back = self.device_worker.cancel(asked_for)
         was = self.recording
         self.recording = False
+        if was:
+            self.finishing_audio = True
         return was or taken_back
 
     def start_iq_recording(self, path=None):
@@ -241,6 +265,8 @@ class FakeController:
         taken_back = self.device_worker.cancel(asked_for)
         was = self.iq_recording
         self.iq_recording = False
+        if was:
+            self.finishing_iq = True
         return was or taken_back
 
 
@@ -1035,3 +1061,50 @@ def test_a_second_recording_over_the_first_is_reported_not_claimed(window):
     assert asked.failed, "it claimed a recording it did not make"
     assert controller.recording_path is not None
     assert "second" not in str(controller.recording_path)
+
+
+def test_a_recording_that_is_being_finished_says_so(window):
+    """The button is up, and the file is still being written.
+
+    Saying nothing at all would be the same silence the window used to
+    keep while a recording was being closed - and the user would have
+    no way to know the file was not ready yet.
+    """
+    view, controller = window()
+    view._record_audio.click()
+    controller.settled()
+    view.refresh()
+    assert "recording audio" in view._recording_status.text()
+
+    view._record_audio.click()          # stop
+    view.refresh()
+
+    assert not view._record_audio.isChecked(), "it is not recording"
+    assert "finishing audio" in view._recording_status.text(), \
+        view._recording_status.text()
+
+    controller.finished_the_recordings()
+    view.refresh()
+
+    assert view._recording_status.text() == "", \
+        view._recording_status.text()
+
+
+def test_a_recording_can_be_started_again_while_the_last_one_finishes(window):
+    """The line says both, and the button is down for the new one."""
+    view, controller = window()
+    view._record_audio.click()
+    controller.settled()
+    view._record_audio.click()          # stop; still finishing
+    view.refresh()
+
+    release = held(controller)
+    try:
+        view._record_audio.click()      # start another
+        view.refresh()
+
+        text = view._recording_status.text()
+        assert "starting audio" in text and "finishing audio" in text, text
+        assert view._record_audio.isChecked()
+    finally:
+        release.set()
