@@ -229,3 +229,61 @@ def test_the_window_still_comes_up_without_pyqtgraph(qt_app, monkeypatch):
         assert band_view.is_available() is False
     finally:
         widget.deleteLater()
+
+
+# ----------------------------------------------------------------------
+# The two halves are of the same band, and line up
+# ----------------------------------------------------------------------
+
+def plot_area(plot):
+    """Where the drawing happens on screen, left and right."""
+    box = plot.getPlotItem().getViewBox()
+    placed = box.mapRectToScene(box.boundingRect())
+    return placed.left(), placed.right()
+
+
+def test_the_same_place_on_screen_is_the_same_frequency_in_both(view,
+                                                                 qt_app):
+    """The trace and the waterfall are read against each other.
+
+    They are different widths the moment their left-hand scales are:
+    a scale that sizes itself to "-50" is not the width of one that is
+    empty, and then a peak in the trace sits over the wrong part of
+    the waterfall.
+    """
+    view.resize(800, 420)
+    view.show()
+    view.show_the_frame(a_frame(bins=64, peak_at=32))
+    qt_app.processEvents()
+
+    assert plot_area(view._plot) == pytest.approx(plot_area(view._fall))
+
+
+def test_the_two_halves_show_the_same_frequencies(view, qt_app):
+    """Lining the areas up is only half of it; the ranges have to match."""
+    view.resize(800, 420)
+    view.show()
+    view.show_the_frame(a_frame(center_hz=80.0e6, span_hz=1.024e6, bins=64))
+    qt_app.processEvents()
+
+    above = view._plot.getPlotItem().getViewBox().viewRange()[0]
+    below = view._fall.getPlotItem().getViewBox().viewRange()[0]
+
+    assert above == pytest.approx(below)
+
+
+def test_they_stay_together_when_the_band_changes(view, qt_app):
+    """Retuning moves both, because they are linked rather than set twice."""
+    view.resize(800, 420)
+    view.show()
+    view.show_the_frame(a_frame(center_hz=80.0e6, span_hz=1.024e6, bins=64))
+    qt_app.processEvents()
+
+    view.show_the_frame(a_frame(center_hz=81.3e6, span_hz=0.25e6, bins=64))
+    qt_app.processEvents()
+
+    above = view._plot.getPlotItem().getViewBox().viewRange()[0]
+    below = view._fall.getPlotItem().getViewBox().viewRange()[0]
+    assert above == pytest.approx(below)
+    assert above[0] == pytest.approx(81.3 - 0.125, abs=1e-6)
+    assert plot_area(view._plot) == pytest.approx(plot_area(view._fall))

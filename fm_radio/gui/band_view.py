@@ -52,6 +52,12 @@ except Exception as _e:                         # pragma: no cover - optional
 else:                                           # pragma: no cover - optional
     _why_not = None
 
+#: How much room the left-hand scale takes, in both halves.  Fixed
+#: and the same for each: a scale that sizes itself to its labels
+#: makes the two plot areas different widths, and then the same place
+#: on screen is a different frequency above and below.
+AXIS_WIDTH: int = 54
+
 #: How tall each half is before the window is stretched.  Enough that
 #: a trace has somewhere to move and a waterfall has some history in
 #: view; the layout gives them any spare room beyond this.
@@ -121,6 +127,10 @@ class BandView(QWidget):
         self._plot.setMenuEnabled(False)
         self._plot.hideButtons()
         self._plot.setLabel("left", "dBFS")
+        self._plot.getAxis("left").setWidth(AXIS_WIDTH)
+        # The waterfall under this one carries the frequencies, and it
+        # is close enough to read them from; twice is clutter.
+        self._plot.getAxis("bottom").setStyle(showValues=False)
         self._plot.setYRange(BOTTOM_DBFS, TOP_DBFS)
         # A minimum, not a maximum.  A layout gives a widget its
         # sizeHint and no more unless it is told otherwise, and
@@ -145,13 +155,20 @@ class BandView(QWidget):
         self._fall.setMouseEnabled(x=False, y=False)
         self._fall.setMenuEnabled(False)
         self._fall.hideButtons()
-        self._fall.hideAxis("left")
+        # Shown rather than hidden, with nothing in it: an axis that
+        # is not there takes no room, and the picture would then be
+        # wider than the trace above it.
+        self._fall.getAxis("left").setStyle(showValues=False)
+        self._fall.getAxis("left").setWidth(AXIS_WIDTH)
         self._fall.setLabel("bottom", "MHz")
         self._fall.setMinimumHeight(WATERFALL_MIN_HEIGHT)
         self._waterfall = pyqtgraph.ImageItem()
         self._waterfall.setLevels((COLOUR_BOTTOM_DBFS, COLOUR_TOP_DBFS))
         self._waterfall.setColorMap(pyqtgraph.colormap.get(COLOUR_MAP))
         self._fall.addItem(self._waterfall)
+        # And the ranges themselves, so the two cannot drift apart
+        # however either of them is asked to move.
+        self._fall.setXLink(self._plot)
         layout.addWidget(self._fall, 1)
 
         # Newest at the top, so the history falls away below it, and
@@ -216,12 +233,12 @@ class BandView(QWidget):
         left = (frame.center_hz - frame.span_hz / 2.0) / 1e6
         self._waterfall.setRect(left, 0.0, frame.span_hz / 1e6,
                                 float(HISTORY_FRAMES))
-        self._fall.setXRange(left, left + frame.span_hz / 1e6, padding=0)
-        # And to the height of the history, or the image sits in a
-        # corner of a plot that has auto-ranged to something else.
+        # One setXRange for both, because they are linked.
+        self._plot.setXRange(left, left + frame.span_hz / 1e6, padding=0)
+        # And the height of the history, or the image sits in a corner
+        # of a plot that has auto-ranged to something else.
         self._fall.setYRange(0.0, float(HISTORY_FRAMES), padding=0)
         # Installing an image is enough to make a view range itself
         # again, and it does not know that the rest of the history is
         # coming.  Both ranges are ours now.
         self._fall.getPlotItem().getViewBox().disableAutoRange()
-        self._plot.setXRange(left, left + frame.span_hz / 1e6, padding=0)
