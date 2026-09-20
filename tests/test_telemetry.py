@@ -25,6 +25,7 @@ def make_snapshot(**overrides) -> StatusSnapshot:
         iq_peak=0.62,
         stereo=True, blend_factor=1.0, pilot_snr_db=19.6, pilot_jitter_db=0.8,
         side_nr_enabled=True,
+        am_depth=0.06,
         level_left_dbfs=-6.2, level_right_dbfs=-7.8,
         block_ms=4.2, block_ms_avg=4.0, block_ms_max=6.1, block_budget_ms=16.0,
         sdr_queue=1, sdr_queue_max=80, slow_blocks=0,

@@ -334,6 +334,9 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         self._phase_acq_count: int = 0
         self._phase_conf: float = 0.0
         self.stereo_phase_side_over_noise_db: float = 0.0
+        # The last block's IQ, restricted to the channel; see
+        # channel_iq.  None until a block has been through.
+        self._channel_iq: np.ndarray | None = None
         self.pilot_residual_center_hz: float = float(STEREO_PILOT_RESIDUAL_CENTER_HZ)
         # Per-variant offsets include the broadcast's +90 degree phase
         # convention plus the DSP correction.  The capture-calibrated
@@ -1324,6 +1327,23 @@ class BaseFMDemodulator(FMDemodulatorInterface):
     # Reset
     # ------------------------------------------------------------------
 
+    @property
+    def channel_iq(self) -> "np.ndarray | None":
+        """The last block's IQ with the neighbours filtered out.
+
+        What the demodulator itself worked from, offered rather than
+        measured again: anything wanting to know how steady the
+        channel is has to look at the channel, and a second filter
+        over the same samples would cost the same and answer a
+        slightly different question.
+
+        None before the first block, and after a reset.  It is the
+        array the last block used, not a copy of it, so it is to be
+        read and not kept: the next block replaces it, and nothing
+        else in the receiver is holding it still.
+        """
+        return self._channel_iq
+
     def reset(self) -> None:
         """Reset shared state and delegate to subclass.
 
@@ -1348,6 +1368,10 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         self.stereo_phase_err_ema = 0.0
         self.stereo_phase_aniso = 0.0
         self.stereo_phase_side_over_noise_db = 0.0
+        # Of the station just left.  A reset is a retune, and whoever
+        # asks next how steady the channel is must not be told about
+        # the one before.
+        self._channel_iq = None
         self._phase_acquired = False
         self._phase_acq_acc = 0j
         self._phase_acq_count = 0
@@ -1478,6 +1502,11 @@ class FMDemodulator(BaseFMDemodulator):
                 self.iq_sos, iq_processed, zi=self._iq_zi,
             )
             iq_filtered = iq_filtered.astype(np.complex64, copy=False)
+            # What the receiver is really working with, for whoever
+            # wants to measure the channel rather than the band: the
+            # neighbours are out of it by here.  A reference, not a
+            # copy; it is read before the next block replaces it.
+            self._channel_iq = iq_filtered
             if self.use_pll_demod:
                 main_output = self.main_pll.process(iq_filtered)
             else:
@@ -1592,6 +1621,11 @@ class FMDemodulatorLight(BaseFMDemodulator):
                 prev = iq_processed[:1]
             else:
                 prev = self._disc_last
+            # The light chain has no channel filter to keep: it runs
+            # at 250 kHz, where the sample rate is about one channel
+            # wide and there are no neighbours in it to remove.  The
+            # DC-blocked input is the channel.
+            self._channel_iq = iq_processed
             ext = np.concatenate((prev, iq_processed))
             fm_demod = np.angle(
                 ext[1:] * np.conj(ext[:-1])

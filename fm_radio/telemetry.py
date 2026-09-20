@@ -120,6 +120,15 @@ class StatusSnapshot:
     pilot_jitter_db: float
     side_nr_enabled: bool
 
+    # --- how clean the channel is ------------------------------------
+    #: How much the envelope moves, as a fraction of its mean.  An FM
+    #: carrier holds its amplitude, so anything above zero is
+    #: something else arriving with it.  0.06 on a well-received
+    #: station, 0.65 on an empty channel; between the two, read with
+    #: the pilot SNR, which says whether there is a signal there at
+    #: all.  See fm_radio.multipath.
+    am_depth: float
+
     # --- audio -------------------------------------------------------
     level_left_dbfs: float
     level_right_dbfs: float

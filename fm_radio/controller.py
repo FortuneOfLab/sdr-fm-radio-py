@@ -50,6 +50,7 @@ from fm_radio.exceptions import (
 from fm_radio.stations import (
     Station, load_stations, favorites, search, in_area, nearest,
 )
+from fm_radio import multipath
 from fm_radio.spectrum import (
     DEFAULT_SPECTRUM_INTERVAL_SEC, SpectrumFrame, SpectrumMaker,
 )
@@ -928,6 +929,14 @@ class FMReceiverController:
         station_name = self._station_name_for(freq_hz)
 
         iq_peak = float(np.max(np.abs(iq_samples))) if iq_samples.size else 0.0
+        # Of the channel, not of the band: the raw block carries the
+        # neighbours too, and on a quiet frequency next to a loud one
+        # they make an empty channel look clean.  The demodulator
+        # hands over what it filtered for itself, so this is a mean
+        # and a standard deviation and nothing else.
+        channel_iq = demod.channel_iq
+        am = (multipath.am_depth(channel_iq)
+              if channel_iq is not None else 0.0)
 
         return StatusSnapshot(
             freq_hz=freq_hz,
@@ -944,6 +953,8 @@ class FMReceiverController:
             pilot_snr_db=demod.pilot_snr_ema,
             pilot_jitter_db=float(demod.pilot_jitter_ema),
             side_nr_enabled=bool(demod.side_nr_enabled),
+
+            am_depth=am,
 
             level_left_dbfs=peak_dbfs(left),
             level_right_dbfs=peak_dbfs(right),
