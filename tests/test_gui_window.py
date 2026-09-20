@@ -1184,6 +1184,12 @@ def test_a_receiver_that_will_not_start_is_shown_in_the_window(qt_app,
     window shows it and goes quiet.  Checking the controller alone
     passes even when nothing is ever shown, because run_window joins
     the starting thread before it returns.
+
+    The window's own refresh timer is stopped for this, so that the
+    only thing that can have shown the failure is the signal.  With
+    it running, a start that takes longer than one interval gets the
+    window refreshed on the timer, and a notice that does nothing at
+    all passes.
     """
     from fm_radio.gui import main_window
 
@@ -1195,6 +1201,11 @@ def test_a_receiver_that_will_not_start_is_shown_in_the_window(qt_app,
     refreshed_on = []
 
     real_refresh = main_window.ReceiverWindow.refresh
+    real_init = main_window.ReceiverWindow.__init__
+
+    def quiet_init(self, *args, **kwargs):
+        real_init(self, *args, **kwargs)
+        self._timer.stop()
 
     def watched_refresh(self):
         refreshed_on.append(threading.current_thread())
@@ -1218,6 +1229,7 @@ def test_a_receiver_that_will_not_start_is_shown_in_the_window(qt_app,
     shown = threading.Event()
     ran = []
 
+    monkeypatch.setattr(main_window.ReceiverWindow, "__init__", quiet_init)
     monkeypatch.setattr(main_window.ReceiverWindow, "refresh", watched_refresh)
     monkeypatch.setattr(main_window.QApplication, "exec", exec_)
 

@@ -463,6 +463,75 @@ def test_a_card_that_claims_far_too_much_is_not_believed(monkeypatch):
         ao.cleanup()
 
 
+def test_an_empty_block_takes_no_place_in_the_queue(audio_output):
+    """The first block out of the demodulator after a reset has none.
+
+    Every retune resets it, so these arrive in runs, and a queue of
+    fifty holds fifty of them exactly as well as it holds fifty
+    blocks of audio: see the test below for what that costs.
+    """
+    empty = np.zeros(0, dtype=np.float32)
+
+    for _ in range(80):
+        audio_output.enqueue_audio(empty, empty)
+
+    assert audio_output.audio_buffer_queue.qsize() == 0
+    assert audio_output.dropped_blocks == 0, "they were not dropped, either"
+
+
+def test_a_queue_that_cannot_take_more_is_enough_to_start_on(audio_output):
+    """Or the radio waits for a cushion that can never arrive.
+
+    The threshold is frames and the queue is blocks, so a run of
+    short blocks can fill the queue without ever reaching it.  Every
+    block after that is dropped, which means the count stops moving,
+    which means the stream never starts: silent until it is
+    restarted, with audio arriving the whole time.
+    """
+    one = np.zeros(1, dtype=np.float32)
+    room = audio_output.audio_buffer_queue.maxsize
+
+    for _ in range(room + 5):
+        audio_output.enqueue_audio(one, one)
+
+    assert audio_output._frames_ready < audio_output._preroll_frames, (
+        "this test is meant to fill the queue before the cushion")
+    assert audio_output._playing, "the radio would never have played"
+    assert audio_output.stream.started is True
+
+
+def test_the_radio_plays_again_after_a_run_of_retunes(audio_output):
+    """The way the empty blocks really arrive, end to end.
+
+    A retune resets the demodulator and its next block carries no
+    audio.  Enough retunes before the stream has started - each one
+    the only block of its generation - and the queue is full of
+    nothing.  What has to happen is that ordinary audio afterwards
+    still gets the radio playing.
+    """
+    from fm_radio.demodulator import FMDemodulator
+    from fm_radio.constants import SDR_BLOCK_SIZE, SDR_SAMPLE_RATE
+
+    demod = FMDemodulator(iq_sample_rate=SDR_SAMPLE_RATE,
+                          final_audio_rate=AUDIO_OUTPUT_RATE, stereo=True)
+    iq = np.zeros(SDR_BLOCK_SIZE, dtype=np.complex64)
+    empties = 0
+    for _ in range(60):
+        demod.reset()                       # a retune
+        left, right = demod.demodulate(demod.process_iq_samples(iq))
+        empties += left.size == 0
+        audio_output.enqueue_audio(left, right)
+
+    assert empties == 60, "the demodulator no longer starts empty"
+    assert not audio_output._playing, "nothing had any audio in it"
+
+    for _ in range(60):                     # the station settles
+        left, right = demod.demodulate(demod.process_iq_samples(iq))
+        audio_output.enqueue_audio(left, right)
+
+    assert audio_output._playing, "the audio came back and the radio did not"
+
+
 @pytest.mark.parametrize("name, interval", MODES)
 def test_the_cushion_covers_a_whole_block_interval(name, interval):
     """Where the number comes from, said as arithmetic.

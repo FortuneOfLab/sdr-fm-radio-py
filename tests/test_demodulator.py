@@ -1485,6 +1485,28 @@ def test_pilot_power_scaling_matches_real_bandpass_convention():
     assert abs(measured - expected) / expected < 0.05
 
 
+def test_the_first_block_after_a_reset_carries_no_audio(rng):
+    """The filters have nothing in them yet, so nothing comes out.
+
+    Written down here because the audio output depends on it: every
+    retune resets the demodulator, so these arrive in runs, and a
+    block with no audio in it must not take a place in the output
+    queue.  See test_audio_output.py.
+    """
+    demod = FMDemodulator(stereo=True)
+    for _ in range(5):
+        demod.demodulate(demod.process_iq_samples(
+            _random_iq(rng, SDR_BLOCK_SIZE)))
+
+    demod.reset()
+    left, right = demod.demodulate(demod.process_iq_samples(
+        _random_iq(rng, SDR_BLOCK_SIZE)))
+
+    assert left.size == 0 and right.size == 0, (
+        "%d frames: the output queue is sized on this being empty"
+        % left.size)
+
+
 def test_reset_clears_all_streaming_state(rng):
     demod = FMDemodulator(stereo=True)
     # Warm every path with random IQ.

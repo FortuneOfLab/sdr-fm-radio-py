@@ -387,10 +387,27 @@ class AudioOutput(AudioOutputInterface):
         try:
             left32 = np.asarray(left, dtype=np.float32, copy=False)
             right32 = np.asarray(right, dtype=np.float32, copy=False)
+        except Exception as e:
+            self.logger.error(f"Error enqueueing audio: {e}", exc_info=True)
+            return
+        if left32.size == 0:
+            # The first block out of the demodulator after a reset
+            # carries no audio at all - the filters have not filled
+            # yet - and every retune resets it.  A slot in the queue
+            # for nothing, and fifty of those is a full queue.
+            return
+        try:
             self.audio_buffer_queue.put((left32, right32), timeout=AUDIO_ENQUEUE_TIMEOUT)
         except queue.Full:
             self._enqueue_drop_count += 1
             self.logger.debug("Audio buffer queue full, dropping audio data")
+            # Nothing more can go in, so waiting for more cannot help.
+            # A stream still holding out for its cushion here would
+            # hold out for good, and drop every block for ever after:
+            # a radio that is silent until it is restarted.  Whatever
+            # is in a full queue is more than the cushion was for.
+            if not self._playing:
+                self._play_from_now_on()
             return
         except Exception as e:
             self.logger.error(f"Error enqueueing audio: {e}", exc_info=True)
