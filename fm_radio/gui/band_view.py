@@ -52,6 +52,12 @@ except Exception as _e:                         # pragma: no cover - optional
 else:                                           # pragma: no cover - optional
     _why_not = None
 
+#: How tall each half is before the window is stretched.  Enough that
+#: a trace has somewhere to move and a waterfall has some history in
+#: view; the layout gives them any spare room beyond this.
+SPECTRUM_MIN_HEIGHT: int = 150
+WATERFALL_MIN_HEIGHT: int = 170
+
 #: How many frames the waterfall remembers.  At ten a second this is
 #: about twelve seconds of history, which is long enough to see a
 #: station fade and short enough to fit above the controls.
@@ -116,7 +122,11 @@ class BandView(QWidget):
         self._plot.hideButtons()
         self._plot.setLabel("left", "dBFS")
         self._plot.setYRange(BOTTOM_DBFS, TOP_DBFS)
-        self._plot.setMaximumHeight(140)
+        # A minimum, not a maximum.  A layout gives a widget its
+        # sizeHint and no more unless it is told otherwise, and
+        # pyqtgraph's hint is small enough that the trace came out
+        # fifteen pixels tall - too flat to see anything move in.
+        self._plot.setMinimumHeight(SPECTRUM_MIN_HEIGHT)
         self._plot.showGrid(x=True, y=True, alpha=0.2)
         self._curve = self._plot.plot([], [])
         # Where the receiver is actually listening, which is not
@@ -129,18 +139,20 @@ class BandView(QWidget):
         self._plot.addItem(self._tuned_to)
         layout.addWidget(self._plot)
 
+        # The waterfall takes whatever room is going: it is the half
+        # that gets better the more of it there is.
         self._fall = pyqtgraph.PlotWidget(parent=self)
         self._fall.setMouseEnabled(x=False, y=False)
         self._fall.setMenuEnabled(False)
         self._fall.hideButtons()
         self._fall.hideAxis("left")
         self._fall.setLabel("bottom", "MHz")
-        self._fall.setMaximumHeight(160)
+        self._fall.setMinimumHeight(WATERFALL_MIN_HEIGHT)
         self._waterfall = pyqtgraph.ImageItem()
         self._waterfall.setLevels((COLOUR_BOTTOM_DBFS, COLOUR_TOP_DBFS))
         self._waterfall.setColorMap(pyqtgraph.colormap.get(COLOUR_MAP))
         self._fall.addItem(self._waterfall)
-        layout.addWidget(self._fall)
+        layout.addWidget(self._fall, 1)
 
         # Newest at the top, so the history falls away below it, and
         # filled with the floor rather than zeros: an empty waterfall
@@ -171,9 +183,10 @@ class BandView(QWidget):
 
     def _remember(self, frame, dbfs: np.ndarray) -> None:
         """Push one row into the waterfall and redraw it."""
-        if (self._history is None or self._bins != dbfs.size
-                or self._span_hz != frame.span_hz
-                or self._center_hz != frame.center_hz):
+        fresh = (self._history is None or self._bins != dbfs.size
+                 or self._span_hz != frame.span_hz
+                 or self._center_hz != frame.center_hz)
+        if fresh:
             # A different band, or a different shape of picture: what
             # is on screen is of somewhere else and does not belong
             # above what comes next.
@@ -182,7 +195,6 @@ class BandView(QWidget):
             self._bins = dbfs.size
             self._span_hz = frame.span_hz
             self._center_hz = frame.center_hz
-            self._place_the_waterfall(frame)
         self._history[:-1] = self._history[1:]
         self._history[-1] = dbfs
         # ImageItem takes (x, y); the history is (time, frequency), so
@@ -190,6 +202,14 @@ class BandView(QWidget):
         self._waterfall.setImage(self._history.T, autoLevels=False,
                                  levels=(COLOUR_BOTTOM_DBFS,
                                          COLOUR_TOP_DBFS))
+        if fresh:
+            # After the image, never before it: setRect works out the
+            # transform from the shape the image has now, and an image
+            # that has not arrived yet is one pixel across.  Asking
+            # first scaled five hundred bins to fit where one had
+            # been, and put all but a corner of the picture off the
+            # side of the view.
+            self._place_the_waterfall(frame)
 
     def _place_the_waterfall(self, frame) -> None:
         """Put the image where its frequencies say it belongs."""

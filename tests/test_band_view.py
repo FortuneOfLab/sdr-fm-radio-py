@@ -151,15 +151,66 @@ def test_a_different_number_of_points_starts_a_new_waterfall(view):
     assert view._history.shape == (HISTORY_FRAMES, 16)
 
 
-def test_the_waterfall_sits_where_its_frequencies_say(view):
-    frame = a_frame(center_hz=80.0e6, span_hz=1.024e6, peak_at=1)
+def test_the_waterfall_covers_exactly_the_band_it_is_of(view):
+    """All four edges, not just the left one.
+
+    setRect works out its transform from the shape the image has when
+    it is called, so calling it before the first image scaled one
+    pixel up to the whole band and then let five hundred bins inherit
+    that scale - the picture ended up four hundred thousand units
+    wide, with a corner of it in the view and the rest outside.
+    """
+    frame = a_frame(center_hz=80.0e6, span_hz=1.024e6, bins=64, peak_at=1)
 
     view.show_the_frame(frame)
 
-    rect = view._waterfall.boundingRect()
+    placed = view._waterfall.mapRectToParent(view._waterfall.boundingRect())
     left = (frame.center_hz - frame.span_hz / 2) / 1e6
-    assert view._waterfall.mapRectToParent(rect).left() == pytest.approx(
-        left, abs=1e-6)
+    assert placed.left() == pytest.approx(left, abs=1e-6)
+    assert placed.width() == pytest.approx(frame.span_hz / 1e6, abs=1e-6)
+    assert placed.top() == pytest.approx(0.0, abs=1e-6)
+    assert placed.height() == pytest.approx(float(HISTORY_FRAMES), abs=1e-6)
+
+
+def test_the_waterfall_is_still_placed_right_after_the_band_changes(view):
+    """Retuning makes a new history, and a new transform with it."""
+    view.show_the_frame(a_frame(center_hz=80.0e6, span_hz=1.024e6, bins=64))
+
+    view.show_the_frame(a_frame(center_hz=81.3e6, span_hz=0.25e6, bins=32))
+
+    placed = view._waterfall.mapRectToParent(view._waterfall.boundingRect())
+    assert placed.left() == pytest.approx((81.3e6 - 0.125e6) / 1e6, abs=1e-6)
+    assert placed.width() == pytest.approx(0.25, abs=1e-6)
+    assert placed.height() == pytest.approx(float(HISTORY_FRAMES), abs=1e-6)
+
+
+def test_a_loud_bin_is_drawn_in_a_different_colour(view, qt_app):
+    """The point of a waterfall.
+
+    Checking the pixels rather than the numbers behind them: the
+    picture was once placed so far outside the view that only its
+    quietest corner showed, and every number involved was right.
+    """
+    import collections
+
+    view.resize(400, 300)
+    view.show()
+    for _ in range(4):
+        view.show_the_frame(a_frame(bins=32, peak_at=16))
+    qt_app.processEvents()
+
+    picture = view._fall.grab().toImage()
+    seen = collections.Counter()
+    for y in range(0, picture.height(), 3):
+        for x in range(0, picture.width(), 3):
+            seen[picture.pixel(x, y) & 0xFFFFFF] += 1
+    # The floor, the loud bin, the axis and the background: what
+    # matters is that the loud one is there at all.
+    common = [colour for colour, _n in seen.most_common(4)]
+
+    assert len(seen) >= 3, f"the waterfall drew {len(seen)} colours"
+    assert max(seen.values()) < sum(seen.values()), "one flat colour"
+    assert len(common) >= 3
 
 
 # ----------------------------------------------------------------------

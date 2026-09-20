@@ -120,11 +120,12 @@ class ReceiverWindow(QMainWindow):
         # Directly under the tuner: it is a picture of where the tuner
         # is, and the controls that follow are about what to do there.
         self._band = BandView(central)
-        layout.addWidget(self._band)
+        # With the stretch, so a taller window is a taller picture
+        # rather than a taller gap under the controls.
+        layout.addWidget(self._band, 1)
         layout.addWidget(self._build_signal())
         layout.addWidget(self._build_gain())
         layout.addWidget(self._build_recording())
-        layout.addStretch(1)
         self.setCentralWidget(central)
 
         self.setStatusBar(QStatusBar(self))
