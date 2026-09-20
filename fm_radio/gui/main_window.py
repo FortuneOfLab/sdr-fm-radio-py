@@ -637,6 +637,12 @@ class ReceiverWindow(QMainWindow):
         pressed.  The receiver decides when it starts, because a tune
         may be in front of it on the worker, and a button that springs
         back up in the meantime reads as a button that did nothing.
+
+        One that has been stopped and is still being written does not
+        count as pressed - it is taking nothing in - but it is still a
+        file being written, and saying nothing about it would be the
+        same silence the window used to keep while a recording was
+        being closed.
         """
         self._starting_audio = _still_going(self._starting_audio)
         self._starting_iq = _still_going(self._starting_iq)
@@ -649,15 +655,26 @@ class ReceiverWindow(QMainWindow):
             # does not emit.  The Auto checkbox is wired to toggled, which it
             # does, and blocks them for that reason.
             button.setChecked(active or starting is not None)
+        self._recording_status.setText(self._what_the_recorders_are_doing(
+            audio, iq))
+
+    def _what_the_recorders_are_doing(self, audio: bool, iq: bool) -> str:
+        """The recording line: what is running, starting and finishing."""
         parts = [name for name, on in (("audio", audio), ("IQ", iq)) if on]
-        waiting = [name for name, asked in
-                   (("audio", self._starting_audio),
-                    ("IQ", self._starting_iq)) if asked is not None]
-        text = "recording " + " + ".join(parts) if parts else ""
-        if waiting:
-            text = ((text + ", " if text else "")
-                    + "starting " + " + ".join(waiting) + "...")
-        self._recording_status.setText(text)
+        starting = [name for name, asked in
+                    (("audio", self._starting_audio),
+                     ("IQ", self._starting_iq)) if asked is not None]
+        finishing = [
+            name for name, still in
+            (("audio", self.controller.is_finishing_a_recording()),
+             ("IQ", self.controller.is_finishing_an_iq_recording()))
+            if still]
+        said = ["recording " + " + ".join(parts)] if parts else []
+        if starting:
+            said.append("starting " + " + ".join(starting) + "...")
+        if finishing:
+            said.append("finishing " + " + ".join(finishing) + "...")
+        return ", ".join(said)
 
     # ------------------------------------------------------------------
 

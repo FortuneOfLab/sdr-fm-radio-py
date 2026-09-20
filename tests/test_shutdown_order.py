@@ -2642,6 +2642,8 @@ def test_a_recording_that_is_closing_does_not_close_the_next_one(receiver,
     audio.record(np.ones((2048, 2), dtype=np.float32))
     audio.stop_recording()
 
+    assert audio.wait_for_the_recording_to_close(20), \
+        "the second recording never finished closing"
     with wave.open(str(second), "rb") as f:
         assert f.getnframes() == 2048, "nothing was written to the second file"
     with wave.open(str(first), "rb") as f:
@@ -2879,6 +2881,8 @@ def test_a_second_recording_is_refused_rather_than_reported_as_started(
     assert audio._record_base_path == str(first), audio._record_base_path
 
     receiver.stop_recording()
+    assert audio.wait_for_the_recording_to_close(20), \
+        "the recording never finished closing"
     with wave.open(str(first), "rb") as f:
         assert f.getnframes() == 2048, "the first recording lost its audio"
 
@@ -3158,7 +3162,9 @@ def test_a_refused_recording_does_not_empty_the_one_that_is_running(
 
     assert receiver.start_recording(str(path)).wait(5)
     audio.record(np.zeros((2048, 2), dtype=np.float32))
-    receiver.stop_recording()                   # flushed and closed
+    receiver.stop_recording()
+    assert audio.wait_for_the_recording_to_close(20), \
+        "the first recording never finished closing"
     was = path.stat().st_size
     assert was > 1000, f"the first recording wrote nothing: {was}"
 
@@ -3186,6 +3192,8 @@ def test_a_second_start_on_the_path_being_recorded_is_refused(receiver,
     assert audio._record_base_path == str(path)
 
     receiver.stop_recording()
+    assert audio.wait_for_the_recording_to_close(20), \
+        "the recording never finished closing"
     with wave.open(str(path), "rb") as f:
         assert f.getnframes() == 2048, "the audio was lost"
 
@@ -3318,10 +3326,12 @@ def test_the_sidecar_of_a_recording_that_has_stopped_is_the_last_word(
     assert writing.wait(5), "the sidecar was never written"
 
     # The whole recording happens and ends while the start's sidecar
-    # is still waiting to be written.
+    # is still waiting to be written.  Stopping is asked for rather
+    # than waited for now, so the file is finished on its own thread.
     receiver.stop_recording()
     go.set()
     assert asked.wait(5)
+    assert audio.wait_for_the_recording_to_close(10),         "the recording never finished closing"
 
     import json
     with open(str(path)[:-4] + ".json", encoding="utf-8") as f:
@@ -3554,3 +3564,132 @@ def test_the_gain_for_the_iq_sidecar_is_read_before_the_install(receiver,
     assert when.count("gain") == 1, f"the gain was read {when.count('gain')} times: {when}"
     assert when.index("gain") < when.index("install"), when
     assert sdr._iq_record_meta["gain_db"] is not None
+
+
+# ----------------------------------------------------------------------
+# Stopping a recording without waiting for the file
+# ----------------------------------------------------------------------
+
+def test_stopping_a_recording_does_not_wait_for_the_flush(receiver,
+                                                           tmp_path):
+    """Fifteen seconds of handshake is not the button's to spend.
+
+    The flush is a round trip through the recording worker, and it
+    used to happen on whichever thread pressed stop - which in the
+    window is the thread that draws it.
+    """
+    audio = receiver.audio_output
+    path = tmp_path / "slow_to_finish.wav"
+    assert receiver.start_recording(str(path)).wait(5)
+    audio.record(np.zeros((2048, 2), dtype=np.float32))
+
+    closing, finish = a_close_that_will_not_finish(audio)
+
+    try:
+        started = time.monotonic()
+        stopped = receiver.stop_recording()
+        waited = time.monotonic() - started
+
+        assert waited < 1.0, f"the button was held for {waited:.1f} s"
+        assert stopped, "it said there was nothing to stop"
+        assert not audio.recording, "it is still taking audio"
+        assert closing.wait(5), "the file was never finished"
+        assert audio.finalising, "it was supposed to still be closing"
+    finally:
+        finish.set()
+
+    assert audio.wait_for_the_recording_to_close(20), \
+        "the recording never finished closing"
+    with wave.open(str(path), "rb") as f:
+        assert f.getnframes() == 2048, "the audio was lost"
+
+
+def test_stopping_an_iq_recording_does_not_wait_either(receiver, tmp_path):
+    """The IQ side has the same handshake."""
+    sdr = receiver.sdr_receiver
+    assert receiver.start_iq_recording(str(tmp_path / "iq.wav")).wait(5)
+
+    started = time.monotonic()
+    stopped = receiver.stop_iq_recording()
+    waited = time.monotonic() - started
+
+    assert waited < 1.0, f"the button was held for {waited:.1f} s"
+    assert stopped
+    assert not sdr.iq_recording
+    assert sdr.wait_for_the_iq_recording_to_close(20)
+
+
+def test_a_recording_stopped_and_started_again_waits_its_turn(receiver,
+                                                              tmp_path):
+    """The second one does not open until the first has let go.
+
+    Stopping comes back before the file is closed, so the next start
+    can be asked for while the last one is still being written.  It
+    waits - that guard was already there - and what it must not do is
+    take over a handle the close is about to reach.
+    """
+    audio = receiver.audio_output
+    first = tmp_path / "first.wav"
+    second = tmp_path / "second.wav"
+    assert receiver.start_recording(str(first)).wait(5)
+    audio.record(np.zeros((2048, 2), dtype=np.float32))
+
+    receiver.stop_recording()
+    asked = receiver.start_recording(str(second))
+
+    assert asked.wait(10), "the second recording never answered"
+    assert not asked.failed, asked.error
+    assert audio.recording
+    assert audio._record_base_path == str(second)
+
+    receiver.stop_recording()
+    assert audio.wait_for_the_recording_to_close(20)
+    with wave.open(str(first), "rb") as f:
+        assert f.getnframes() == 2048, "the first file lost its audio"
+
+
+def test_shutdown_still_waits_for_a_recording_the_user_stopped(receiver,
+                                                               tmp_path):
+    """Nobody waits for the file except the way out.
+
+    That is the bargain: the button does not wait, so cleanup has to.
+    """
+    audio = receiver.audio_output
+    path = tmp_path / "at_the_end.wav"
+    assert receiver.start_recording(str(path)).wait(5)
+    audio.record(np.zeros((2048, 2), dtype=np.float32))
+
+    closing, finish = a_close_that_will_not_finish(audio)
+    receiver.stop_recording()
+    assert closing.wait(5), "the file was never finished"
+
+    done = threading.Event()
+    threading.Thread(target=lambda: (receiver.cleanup(), done.set()),
+                     daemon=True).start()
+    assert not done.wait(0.3), "cleanup went past a file that was open"
+
+    finish.set()
+
+    assert done.wait(20), "cleanup never finished"
+    assert audio.record_wave is None, "the file was left open"
+    with wave.open(str(path), "rb") as f:
+        assert f.getnframes() == 2048
+
+
+def test_the_command_line_says_stopped_before_the_file_is_finished(
+        receiver, tmp_path, capsys):
+    """And that is the truth: it has stopped recording."""
+    audio = receiver.audio_output
+    assert receiver.start_recording(str(tmp_path / "cli.wav")).wait(5)
+    closing, finish = a_close_that_will_not_finish(audio)
+
+    try:
+        started = time.monotonic()
+        receiver.cmd_interface._dispatch("record stop")
+        waited = time.monotonic() - started
+
+        assert "Recording stopped." in capsys.readouterr().out
+        assert waited < 1.0, f"the prompt was held for {waited:.1f} s"
+    finally:
+        finish.set()
+    assert audio.wait_for_the_recording_to_close(20)

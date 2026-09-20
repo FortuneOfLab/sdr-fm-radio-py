@@ -214,8 +214,18 @@ class RecordingsShut:
         If the second of these raises, the first is already recorded and
         will still be finished: that is the whole point of the object.
         """
+        self.take_the_audio()
+        self.take_the_iq()
+
+    def take_the_audio(self) -> bool:
+        """Stop the audio recording taking samples.  Returns what it took."""
         self.audio = self._audio_output.begin_stopping_the_recording()
+        return self.audio
+
+    def take_the_iq(self) -> bool:
+        """Stop the IQ recording taking samples.  Returns what it took."""
         self.iq = self._sdr_receiver.begin_stopping_the_iq_recording()
+        return self.iq
 
     @property
     def anything(self) -> bool:
@@ -624,7 +634,15 @@ class FMReceiverController:
                 f"Already recording; this {what} was not started")
 
     def stop_recording(self) -> bool:
-        """Stop the recording, including one that has not started yet.
+        """Stop the recording, and come straight back.
+
+        Two halves, the same two the tuner has used since it stopped
+        waiting for them.  The door shuts here - a flag under a lock,
+        and from that moment nothing else goes into the file - and the
+        rest, which is a flush handshake with the recording worker and
+        can take fifteen seconds, is left to a thread.  Nobody waits
+        for that: the window that pressed the button carries on
+        drawing, and shutdown waits on the finalising flag instead.
 
         A start asked for before this is not allowed to land after it:
         the request is taken back off the worker if it is still queued,
@@ -632,15 +650,22 @@ class FMReceiverController:
         refuses to install.
 
         Returns:
-            True when there was something to stop.
+            True when there was something to stop.  The file may still
+            be being written when this says so.
         """
         with self._recording_lock:
             self._audio_recording_wanted += 1
             asked_for, self._starting_audio = self._starting_audio, None
-            running = self.audio_output.recording
         taken_back = self.device_worker.cancel(asked_for)
-        self.audio_output.stop_recording()
-        return running or taken_back or asked_for is not None
+        shut = RecordingsShut(self.audio_output, self.sdr_receiver,
+                              self.logger)
+        took = shut.take_the_audio()
+        self._close_the_recordings(shut)
+        return took or taken_back or asked_for is not None
+
+    def is_finishing_a_recording(self) -> bool:
+        """True while a recording is being closed but is no longer one."""
+        return self.audio_output.finalising
 
     def is_starting_a_recording(self) -> bool:
         """True while a recording has been asked for and not started."""
@@ -700,14 +725,23 @@ class FMReceiverController:
         return filename
 
     def stop_iq_recording(self) -> bool:
-        """Stop the IQ recording, including one that has not started yet."""
+        """Stop the IQ recording, and come straight back.
+
+        Split the same way as the audio one, and for the same reason.
+        """
         with self._recording_lock:
             self._iq_recording_wanted += 1
             asked_for, self._starting_iq = self._starting_iq, None
-            running = self.sdr_receiver.iq_recording
         taken_back = self.device_worker.cancel(asked_for)
-        self.sdr_receiver.stop_iq_recording()
-        return running or taken_back or asked_for is not None
+        shut = RecordingsShut(self.audio_output, self.sdr_receiver,
+                              self.logger)
+        took = shut.take_the_iq()
+        self._close_the_recordings(shut)
+        return took or taken_back or asked_for is not None
+
+    def is_finishing_an_iq_recording(self) -> bool:
+        """True while an IQ recording is being closed but is no longer one."""
+        return self.sdr_receiver.iq_finalising
 
     def is_starting_an_iq_recording(self) -> bool:
         """True while an IQ recording has been asked for and not started."""

@@ -174,6 +174,17 @@ class _FakeController:
     def is_recording(self) -> bool:
         return self.recording
 
+    def is_finishing_a_recording(self) -> bool:
+        """Stopped, and the file still being written.
+
+        The same distinction the real one makes: the flag goes down
+        when the closing starts, not when it finishes.
+        """
+        return self.finalising.is_set() and not self.finish.is_set()
+
+    def is_finishing_an_iq_recording(self) -> bool:
+        return False
+
     def is_iq_recording(self) -> bool:
         return False
 
