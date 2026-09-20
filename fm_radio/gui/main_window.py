@@ -77,10 +77,15 @@ METER_FLOOR_DBFS = -60.0
 #: tried would be gone in 50 ms - faster than they can read it.
 NOTICE_SECONDS = 5.0
 
-#: Everything the blend line can say.  The widest of them is measured
-#: and kept, so that the bar beside it does not change width as the
-#: receiver settles.
-_BLEND_WORDS = ("--", "MONO", "STEREO", "0.00")
+#: Everything the blend line can say: the three words, and every
+#: figure between them - 1.00 is never printed, because a full bar
+#: says STEREO.  The widest of them is measured and kept, so that
+#: the bar beside it does not change width as the receiver settles.
+#: All hundred of the figures, rather than one as a stand-in: the
+#: digits are only the same width in a font that says they are, and
+#: "0.88" is wider than "0.00" in one that does not.
+_BLEND_WORDS = ("--", "MONO", "STEREO") + tuple(
+    "%.2f" % (hundredths / 100.0) for hundredths in range(100))
 
 #: Gain slider resolution: the widget is integral, the tuner is in dB.
 _GAIN_SCALE = 10.0

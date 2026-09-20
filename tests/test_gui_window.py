@@ -474,6 +474,37 @@ def test_the_blend_line_does_not_change_width_as_it_settles(window,
             % (while_blending, view._blend.width(), view._mode.text()))
 
 
+def test_every_figure_the_line_can_print_was_measured(window):
+    """The column is sized from _BLEND_WORDS and nothing else.
+
+    So anything the blend line can put in it has to be in there, or
+    the width was measured against a string the label never shows
+    and the column grows for the one it does.  One figure taken as a
+    stand-in for the rest only holds in a font whose digits are all
+    the same width.
+    """
+    from fm_radio.gui import main_window
+
+    controller = FakeController(snapshot())
+    view, _ = window(controller)
+    said = set()
+
+    for hundredths in range(101):
+        for stereo in (True, False):
+            controller.status = snapshot(stereo=stereo,
+                                         blend_factor=hundredths / 100.0)
+            view.refresh()
+            said.add(view._mode.text())
+    controller.status = None
+    view.refresh()
+    said.add(view._mode.text())
+
+    unmeasured = said - set(main_window._BLEND_WORDS)
+    assert not unmeasured, (
+        "the line can say %s, which nothing measured"
+        % sorted(unmeasured))
+
+
 def test_the_bar_empties_when_there_is_no_snapshot(window):
     """A stale bar is the window saying the radio is still playing."""
     controller = FakeController(snapshot(stereo=True, blend_factor=1.0))
