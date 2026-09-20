@@ -126,8 +126,10 @@ class StatusSnapshot:
     #: something else arriving with it.  0.06 on a well-received
     #: station, 0.65 on an empty channel; between the two, read with
     #: the pilot SNR, which says whether there is a signal there at
-    #: all.  See fm_radio.multipath.
-    am_depth: float
+    #: all.  None when there was nothing to measure it on - no block
+    #: yet, silence, or samples that are not finite numbers.  See
+    #: fm_radio.multipath.
+    am_depth: float | None
 
     # --- audio -------------------------------------------------------
     level_left_dbfs: float

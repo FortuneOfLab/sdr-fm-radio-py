@@ -57,7 +57,7 @@ CLEAN_AM_DEPTH: float = 0.06
 NOISE_AM_DEPTH: float = 0.52
 
 
-def am_depth(channel_iq: np.ndarray) -> float:
+def am_depth(channel_iq: np.ndarray) -> float | None:
     """How much the envelope moves, as a fraction of its mean.
 
     ``std|z| / mean|z|``: zero for a carrier that holds its amplitude,
@@ -74,15 +74,31 @@ def am_depth(channel_iq: np.ndarray) -> float:
             away - and 0.646 once the channel was all that was left.
 
     Returns:
-        Zero or more; 0.0 for an empty array, which is what a block
-        too short to say anything about should read as.
+        Zero or more, or None when there is nothing to measure it on:
+        no samples, no amplitude, or samples that are not finite
+        numbers.
+
+        None rather than zero, because zero is what a perfectly
+        steady carrier reads and a broken input is the opposite of
+        that.  A NaN in the block made the mean a NaN, ``not mean >
+        0.0`` was then true, and the worst input the receiver can
+        produce was reported as the best signal it can receive - on
+        a figure whose whole use is telling good reception from bad.
+        The snapshot already says None for a pilot SNR it has not
+        measured; this is the same thing.
     """
     if channel_iq.size == 0:
-        return 0.0
+        return None
     envelope = np.abs(channel_iq)
     mean = float(np.mean(envelope))
-    if not mean > 0.0:
-        # Nothing at all arriving is not an unsteady envelope; it is
-        # no envelope.  Dividing here would be a NaN on the display.
-        return 0.0
-    return float(np.std(envelope) / mean)
+    # One non-finite sample poisons the mean - a NaN anywhere makes
+    # it NaN, an infinity makes it infinite - so this catches the
+    # block as well as the silence.
+    if not np.isfinite(mean) or mean <= 0.0:
+        return None
+    spread = float(np.std(envelope))
+    if not np.isfinite(spread):
+        # Only reachable by overflow on a finite but enormous block;
+        # cheap enough to rule out rather than reason about.
+        return None
+    return spread / mean

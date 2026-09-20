@@ -48,13 +48,52 @@ def test_the_gain_it_arrives_at_makes_no_difference(amplitude):
         quiet, abs=1e-6)
 
 
-def test_nothing_at_all_is_not_an_unsteady_envelope():
-    """Dividing by a mean of zero would be a NaN on the display."""
-    assert am_depth(np.zeros(1024, dtype=np.complex64)) == 0.0
+# ----------------------------------------------------------------------
+# When there is nothing to measure it on
+# ----------------------------------------------------------------------
+
+def test_silence_is_not_a_perfectly_steady_carrier():
+    """Zero is what the best possible signal reads.
+
+    Nothing arriving is not the best possible signal; it is no
+    envelope to be steady, and dividing by its mean would be a NaN
+    on the display.
+    """
+    assert am_depth(np.zeros(1024, dtype=np.complex64)) is None
 
 
-def test_a_block_with_nothing_in_it_reads_as_nothing():
-    assert am_depth(np.zeros(0, dtype=np.complex64)) == 0.0
+def test_a_block_with_no_samples_in_it_is_not_measurable():
+    assert am_depth(np.zeros(0, dtype=np.complex64)) is None
+
+
+@pytest.mark.parametrize("bad", [
+    complex(float("nan"), 0.0),
+    complex(0.0, float("nan")),
+    complex(float("inf"), 0.0),
+    complex(float("-inf"), 0.0),
+    complex(0.0, float("inf")),
+])
+def test_one_sample_that_is_not_a_number_is_not_the_cleanest_signal(bad):
+    """The reading whose whole use is telling good reception from bad.
+
+    A NaN anywhere made the mean a NaN, which is not greater than
+    zero, which was the silence case - so the worst input the
+    receiver can produce was reported as 0.0, the best signal it can
+    receive.  An infinity went the other way and reached the display
+    as a NaN.  Both are the same thing: nothing to measure.
+    """
+    block = fm_carrier(samples=1024)
+    block[512] = bad
+
+    assert am_depth(block) is None
+
+
+def test_the_rest_of_the_block_does_not_rescue_a_bad_sample():
+    """One in sixteen thousand is still one."""
+    block = fm_carrier()
+    block[0] = complex(float("nan"), 0.0)
+
+    assert am_depth(block) is None
 
 
 # ----------------------------------------------------------------------

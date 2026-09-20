@@ -936,7 +936,7 @@ class FMReceiverController:
         # and a standard deviation and nothing else.
         channel_iq = demod.channel_iq
         am = (multipath.am_depth(channel_iq)
-              if channel_iq is not None else 0.0)
+              if channel_iq is not None else None)
 
         return StatusSnapshot(
             freq_hz=freq_hz,

@@ -1338,9 +1338,11 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         slightly different question.
 
         None before the first block, and after a reset.  It is the
-        array the last block used, not a copy of it, so it is to be
-        read and not kept: the next block replaces it, and nothing
-        else in the receiver is holding it still.
+        array the last block used and not a copy of it: the
+        demodulator owns it, and a caller reads it rather than
+        writing to it.  Reading is on the processing thread, which
+        is the thread that made it, and finishes before the next
+        block is handed in.
         """
         return self._channel_iq
 
@@ -1623,8 +1625,11 @@ class FMDemodulatorLight(BaseFMDemodulator):
                 prev = self._disc_last
             # The light chain has no channel filter to keep: it runs
             # at 250 kHz, where the sample rate is about one channel
-            # wide and there are no neighbours in it to remove.  The
-            # DC-blocked input is the channel.
+            # wide.  What it offers is the received band after the DC
+            # blocker rather than a filtered channel, which is as
+            # close to one as this chain has - a neighbour leaking in
+            # is in the reading, and am_depth does not claim to say
+            # what moved the envelope anyway.
             self._channel_iq = iq_processed
             ext = np.concatenate((prev, iq_processed))
             fm_demod = np.angle(

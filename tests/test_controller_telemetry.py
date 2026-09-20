@@ -748,6 +748,28 @@ def test_the_envelope_is_measured_on_the_channel_not_the_band(receiver):
         assert was_the_channel, "something other than the channel was"
 
 
+def test_a_block_that_cannot_be_measured_is_not_reported_as_clean(receiver):
+    """The snapshot carries the not-measurable through as None.
+
+    0.06 is a good station and 0.0 is a perfect one; neither is what
+    a block of NaNs is, and this reading is the one thing that must
+    not call the worst input the best reception.
+    """
+    block = iq_block(receiver)
+    block[7] = complex(float("nan"), 0.0)
+    enqueue(receiver, block)
+    receiver.telemetry.interval_sec = 0.0
+    run_blocks(receiver, 1)
+
+    seen = [receiver.get_status().am_depth]
+    receiver.fm_demodulator._channel_iq = np.full(
+        16, complex(float("nan"), 0.0), dtype=np.complex64)
+    run_blocks(receiver, 1)
+    seen.append(receiver.get_status().am_depth)
+
+    assert None in seen, "a block of NaNs was measured as %s" % seen
+
+
 def test_a_demodulator_that_has_not_run_yet_reads_as_nothing(receiver):
     """channel_iq is None before the first block, and after a retune."""
     assert receiver.fm_demodulator.channel_iq is None
