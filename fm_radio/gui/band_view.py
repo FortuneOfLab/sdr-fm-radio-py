@@ -178,6 +178,13 @@ class BandView(QWidget):
         self._bins: int = 0
         self._span_hz: float = 0.0
         self._center_hz: float = 0.0
+        # When the last row went in.  The window refreshes at 50 ms
+        # and frames are made at 100, so most refreshes are of a
+        # frame already drawn; a row for each of those would run the
+        # history at twice the speed it claims, and a receiver that
+        # stopped producing would fill the whole picture with its
+        # last reading rather than showing that it had stopped.
+        self._drawn_at: float | None = None
 
     # ------------------------------------------------------------------
 
@@ -191,15 +198,38 @@ class BandView(QWidget):
         if self._curve is None:
             return                              # no pyqtgraph, nothing to do
         if frame is None or not frame.dbfs:
-            self._curve.setData([], [])
+            self._nothing_to_show()
             return
         dbfs = np.asarray(frame.dbfs, dtype=np.float32)
         self._curve.setData(frame.frequencies_hz() / 1e6, dbfs)
         self._tuned_to.setPos(frame.center_hz / 1e6)
+        self._tuned_to.setVisible(True)
         self._remember(frame, dbfs)
+
+    def _nothing_to_show(self) -> None:
+        """Empty the picture: there is no band to draw.
+
+        Everything goes, not just the trace.  The frequency readout
+        and the tuning marker move the moment the receiver is asked
+        to, and a waterfall left up beside them is a picture of one
+        station under the name of another.  A retune is the ordinary
+        way here: the generation filter holds frames back until one
+        of the new station has been made.
+        """
+        self._curve.setData([], [])
+        self._tuned_to.setVisible(False)
+        self._waterfall.clear()
+        self._history = None
+        self._bins = 0
+        self._span_hz = 0.0
+        self._center_hz = 0.0
+        self._drawn_at = None
 
     def _remember(self, frame, dbfs: np.ndarray) -> None:
         """Push one row into the waterfall and redraw it."""
+        if self._drawn_at is not None and frame.timestamp <= self._drawn_at:
+            return                  # a frame already in the picture
+        self._drawn_at = frame.timestamp
         fresh = (self._history is None or self._bins != dbfs.size
                  or self._span_hz != frame.span_hz
                  or self._center_hz != frame.center_hz)

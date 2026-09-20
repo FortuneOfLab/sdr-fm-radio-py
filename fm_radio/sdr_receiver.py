@@ -105,6 +105,10 @@ class SDRReceiver(SDRReceiverInterface):
         # Bumped by set_center_frequency, read by the SDR callback and by
         # anything that wants to know whether a block is still current.
         self._tuning_generation: int = 0
+        # The frequency the current generation stands for.  Changed
+        # with the generation, under the same lock, and read with it:
+        # see the_tuning_and_its_frequency.
+        self._generation_freq_hz: float = float(center_freq)
         self._tuning_lock: threading.Lock = threading.Lock()
         # Last values seen from the device, handed out in place of touching
         # it when it is closed or busy.  Written under the lock, read
@@ -205,6 +209,19 @@ class SDRReceiver(SDRReceiverInterface):
         """
         return self._tuning_generation
 
+    def the_tuning_and_its_frequency(self) -> tuple[int, float]:
+        """The current generation and the frequency that generation means.
+
+        Read together, under the lock that changes them together, so
+        that a caller cannot pair one tuning's samples with another
+        tuning's frequency.  ``center_freq`` on its own cannot be
+        used for this: it is set before the hardware write, so a
+        picture built from a block of the old station during those
+        40-200 ms would be labelled with the new one.
+        """
+        with self._tuning_lock:
+            return self._tuning_generation, self._generation_freq_hz
+
     def set_center_frequency(self, freq: float) -> None:
         """Change the center frequency."""
         try:
@@ -222,8 +239,11 @@ class SDRReceiver(SDRReceiverInterface):
             # captured on the new frequency but enqueued before this point
             # is then treated as belonging to the old tuning, which loses a
             # snapshot rather than showing one against the wrong station.
+            # The frequency the new generation stands for goes in with it,
+            # so that the two can be read as one thing.
             with self._tuning_lock:
                 self._tuning_generation += 1
+                self._generation_freq_hz = float(freq)
             self.logger.info(f"Center frequency set to {freq/1e6:.1f} MHz")
         except OSError as e:
             self.logger.error(f"Failed to set center frequency to {freq/1e6:.1f} MHz: {e}")

@@ -717,6 +717,59 @@ def test_the_picture_is_not_made_for_every_block(receiver):
         "a picture was made for more than the first block"
 
 
+def test_a_picture_made_during_a_retune_is_of_the_station_it_came_from(
+        receiver):
+    """The window between the attribute moving and the tuner moving.
+
+    set_center_frequency writes the new frequency to the receiver's
+    own attribute, then spends 40-200 ms on the hardware, then bumps
+    the generation.  For all of that time the attribute says the new
+    station while the samples are still of the old one - and the
+    staleness check cannot catch it, because the generation has not
+    moved either.  So the frequency has to come from the tuner
+    paired with the generation, not from the attribute.
+    """
+    tuned(receiver, 80.0e6)
+    receiver.spectrum.interval_sec = 0.0
+    sdr = receiver.sdr_receiver
+    was = sdr.tuning_generation
+    writing = threading.Event()
+    let_it_finish = threading.Event()
+    real_device = sdr.sdr
+
+    class HeldInTheWrite:
+        """The device, with its tuning write held open."""
+
+        def __getattr__(self, name):
+            return getattr(real_device, name)
+
+        def __setattr__(self, name, value):
+            if name == "center_freq":
+                writing.set()
+                assert let_it_finish.wait(5), "the test never let go"
+            setattr(real_device, name, value)
+
+    sdr.sdr = HeldInTheWrite()
+    asked = receiver.tune(81.3e6)
+    try:
+        assert writing.wait(5), "the write never started"
+        # The state the finding is about, before anything is asked of it.
+        assert sdr.center_freq == 81.3e6, "the attribute has not moved yet"
+        assert sdr.tuning_generation == was, "the generation moved too soon"
+
+        receiver._publish_spectrum(iq_block(receiver), time.monotonic(), was)
+        frame = receiver.get_spectrum()
+    finally:
+        let_it_finish.set()
+        asked.wait(5)
+        sdr.sdr = real_device
+
+    assert frame is not None, "no picture was published"
+    assert frame.center_hz == pytest.approx(80.0e6), (
+        "samples of 80.0 MHz published as %.1f MHz"
+        % (frame.center_hz / 1e6))
+
+
 def test_a_picture_from_before_a_retune_is_never_handed_out(receiver):
     """The same rule the snapshots follow, for the same reason.
 

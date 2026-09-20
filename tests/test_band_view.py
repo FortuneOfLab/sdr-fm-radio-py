@@ -11,6 +11,8 @@ display.
 
 from __future__ import annotations
 
+import itertools
+
 import numpy as np
 import pytest
 
@@ -26,14 +28,25 @@ pyqtgraph = pytest.importorskip("pyqtgraph",
                                 reason="the spectrum is optional")
 
 
+#: Ten a second, as the receiver makes them.  Frames made one after
+#: another carry different times, and the view uses that to tell a
+#: new one from the same one shown again - so a helper that stamped
+#: them all alike would be testing something that never happens.
+_a_tenth_of_a_second = itertools.count(1.0, 0.1)
+
+
 def a_frame(center_hz: float = 80.0e6, span_hz: float = 1.024e6,
             bins: int = 8, peak_at: int | None = None,
-            timestamp: float = 1.0) -> SpectrumFrame:
-    """A small frame, with one point louder than the rest if asked."""
+            timestamp: float | None = None) -> SpectrumFrame:
+    """A small frame, with one point louder than the rest if asked.
+
+    Each one is later than the last unless a time is given.
+    """
     dbfs = [-90.0] * bins
     if peak_at is not None:
         dbfs[peak_at] = -10.0
-    return SpectrumFrame(center_hz, span_hz, tuple(dbfs), timestamp)
+    when = next(_a_tenth_of_a_second) if timestamp is None else timestamp
+    return SpectrumFrame(center_hz, span_hz, tuple(dbfs), when)
 
 
 @pytest.fixture
@@ -69,12 +82,45 @@ def test_no_frame_leaves_nothing_drawn(view):
     assert x is None or len(x) == 0
 
 
-def test_an_empty_frame_leaves_nothing_drawn(view):
-    """A block too short to transform gives one of these."""
-    view.show_the_frame(SpectrumFrame(80.0e6, 1.024e6, (), 1.0))
+@pytest.mark.parametrize("nothing", [
+    None,
+    SpectrumFrame(80.0e6, 1.024e6, (), 1.0),
+])
+def test_nothing_to_show_takes_the_whole_picture_down(view, nothing):
+    """Not just the trace: the waterfall is of a station too.
+
+    This is what a retune looks like from here - frames are held
+    back until one of the new station has been made - and the
+    frequency beside it has already moved.  A waterfall of the old
+    one left up under the new name is the window saying the receiver
+    is somewhere it is not.
+    """
+    view.show_the_frame(a_frame(center_hz=81.3e6, peak_at=1))
+    assert view._history is not None, "nothing was drawn to begin with"
+
+    view.show_the_frame(nothing)
 
     x, _y = view._curve.getData()
-    assert x is None or len(x) == 0
+    assert x is None or len(x) == 0, "the trace is still up"
+    assert view._history is None, "the history is still there"
+    assert view._waterfall.image is None, "the waterfall is still up"
+    assert not view._tuned_to.isVisible(), "it still marks a station"
+
+
+def test_the_next_station_draws_from_an_empty_waterfall(view):
+    """And what comes after the gap is only of the new one."""
+    view.show_the_frame(a_frame(center_hz=81.3e6, bins=8, peak_at=1))
+    view.show_the_frame(None)
+
+    view.show_the_frame(a_frame(center_hz=80.0e6, bins=8, peak_at=6))
+
+    assert view._history is not None
+    assert view._center_hz == 80.0e6
+    rows_with_anything_in = int(
+        (view._history.max(axis=1) > BOTTOM_DBFS).sum())
+    assert rows_with_anything_in == 1, (
+        "%d rows carry a reading; only the new one should"
+        % rows_with_anything_in)
 
 
 # ----------------------------------------------------------------------
@@ -184,33 +230,107 @@ def test_the_waterfall_is_still_placed_right_after_the_band_changes(view):
     assert placed.height() == pytest.approx(float(HISTORY_FRAMES), abs=1e-6)
 
 
+def where_on_screen(plot, mhz: float, row: float):
+    """The pixel in *plot* that shows *mhz* at history row *row*."""
+    from PySide6.QtCore import QPointF
+
+    box = plot.getPlotItem().getViewBox()
+    scene = box.mapViewToScene(QPointF(float(mhz), float(row)))
+    return plot.mapFromScene(scene)
+
+
 def test_a_loud_bin_is_drawn_in_a_different_colour(view, qt_app):
-    """The point of a waterfall.
+    """The point of a waterfall, asked of the pixels that show it.
 
-    Checking the pixels rather than the numbers behind them: the
-    picture was once placed so far outside the view that only its
-    quietest corner showed, and every number involved was right.
+    Of the two pixels that carry the claim, not of how many colours
+    the widget has altogether: axis, labels and background make
+    three on their own, so counting them passes with the waterfall
+    hidden.  The picture was once placed so far outside the view
+    that only its quietest corner showed, and every number involved
+    was right.
     """
-    import collections
-
+    bins, peak_at, rows = 32, 16, 20
     view.resize(400, 300)
     view.show()
-    for _ in range(4):
-        view.show_the_frame(a_frame(bins=32, peak_at=16))
+    # Twenty rows, not one: a hundred and twenty of them share the
+    # height of the picture, so a single row is about one pixel tall
+    # and which pixel it lands on is a rounding question.
+    for _ in range(rows):
+        frame = a_frame(bins=bins, peak_at=peak_at)
+        view.show_the_frame(frame)
     qt_app.processEvents()
 
     picture = view._fall.grab().toImage()
-    seen = collections.Counter()
-    for y in range(0, picture.height(), 3):
-        for x in range(0, picture.width(), 3):
-            seen[picture.pixel(x, y) & 0xFFFFFF] += 1
-    # The floor, the loud bin, the axis and the background: what
-    # matters is that the loud one is there at all.
-    common = [colour for colour, _n in seen.most_common(4)]
+    megahertz = frame.frequencies_hz() / 1e6
+    # The newest rows are the top ones; look at the middle of them.
+    row = HISTORY_FRAMES - rows / 2.0
+    loud = where_on_screen(view._fall, megahertz[peak_at], row)
+    quiet = where_on_screen(view._fall, megahertz[peak_at // 2], row)
 
-    assert len(seen) >= 3, f"the waterfall drew {len(seen)} colours"
-    assert max(seen.values()) < sum(seen.values()), "one flat colour"
-    assert len(common) >= 3
+    for name, point in (("loud", loud), ("quiet", quiet)):
+        assert picture.rect().contains(point), (
+            "the %s bin is at %s, outside a %dx%d picture"
+            % (name, point, picture.width(), picture.height()))
+
+    loud_colour = picture.pixel(loud) & 0xFFFFFF
+    quiet_colour = picture.pixel(quiet) & 0xFFFFFF
+    background = picture.pixel(2, 2) & 0xFFFFFF
+
+    assert loud_colour != quiet_colour, (
+        "the loud bin and the floor are both #%06x" % loud_colour)
+    assert loud_colour != background, "the loud bin is the background"
+    assert quiet_colour != background, "the floor is the background"
+
+
+def test_the_same_frame_shown_again_does_not_move_the_history(view):
+    """The window refreshes at 50 ms; frames are made at 100.
+
+    So half of what the window draws has been drawn already.  A row
+    for each of those would run the history at twice the speed its
+    scale claims, and twelve seconds of band would be six.
+    """
+    frame = a_frame(bins=8, peak_at=3)
+    view.show_the_frame(frame)
+    after_one = view._history.copy()
+
+    for _ in range(20):
+        view.show_the_frame(frame)
+
+    assert np.array_equal(view._history, after_one), (
+        "the picture moved on without a new frame")
+
+
+def test_a_receiver_that_has_stopped_does_not_fill_the_picture(view):
+    """The publisher holds its last frame and keeps handing it out.
+
+    So a receiver that has stopped making them looks, from here,
+    exactly like one making the same one over and over.  Twelve
+    seconds later the whole picture would be that one reading - the
+    waterfall saying the band looked like this all along, about a
+    receiver that stopped after the first frame.
+    """
+    last = a_frame(bins=8, peak_at=3)
+
+    for _ in range(HISTORY_FRAMES * 2):
+        view.show_the_frame(last)
+
+    rows_with_anything_in = int(
+        (view._history.max(axis=1) > BOTTOM_DBFS).sum())
+    assert rows_with_anything_in == 1, (
+        "%d of %d rows carry the one reading there has been"
+        % (rows_with_anything_in, HISTORY_FRAMES))
+
+
+def test_a_later_frame_does_move_the_history(view):
+    """The other half of it: a new frame is a new row."""
+    view.show_the_frame(a_frame(bins=8, peak_at=3))
+    after_one = view._history.copy()
+
+    view.show_the_frame(a_frame(bins=8, peak_at=5))
+
+    assert not np.array_equal(view._history, after_one), (
+        "a new frame did not reach the picture")
+    assert view._history[-1].argmax() == 5
 
 
 # ----------------------------------------------------------------------

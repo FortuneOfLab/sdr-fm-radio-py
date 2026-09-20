@@ -834,11 +834,25 @@ class FMReceiverController:
         just had, and only when one is due - measured at a third of a
         millisecond against the sixteen the block has.  A failure here
         is a display that does not update; it is not worth a block.
+
+        The frequency comes from the tuner paired with the generation
+        it belongs to, not from ``center_freq``: that is set before
+        the hardware write and the generation is bumped after it, so
+        for the 40-200 ms in between a picture of the old station
+        would be labelled with the new frequency - and would pass the
+        staleness check on the way out, because the generation has
+        not moved yet either.
         """
+        current, centre_hz = self.sdr_receiver.the_tuning_and_its_frequency()
+        if current != generation:
+            # Samples from a station we have left.  The publisher
+            # would drop the frame on the way out; building it first
+            # would be a third of a millisecond of the block's
+            # sixteen spent on a picture nobody sees.
+            return
         try:
             self.spectrum.publish(
-                self._spectrum_maker.frame(
-                    iq_samples, self.sdr_receiver.center_freq, now),
+                self._spectrum_maker.frame(iq_samples, centre_hz, now),
                 generation)
         except Exception as e:
             self.logger.error("Could not build a spectrum: %s", e,
