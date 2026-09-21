@@ -5,12 +5,13 @@ floors for the objective metrics.  The floors sit below the measured
 values (clean run at CNR=35: Sep 70.3/72.3 dB, THD+N -57.2 dB, SNR
 30.4 dB with pre-emphasis on) so they are robust across platforms and
 RNG noise draws while still catching structural regressions.  How far
-below depends on the metric: separation by 12-20 dB, THD by 8-12, and
-SNR by 6-11 - the thinnest of all being the 6.4 dB on the clean and
-clock scenarios, where the measurement is set by the CNR rather than
-by the receiver and the floor has not moved in a long time.  See the
-FLOORS comment below for the per-scenario measurements and the
-history across tuning changes.
+below depends on the metric, taking the worse channel of each pair as
+the floors do: separation by 12-20 dB, THD by 8-12, and SNR by 5-7 -
+the thinnest of all being the 4.9 dB on dc-notch's right channel,
+where the measurement is set by the CNR rather than by the receiver
+and the floor has not moved in a long time.  See the FLOORS comment
+below for the per-scenario measurements and the history across tuning
+changes.
 
 The impaired scenarios exist because a pristine synthetic channel can
 hide whole bug classes: the FFT-Hilbert block-edge defect fixed in
@@ -83,20 +84,31 @@ SCENARIOS = {
 # same measurements at 0 Hz are in the dc-notch row, and every number
 # recorded here before that date was taken there):
 #
-#   scenario       sepL>R  sepR>L    thdL    snrL
-#   clean            70.3    72.3   -57.2    30.4
-#   clock-200ppm     70.5    73.3   -57.2    30.4
-#   tuning-30kHz     56.2    63.5   -38.7    35.3
-#   multipath        37.3    37.2   -55.9    31.1
-#   dc-notch         50.2    57.3   -40.3    31.1
+#   scenario       sepL>R  sepR>L    thdL    thdR    snrL    snrR
+#   clean            70.3    72.3   -57.2   -57.2    30.4    30.4
+#   clock-200ppm     70.5    73.3   -57.2   -57.2    30.4    30.4
+#   tuning-30kHz     56.2    63.5   -38.7   -39.4    35.3    31.2
+#   multipath        37.3    37.2   -55.9   -55.9    31.1    31.1
+#   dc-notch         50.2    57.3   -40.3   -40.9    31.1    28.9
+#
+# Both channels, because each floor is asserted against both.  The
+# margin left on the worse one, per scenario and metric:
+#
+#   scenario         sep    thd    snr
+#   clean           20.3   12.2    6.4
+#   clock-200ppm    20.5   12.2    6.4
+#   tuning-30kHz    16.2    8.7    7.2
+#   multipath       12.2   10.9    7.1
+#   dc-notch        15.2    8.3    4.9
 #
 # The separation floors sit 12-20 dB under those, which is where
 # they were before relative to what was then being measured, and
 # they now discriminate far harder: with the phase corrector
 # disabled the clean scenario measures 5.0 dB of separation rather
-# than 70.  The THD floors have less room where the scenario's own
-# THD is worse - 8.7 dB for tuning-30kHz and 8.3 for dc-notch,
-# against 11-12 for the rest.
+# than 70.  The SNR floor of 24 dB is the one this PR did not move
+# and the one with least room - 4.9 dB on dc-notch's right channel -
+# because at CNR 35 that measurement is set by the CNR and not by
+# the receiver.
 # History of the clean row, all at 0 Hz and so all of the notch:
 # 2026-07 (windowed-median metrics, neutral HF ceilings and blend
 # stability, analog-exact pre-emphasis) Sep ~43/57, THD -36.9, SNR
