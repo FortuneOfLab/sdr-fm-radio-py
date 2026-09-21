@@ -171,6 +171,29 @@ STEREO_PHASE_SIDE_GATE_DB = -18.0   # Minimum demodulated side power relative to
                                     # noiseless-mono residue median = -32 dB, mono at
                                     # CNR 20 = -22 dB (also blocked by the anisotropy
                                     # gate), so -18 leaves ~7 dB of margin both ways.
+                                    # On a clean, loud signal this is the gate
+                                    # that closes on a near-mono programme, while
+                                    # the side-over-noise gate stays wide open -
+                                    # worth knowing before reading anything into a
+                                    # station that never acquires.  Measured
+                                    # 2026-09-21 off the DC notch (at zero carrier
+                                    # offset these readings are worth nothing; see
+                                    # A_REAL_OFFSET_HZ in test_e2e_quality): the
+                                    # crossing is this gate's own, at -18, with a
+                                    # programme of nominal -15 dB acquiring and one
+                                    # of -20 dB not, the other gate passing every
+                                    # block either way.  Below it the tracker holds
+                                    # the hardware-trim prior, which costs how far
+                                    # that prior is from the truth - and the closest
+                                    # thing to the truth these captures give is the
+                                    # axis their content-bearing blocks measure,
+                                    # which is within +-7 deg of the prior on all
+                                    # four: 0.06 dB of side level.  That is the
+                                    # clean, loud corner only - block by block on
+                                    # real programme the two gates share the work.
+                                    # The tables are in SPECIFICATION 3.3, under
+                                    # stereo demodulation, and the reproducible
+                                    # numbers in test_e2e_quality.
 STEREO_PHASE_ACQUIRE_BLOCKS = 6     # Consecutive informative blocks (~100 ms) required
                                     # before cold-start acquisition; the initial angle is
                                     # the doubled-angle circular mean over the streak,
@@ -206,6 +229,35 @@ STEREO_PHASE_SIDE_OVER_NOISE_DB = 26.0  # Minimum demodulated side power above t
                                     # back to the hardware-trim prior of 0, which the
                                     # real-capture check confirms (tracker med -1.1 to
                                     # -3.6 deg on all three reference captures).
+                                    # Re-checked 2026-09-21, the question left open
+                                    # by PR #49 (the cleanest of three stations
+                                    # never acquired, so was this set too high).  It
+                                    # is not, and what brackets it was measured from
+                                    # both sides.  Below: silence has to stay under
+                                    # it - 2 s, seed 0, carrier offset 1237 Hz, CNR
+                                    # 45/35/25/15 read med 22.7 / max 24.2, and the
+                                    # same at 0 and 60 Hz.  Above: a quiet passage
+                                    # of real stereo programme has to get through -
+                                    # 32 dB below full deviation, side/mono -13.9 dB
+                                    # so the other gate is open, reads 27 dB and
+                                    # acquires, while against a 29 dB gate it never
+                                    # does.  So 20 is too low and 29 too high; 26
+                                    # clears both, which is not to say it is the
+                                    # only value that would.  A quiet passage is
+                                    # where this gate does its work - a narrow one
+                                    # has already been refused by the side/mono gate
+                                    # (see its comment).
+                                    # Both sides are pinned by tests.  The
+                                    # reproducible numbers live in test_e2e_quality
+                                    # and the tables in SPECIFICATION 3.3, under
+                                    # stereo demodulation: which gate turns which
+                                    # block away on the reference captures, the
+                                    # axis the refused blocks measure for
+                                    # themselves (-17.0 deg at a concentration of
+                                    # 0.65 on optical 82.5, against -7.0 at 1.00
+                                    # for the ones let through), and
+                                    # what opening this gate does to the audio
+                                    # (-50.7 to -69.6 dB on the four captures).
 STEREO_PHASE_NOISE_CONF_RAMP_DB = 6.0  # Confidence ramp above the side-over-noise
                                     # gate: an update's weight scales linearly from 0
                                     # at the gate to 1 at gate + this, multiplied with
