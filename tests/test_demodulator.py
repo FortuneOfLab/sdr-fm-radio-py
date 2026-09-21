@@ -166,15 +166,15 @@ def test_final_audio_lowpass_is_common_and_reconverges_after_stereo(rng):
     so L/R sample counts, output grid and filter states re-match after
     genuinely divergent stereo history.
 
-    Side NR is disabled here to ISOLATE that local contract: with the
-    shared mid/side NR tail (issue #29) the first mono blocks after a
-    stereo -> mono switch legitimately return L != R while the NR
-    flushes the previous side content - the end-to-end switch
-    behaviour has its own test
+    The internal states are checked on the same block as they always
+    were, the second mono one.  Only the L == R check waits: it is
+    downstream of the shared mid/side NR tail (issue #29), which the
+    mono path runs in bypass and which legitimately returns L != R
+    while it flushes the side content the stereo blocks left in it.
+    The end-to-end switch behaviour has its own test
     (test_mono_stereo_switches_are_continuous).
     """
     d = FMDemodulator(stereo=True)
-    d.side_nr_enabled = False
     assert np.array_equal(d.lp_audio_l.taps, d.lp_audio_r.taps)
     assert d.lp_audio_l is not d.lp_audio_r
 
@@ -187,13 +187,15 @@ def test_final_audio_lowpass_is_common_and_reconverges_after_stereo(rng):
     # 2) Switch to mono, 3) process standard blocks (3072 samples).
     # The mono path now returns (left-chain, right-chain) outputs, so
     # the FIRST block still carries each chain's divergent-history
-    # transient; by the second block every state has re-matched and
-    # the returned channels must be bit-identical.
+    # transient; by the second block every state has re-matched.
     d.stereo = False
     d.demodulate(rng.standard_normal(3072).astype(np.float64) * 0.1)
     left, right = d.demodulate(rng.standard_normal(3072).astype(np.float64) * 0.1)
 
-    # 4) L/R chains re-matched.
+    # 4) L/R chains re-matched, by the SECOND mono block: everything
+    # asserted here is upstream of the mid/side tail and has no
+    # reason to take any longer than it did before that tail was
+    # shared.
     rl, rr = d._audio_resampler_l, d._audio_resampler_r
     assert rl._in_total == rr._in_total
     assert rl._out_emitted == rr._out_emitted
@@ -204,6 +206,14 @@ def test_final_audio_lowpass_is_common_and_reconverges_after_stereo(rng):
     # pole^n (~1e-100 after one 768-sample block) - tolerance covers it.
     assert abs(d.deemph_left.prev_input - d.deemph_right.prev_input) < 1e-12
     assert abs(d.deemph_left.prev_output - d.deemph_right.prev_output) < 1e-12
+
+    # 5) The returned channels are bit-identical once the tail has
+    # flushed the side content the stereo blocks left in it: one
+    # audio block is 768 samples at 48 kHz and the tail holds
+    # frame - hop = 768 of them, so it is empty after two more.
+    for _ in range(2):
+        left, right = d.demodulate(
+            rng.standard_normal(3072).astype(np.float64) * 0.1)
     assert np.array_equal(left, right)
 
 

@@ -71,12 +71,17 @@ def test_audio_rate_preserves_tone_pitch_and_stream_grid(cls, rate):
 
     def run(block):
         d = cls(final_audio_rate=rate, stereo=False)
-        d.side_nr_enabled = False
         y = np.concatenate([d.demodulate(mpx[i:i + block])[0]
                             for i in range(0, mpx.size, block)])
-        # The streaming tail is held until future samples arrive.
+        # The streaming tail is held until future samples arrive:
+        # the resampler holds its half length, and the mid/side NR
+        # tail - which is in the chain in every mode, bypassed or
+        # not - holds between frame - hop and frame samples, because
+        # it emits whole hops.
         tail = d._audio_resampler_l._half_len * rate / fs
-        assert abs(y.size - (rate - tail)) <= 1
+        nr = d.side_nr
+        held = rate - y.size
+        assert tail + nr.frame - nr.hop - 1 <= held <= tail + nr.frame + 1
         return y
 
     small, whole = run(997), run(fs)

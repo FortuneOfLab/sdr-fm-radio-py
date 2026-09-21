@@ -412,8 +412,8 @@ def _run_demod_from_iq(
     if disable_iq_phase_correction:
         demod.iq_phase_correction_enabled = False
     if mono_delay_samples is not None and int(mono_delay_samples) >= 0:
+        # The setter starts a new delay line of the right length.
         demod.mono_delay_samples = int(mono_delay_samples)
-        demod._mono_delay_state = np.zeros(demod.mono_delay_samples, dtype=np.float32)
     # Synthetic source: replace the hardware-trimmed default with the
     # variant's DSP-intrinsic offset unless the caller overrides (see
     # _dsp_subcarrier_offset_deg; also applies to the composite-direct
@@ -475,8 +475,8 @@ def _run_demod_diag_iq(
     if disable_iq_phase_correction:
         demod.iq_phase_correction_enabled = False
     if mono_delay_samples is not None and int(mono_delay_samples) >= 0:
+        # The setter starts a new delay line of the right length.
         demod.mono_delay_samples = int(mono_delay_samples)
-        demod._mono_delay_state = np.zeros(demod.mono_delay_samples, dtype=np.float32)
     if subcarrier_phase_offset_deg is not None:
         demod.subcarrier_phase_offset_rad = np.deg2rad(float(subcarrier_phase_offset_deg))
     if lr_high_max_gain is not None:
@@ -592,8 +592,8 @@ def _run_demod_from_composite(
     if disable_iq_phase_correction:
         demod.iq_phase_correction_enabled = False
     if mono_delay_samples is not None and int(mono_delay_samples) >= 0:
+        # The setter starts a new delay line of the right length.
         demod.mono_delay_samples = int(mono_delay_samples)
-        demod._mono_delay_state = np.zeros(demod.mono_delay_samples, dtype=np.float32)
     # Synthetic source: replace the hardware-trimmed default with the
     # variant's DSP-intrinsic offset unless the caller overrides (see
     # _dsp_subcarrier_offset_deg; also applies to the composite-direct

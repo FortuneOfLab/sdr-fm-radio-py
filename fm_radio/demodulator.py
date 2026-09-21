@@ -360,8 +360,8 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         self.subcarrier_phase_offset_rad: float = np.deg2rad(
             subcarrier_phase_offset_deg + HARDWARE_SUBCARRIER_PHASE_TRIM_DEG
         )
-        self.mono_delay_samples: int = max(0, int(STEREO_MONO_DELAY_SAMPLES))
-        self._mono_delay_state: np.ndarray = np.zeros(self.mono_delay_samples, dtype=np.float32)
+        # Through the property below, which builds the delay line.
+        self.mono_delay_samples = max(0, int(STEREO_MONO_DELAY_SAMPLES))
         self._pilot_phase_last: float | None = None
         self._pilot_mix_phase: float = 0.0
         self.lr_side_cap_gain: float = 1.0
@@ -372,6 +372,9 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         self.lr_super_high_max_gain: float = float(LR_SUPER_HIGH_MAX_GAIN)
 
         # --- Side-channel STFT noise reduction (post de-emphasis) ---
+        # False means "computed but not applied", not removed: the
+        # tail stays in the chain, keeps its model current and
+        # leaves the audio alone.  See _apply_side_nr.
         self.side_nr_enabled: bool = bool(SIDE_NR_ENABLE)
         self.side_nr = SideNoiseReducer(
             sample_rate=self.final_audio_rate,
@@ -575,6 +578,37 @@ class BaseFMDemodulator(FMDemodulatorInterface):
                 )[1:]
             self._pilot_phase_last = float(pilot_phase[-1])
         return pilot_phase, meas_in
+
+    @property
+    def mono_delay_samples(self) -> int:
+        """Mono-path delay compensation, in composite samples."""
+        return self._mono_delay_samples
+
+    @mono_delay_samples.setter
+    def mono_delay_samples(self, samples: int) -> None:
+        """Set the delay and, if it changed, start a new delay line.
+
+        The clearing belongs here rather than in _apply_mono_delay,
+        which only the stereo path calls: a delay changed during
+        mono operation would otherwise keep its line, and a change
+        away and back - 4 to 0 to 4 - would find an array of the
+        right length on the way back and replay samples from before
+        the change.  Here it happens when the setting changes,
+        whatever the demodulator is doing.
+
+        Only when it CHANGES: a settings apply writes all nine
+        values, and clearing the line on a change to the noise
+        reducer would put a click in the audio for nothing.
+
+        Callers: the constructor, DspSettings.apply (on the
+        processing thread, between blocks) and quality_selftest.
+        """
+        samples = max(0, int(samples))
+        if getattr(self, "_mono_delay_samples", None) == samples:
+            return
+        self._mono_delay_samples: int = samples
+        self._mono_delay_state: np.ndarray = np.zeros(samples,
+                                                      dtype=np.float32)
 
     def _apply_mono_delay(self, mono: np.ndarray) -> np.ndarray:
         """Delay mono path to compensate LR path group delay."""
@@ -1246,9 +1280,33 @@ class BaseFMDemodulator(FMDemodulatorInterface):
           tail in both paths the latency is mode-independent and the
           output timeline is continuous across switches.
 
+        A SWITCHED-OFF NR (``side_nr_enabled = False``) is not
+        skipped and not bypassed: it runs with ``apply_gain=False``,
+        which computes everything and leaves the audio alone.
+
+        Not skipped, because skipping leaves whatever the tail is
+        holding inside it and takes the tail's 16 ms back out of the
+        timeline: switching off jumped the output forward and
+        switching on again replayed the held audio (measured on the
+        transition: mean |side| 0.1875 of old programme over a block
+        of silence).  That is the defect issue #29 fixed for the
+        mono/stereo switch, in this same tail.
+
+        Not bypassed, because bypass freezes the model: after 5 s
+        off across a 20 dB change in the side noise, the first 0.5 s
+        back on passed 0.954 of the input against 0.697 for an NR
+        that had stayed on, and took ~5 s to recover.  Learning
+        while off costs what the NR costs - 1046 us per 16 ms block
+        against 1061 us with it on, the same within the spread -
+        instead of the 85 us a bypass costs, and buys what an A/B
+        needs: the two states differ in the gain and in nothing
+        else.
+
         The mono path passes ``adapt=False``: the NR's temporal
         machinery (input buffer, STFT/OLA, emission schedule) keeps
-        advancing as an exact passthrough, but its spectral model
+        advancing as a unity-gain passthrough (to within the
+        overlap-add's float32 error; see SideNoiseReducer.process),
+        but its spectral model
         (noise floor, smoothed power, DD state) is FROZEN - adapting
         minimum statistics to the artificial side ~ 0 would collapse
         the floor within seconds and leave the NR pinned at unity
@@ -1264,44 +1322,48 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         learns its first floor from genuine stereo frames and behaves
         exactly like a fresh stereo start.
         """
-        if self.side_nr_enabled:
-            if adapt:
-                # Stereo path: gate the adaptation on the blend with
-                # hysteresis.  The NR input is the POST-blend side, so
-                # low blend feeds an attenuated/zeroed copy that must
-                # not train (or, untrained, initialise) the model -
-                # blend 0 is an ABSORBING zero for the minimum tracker
-                # (see SIDE_NR_ADAPT_BLEND_* in constants).  The mono
-                # path passes adapt=False explicitly and skips the
-                # gate update; per-sample provenance inside the NR
-                # covers every transition.
-                if self._side_nr_adapt:
-                    if self.blend_factor <= SIDE_NR_ADAPT_BLEND_OFF:
-                        self._side_nr_adapt = False
-                else:
-                    if self.blend_factor >= SIDE_NR_ADAPT_BLEND_ON:
-                        self._side_nr_adapt = True
-                adapt = self._side_nr_adapt
-            mid = (0.5 * (left_48 + right_48)).astype(np.float32)
-            side = (0.5 * (left_48 - right_48)).astype(np.float32)
-            # bypass=True only for the mono path (side ~ 0, unity OLA,
-            # gain state bit-frozen); the stereo low-blend gate uses
-            # FREEZE mode (adapt=False, bypass=False): the learned
-            # floor is protected while the gain computation keeps
-            # suppressing continuously - a unity bypass here measured
-            # a +6.5 dB side-noise step exactly when reception
-            # degrades (codex P1-2, round 4).
-            side_clean = self.side_nr.process(
-                side, adapt=adapt, bypass=bypass,
-            )
-            mid_aligned = self.side_nr_mid_aligner.feed_and_take(
-                mid, side_clean.size,
-            )
-            n = min(mid_aligned.size, side_clean.size)
-            mid_aligned = mid_aligned[:n]
-            side_clean = side_clean[:n]
-            left_48 = (mid_aligned + side_clean).astype(np.float32)
-            right_48 = (mid_aligned - side_clean).astype(np.float32)
+        if adapt:
+            # Stereo path: gate the adaptation on the blend with
+            # hysteresis.  The NR input is the POST-blend side, so
+            # low blend feeds an attenuated/zeroed copy that must
+            # not train (or, untrained, initialise) the model -
+            # blend 0 is an ABSORBING zero for the minimum tracker
+            # (see SIDE_NR_ADAPT_BLEND_* in constants).  The mono
+            # path passes adapt=False explicitly and skips the
+            # gate update; per-sample provenance inside the NR
+            # covers every transition.
+            if self._side_nr_adapt:
+                if self.blend_factor <= SIDE_NR_ADAPT_BLEND_OFF:
+                    self._side_nr_adapt = False
+            else:
+                if self.blend_factor >= SIDE_NR_ADAPT_BLEND_ON:
+                    self._side_nr_adapt = True
+            adapt = self._side_nr_adapt
+        mid = (0.5 * (left_48 + right_48)).astype(np.float32)
+        side = (0.5 * (left_48 - right_48)).astype(np.float32)
+        # bypass=True is the MONO path and nothing else (side ~ 0,
+        # unity OLA, gain state bit-frozen): there is nothing to
+        # suppress and learning from an artificial zero would
+        # destroy the floor.  A switched-off NR keeps computing and
+        # learning and passes apply_gain=False, so only the output
+        # is left alone.  The stereo low-blend gate is a third
+        # combination, FREEZE (adapt=False, bypass=False): the
+        # learned floor is protected while the gain computation
+        # keeps suppressing continuously - a unity bypass here
+        # measured a +6.5 dB side-noise step exactly when reception
+        # degrades (codex P1-2, round 4).
+        side_clean = self.side_nr.process(
+            side, adapt=adapt, bypass=bypass,
+            apply_gain=self.side_nr_enabled,
+        )
+        mid_aligned = self.side_nr_mid_aligner.feed_and_take(
+            mid, side_clean.size,
+        )
+        n = min(mid_aligned.size, side_clean.size)
+        mid_aligned = mid_aligned[:n]
+        side_clean = side_clean[:n]
+        left_48 = (mid_aligned + side_clean).astype(np.float32)
+        right_48 = (mid_aligned - side_clean).astype(np.float32)
         return left_48, right_48
 
     def _demodulate_mono(self, composite: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
