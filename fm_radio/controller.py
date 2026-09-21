@@ -48,7 +48,8 @@ from fm_radio.exceptions import (
     SDRDeviceError, AudioOutputError, RecordingError,
 )
 from fm_radio.stations import (
-    Station, load_stations, favorites, search, in_area, nearest,
+    Station, load_stations, favorites, here, home_area, search, in_area,
+    nearest,
 )
 from fm_radio import multipath
 from fm_radio.spectrum import (
@@ -308,6 +309,15 @@ class FMReceiverController:
         # exactly the kind of thing the user needs to hear about.
         self.catalogue: list[Station] = load_stations(
             stations_path, warn=self._warn_station_config)
+        # What may put a name on the dial, as against what exists.  A
+        # frequency is not unique in Japan, so without an area in the
+        # user's file the catalogue names almost anything the tuner
+        # sits on - and as readily after a transmitter a thousand
+        # kilometres away.  Looking a station up is a different
+        # question and still sees all of them.
+        self._here: list[Station] = here(
+            self.catalogue,
+            home_area(stations_path, warn=self._warn_station_config))
         self.presets: list[Station] = favorites(self.catalogue)
         if not self.catalogue:
             self.logger.warning(
@@ -423,7 +433,7 @@ class FMReceiverController:
 
     def current_station(self) -> Station | None:
         """Return the catalogue entry the tuner is currently sitting on."""
-        return nearest(self.catalogue, self.get_frequency())
+        return nearest(self._here, self.get_frequency())
 
     def get_spectrum(self) -> "SpectrumFrame | None":
         """The latest picture of the band, or None if there is not one.
@@ -906,7 +916,7 @@ class FMReceiverController:
         cached_freq, cached_name = self._station_name_cache
         if freq_hz == cached_freq:
             return cached_name
-        station = nearest(self.catalogue, freq_hz)
+        station = nearest(self._here, freq_hz)
         name = station.name if station else ""
         self._station_name_cache = (freq_hz, name)
         return name

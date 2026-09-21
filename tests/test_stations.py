@@ -157,17 +157,49 @@ favorite = true
 # ----------------------------------------------------------------------
 
 @needs_tomllib
-def test_an_area_keeps_only_the_transmitters_that_can_be_heard(write_toml):
-    """A frequency is not unique nationwide.
+def test_an_area_does_not_narrow_the_catalogue_itself(write_toml):
+    """Looking a station up is not the same question as naming one.
 
-    983 transmitters cover 173 of the 191 channels in the band, so
-    without this the catalogue puts a name on almost anything - and
-    it is as likely to be a transmitter a thousand kilometres away.
+    ``list 北海道`` is about Japan; the dial is about this receiver.
+    A radio that would not look up a station a thousand kilometres
+    away is less useful, not more.
     """
+    whole = st.load_stations(user_path=None, warn=lambda _m: None)
+
     loaded = st.load_stations(user_path=write_toml('area = "関東"\n'))
 
-    assert loaded, "nothing was left at all"
-    assert {s.area for s in loaded} == {"関東"}
+    assert len(loaded) == len(whole)
+    assert {x.area for x in loaded} > {"関東"}, "other areas went missing"
+
+
+@needs_tomllib
+def test_the_area_is_what_may_put_a_name_on_the_dial(write_toml):
+    path = write_toml('area = "関東"\n')
+    catalogue = st.load_stations(user_path=path)
+
+    mine = st.here(catalogue, st.home_area(path))
+
+    assert mine, "nothing was left at all"
+    assert {x.area for x in mine} == {"関東"}
+    assert len(mine) < len(catalogue)
+
+
+@needs_tomllib
+def test_no_area_names_from_everything(write_toml):
+    """Most people never write one, and nothing changes for them."""
+    path = write_toml("# nothing here\n")
+    catalogue = st.load_stations(user_path=path)
+
+    assert st.home_area(path) is None
+    assert len(st.here(catalogue, None)) == len(catalogue)
+
+
+def test_an_area_that_holds_nothing_names_from_everything():
+    """A line in a file must not leave the receiver unable to name."""
+    only_kanto = [Station(name="J-WAVE", freq_mhz=81.3, site="東京",
+                          area="関東")]
+
+    assert st.here(only_kanto, "北海道") == only_kanto
 
 
 @needs_tomllib
@@ -191,7 +223,7 @@ def test_an_area_stops_a_distant_transmitter_naming_a_local_signal():
 
 
 @needs_tomllib
-def test_a_station_the_user_added_survives_the_area(write_toml):
+def test_a_station_the_user_added_can_still_name_the_dial(write_toml):
     """They put it there; it is not for this to second-guess them."""
     path = write_toml("""
 area = "関東"
@@ -202,9 +234,9 @@ freq_mhz = 88.1
 site = "うち"
 area = "北海道"
 """)
-    loaded = st.load_stations(user_path=path)
+    mine = st.here(st.load_stations(user_path=path), st.home_area(path))
 
-    assert [s.name for s in loaded if s.name == "どこかの局"] == ["どこかの局"]
+    assert [x.name for x in mine if x.name == "どこかの局"] == ["どこかの局"]
 
 
 @needs_tomllib
@@ -218,9 +250,9 @@ name = "名無しの地域"
 freq_mhz = 88.3
 site = "うち"
 """)
-    loaded = st.load_stations(user_path=path)
+    mine = st.here(st.load_stations(user_path=path), st.home_area(path))
 
-    assert [s.name for s in loaded if s.name == "名無しの地域"]
+    assert [x.name for x in mine if x.name == "名無しの地域"]
 
 
 @needs_tomllib
@@ -235,19 +267,17 @@ def test_an_area_that_is_not_one_is_reported_and_ignored(write_toml, line,
     anything at all.
     """
     said = []
-    loaded = st.load_stations(user_path=write_toml(line), warn=said.append)
+    path = write_toml(line)
 
-    assert len(loaded) > 100, "the catalogue was thrown away"
+    assert st.home_area(path, warn=said.append) is None
     assert any(complaint in m for m in said), said
 
+    catalogue = st.load_stations(user_path=path, warn=lambda _m: None)
+    assert len(st.here(catalogue, None)) > 100
 
-@needs_tomllib
-def test_no_area_line_keeps_the_whole_catalogue(write_toml):
-    """Most people never write one."""
-    whole = st.load_stations(user_path=None, warn=lambda _m: None)
-    loaded = st.load_stations(user_path=write_toml("# nothing here\n"))
 
-    assert len(loaded) == len(whole)
+def test_asking_where_the_radio_is_without_a_file_says_nothing(tmp_path):
+    assert st.home_area(tmp_path / "there is none.toml") is None
 
 
 @needs_tomllib
