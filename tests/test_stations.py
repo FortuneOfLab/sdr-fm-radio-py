@@ -152,6 +152,104 @@ favorite = true
     assert [s.name for s in st.favorites(loaded)] == ["レインボータウンFM"]
 
 
+# ----------------------------------------------------------------------
+# Where the radio is
+# ----------------------------------------------------------------------
+
+@needs_tomllib
+def test_an_area_keeps_only_the_transmitters_that_can_be_heard(write_toml):
+    """A frequency is not unique nationwide.
+
+    983 transmitters cover 173 of the 191 channels in the band, so
+    without this the catalogue puts a name on almost anything - and
+    it is as likely to be a transmitter a thousand kilometres away.
+    """
+    loaded = st.load_stations(user_path=write_toml('area = "関東"\n'))
+
+    assert loaded, "nothing was left at all"
+    assert {s.area for s in loaded} == {"関東"}
+
+
+@needs_tomllib
+def test_an_area_stops_a_distant_transmitter_naming_a_local_signal():
+    """The reading this exists for.
+
+    A band scan in Tokyo found a signal at 82.1 MHz - it is NHK-FM
+    at 82.5 spilling over - and the catalogue named it FM NORTH WAVE
+    at 稚内, because that is the nearest 82.1 anywhere.  Saying
+    nothing is the right answer.
+    """
+    everywhere = st.load_stations(user_path=None, warn=lambda _m: None)
+    heard_at = 82.1e6
+
+    named_anywhere = st.nearest(everywhere, heard_at)
+    kanto = [x for x in everywhere if x.area == "関東"]
+    named_here = st.nearest(kanto, heard_at)
+
+    assert named_anywhere is not None, "the catalogue used to name this"
+    assert named_here is None, "82.1 is not allocated in 関東"
+
+
+@needs_tomllib
+def test_a_station_the_user_added_survives_the_area(write_toml):
+    """They put it there; it is not for this to second-guess them."""
+    path = write_toml("""
+area = "関東"
+
+[[station]]
+name = "どこかの局"
+freq_mhz = 88.1
+site = "うち"
+area = "北海道"
+""")
+    loaded = st.load_stations(user_path=path)
+
+    assert [s.name for s in loaded if s.name == "どこかの局"] == ["どこかの局"]
+
+
+@needs_tomllib
+def test_an_entry_with_no_area_at_all_is_kept(write_toml):
+    """The bundled data always has one, so one without is the user's."""
+    path = write_toml("""
+area = "関東"
+
+[[station]]
+name = "名無しの地域"
+freq_mhz = 88.3
+site = "うち"
+""")
+    loaded = st.load_stations(user_path=path)
+
+    assert [s.name for s in loaded if s.name == "名無しの地域"]
+
+
+@needs_tomllib
+@pytest.mark.parametrize("line,complaint", [
+    ('area = "かんとう"\n', "not an area"),
+    ('area = 42\n', "must be the name of one"),
+    ('area = ""\n', "must be the name of one"),
+])
+def test_an_area_that_is_not_one_is_reported_and_ignored(write_toml, line,
+                                                          complaint):
+    """A line in a file must not leave the receiver unable to name
+    anything at all.
+    """
+    said = []
+    loaded = st.load_stations(user_path=write_toml(line), warn=said.append)
+
+    assert len(loaded) > 100, "the catalogue was thrown away"
+    assert any(complaint in m for m in said), said
+
+
+@needs_tomllib
+def test_no_area_line_keeps_the_whole_catalogue(write_toml):
+    """Most people never write one."""
+    whole = st.load_stations(user_path=None, warn=lambda _m: None)
+    loaded = st.load_stations(user_path=write_toml("# nothing here\n"))
+
+    assert len(loaded) == len(whole)
+
+
 @needs_tomllib
 def test_user_station_replaces_a_colliding_bundled_entry(write_toml):
     path = write_toml("""

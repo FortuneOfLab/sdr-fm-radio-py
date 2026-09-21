@@ -47,6 +47,16 @@ Merge order, which is what makes a ``stations.toml`` predictable:
    the same ``(frequency, transmitter site)`` — including one an override just
    hid, so hide-then-re-add works.
 
+A top-level ``area`` says where the receiver is, and everything outside it is
+dropped.  A frequency is not unique nationwide — 983 transmitters cover 173 of
+the 191 channels between 76 and 95 MHz — so without it the catalogue will put
+a name on almost anything the tuner sits on, and it is as likely to be a
+transmitter a thousand kilometres away as the one being received.  Measured on
+this radio: of twelve signals a band scan found in Tokyo, four were named after
+transmitters in 北海道, 東北 and 四国.  With ``area = "関東"`` those four are
+named nothing, which is the right answer, and the eight real ones keep their
+names.
+
 Frequencies are normalised to :data:`FREQ_DECIMALS` decimal places (1 kHz)
 everywhere: in the bundled data, in user entries, and in ``match_freq_mhz``.
 Two entries are the same transmitter when that normalised frequency and the
@@ -443,6 +453,47 @@ def _apply_override(station: Station, rule: dict) -> Station:
     return replace(station, **changes) if changes else station
 
 
+def _only_where_the_radio_is(stations: list[Station], config: dict,
+                            report: Reporter) -> list[Station]:
+    """Drop everything outside the area the user's file names.
+
+    A receiver is somewhere.  The catalogue is not: 983 transmitters
+    cover 173 of the 191 channels in the band, so nearest() will name
+    almost any frequency the tuner sits on, and the name is as likely
+    to belong to a transmitter a thousand kilometres away as to the
+    one being heard.  Saying nothing is better than saying 稚内.
+
+    Applied after the user's own entries, and it keeps them: a
+    ``[[station]]`` is kept whatever area it carries, because they
+    put it there, and so is anything with no area at all - the
+    bundled data always has one.
+    """
+    wanted = config.get("area")
+    if wanted is None:
+        return stations
+    if not isinstance(wanted, str) or not wanted.strip():
+        report("stations.toml: area must be the name of one, found %r"
+               % (wanted,))
+        return stations
+    wanted = wanted.strip()
+    if wanted not in AREAS:
+        report("stations.toml: %r is not an area; the areas are %s"
+               % (wanted, ", ".join(AREAS)))
+        return stations
+    here = [s for s in stations
+            if s.area == wanted or not s.area or s.source == "user"]
+    if not here:
+        # Nothing at all would leave the receiver unable to name
+        # anything, over a line in a file; the whole catalogue is
+        # the less surprising of the two.
+        report("stations.toml: area %r left no stations at all; "
+               "using the whole catalogue" % (wanted,))
+        return stations
+    logger.info("Keeping %d of %d stations: area %s",
+                len(here), len(stations), wanted)
+    return here
+
+
 def _merge_user_layer(stations: list[Station], config: dict,
                       report: Reporter) -> list[Station]:
     """Apply ``[[override]]`` rules, then append ``[[station]]`` entries."""
@@ -522,7 +573,8 @@ def load_stations(user_path: Path | str | None = None,
 
     Returns:
         Stations sorted by area then frequency, each with ``favorite``
-        resolved to a bool.  Never raises: bad input is reported and skipped
+        resolved to a bool.  Only the area the user's file names, if it
+        names one.  Never raises: bad input is reported and skipped
         rather than stopping the receiver from starting.
     """
     report = _make_reporter(warn)
@@ -542,6 +594,7 @@ def load_stations(user_path: Path | str | None = None,
         if config:
             before = len(stations)
             stations = _merge_user_layer(stations, config, report)
+            stations = _only_where_the_radio_is(stations, config, report)
             logger.info("Applied %s (%d -> %d stations)", path, before, len(stations))
 
     stations = _resolve_favorites(stations)
