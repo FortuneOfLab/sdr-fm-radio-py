@@ -681,8 +681,8 @@ def _sub_sample_lag(ref: np.ndarray, x: np.ndarray, rounds: int = 3) -> float:
     12 dB of the metric.
 
     The derivative is taken spectrally, which is exact for a
-    band-limited sequence and is only ever used to point at the
-    answer - the shift itself goes through the FIR above.
+    band-limited sequence, and so is the shift - see
+    _fractional_delay above.
     """
     n = min(ref.size, x.size)
     if n < 4 * _SHIFT_GUARD:
