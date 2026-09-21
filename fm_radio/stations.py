@@ -47,6 +47,21 @@ Merge order, which is what makes a ``stations.toml`` predictable:
    the same ``(frequency, transmitter site)`` — including one an override just
    hid, so hide-then-re-add works.
 
+A top-level ``area`` says where the receiver is.  A frequency is not unique
+nationwide — 983 transmitters cover 173 of the 191 channels between 76 and
+95 MHz — so without it the catalogue will put a name on almost anything the
+tuner sits on, and it is as likely to be a transmitter a thousand kilometres
+away as the one being received.  Measured on this radio: of twelve signals a
+band scan found in Tokyo, four were named after transmitters in 北海道, 東北
+and 四国.  With ``area = "関東"`` those four are named nothing, which is the
+right answer, and the eight real ones keep their names.
+
+It narrows naming and nothing else.  :func:`load_stations` returns every
+transmitter whatever the setting says, because ``list all``, ``list 北海道``
+and searching are about the catalogue rather than about this receiver — you
+can look up a station you are nowhere near.  :func:`here` is the view that
+may put a name on the dial, and :func:`home_area` reads the setting.
+
 Frequencies are normalised to :data:`FREQ_DECIMALS` decimal places (1 kHz)
 everywhere: in the bundled data, in user entries, and in ``match_freq_mhz``.
 Two entries are the same transmitter when that normalised frequency and the
@@ -521,9 +536,12 @@ def load_stations(user_path: Path | str | None = None,
             how they reach someone running without ``--log``.
 
     Returns:
-        Stations sorted by area then frequency, each with ``favorite``
-        resolved to a bool.  Never raises: bad input is reported and skipped
-        rather than stopping the receiver from starting.
+        Every transmitter, sorted by area then frequency, each with
+        ``favorite`` resolved to a bool - including the ones the
+        receiver cannot possibly hear, because looking a station up
+        is not the same question as naming the one on the dial; see
+        :func:`here`.  Never raises: bad input is reported and
+        skipped rather than stopping the receiver from starting.
     """
     report = _make_reporter(warn)
     stations = _load_bundled(Path(data_path) if data_path else DATA_PATH, report)
@@ -575,6 +593,73 @@ def in_area(stations: Iterable[Station], area: str) -> list[Station]:
     """
     folded = area.strip().casefold()
     return [s for s in stations if s.area.casefold() == folded]
+
+
+def home_area(user_path: Path | str | None = None,
+              warn: Reporter | None = None) -> str | None:
+    """The area the user's file says the receiver is in, or None.
+
+    Its own reader rather than a second return value from
+    :func:`load_stations`, because it answers a different question:
+    that one is "what stations exist", this one is "where is this
+    radio".  Only the naming path needs the second.
+
+    An area that is not one of :data:`AREAS` is reported and treated
+    as unset.  A line in a file must not leave the receiver unable
+    to name anything at all.
+    """
+    report = _make_reporter(warn)
+    path = Path(user_path) if user_path is not None else user_config_path()
+    try:
+        if not path.exists():
+            return None
+    except OSError as exc:
+        report(f"Could not check for {path}: {exc}")
+        return None
+    config = _read_user_toml(path, report)
+    wanted = config.get("area") if config else None
+    if wanted is None:
+        return None
+    if not isinstance(wanted, str) or not wanted.strip():
+        report("stations.toml: area must be the name of one, found %r"
+               % (wanted,))
+        return None
+    wanted = wanted.strip()
+    if wanted not in AREAS:
+        report("stations.toml: %r is not an area; the areas are %s"
+               % (wanted, ", ".join(AREAS)))
+        return None
+    return wanted
+
+
+def here(stations: Iterable[Station], area: str | None) -> list[Station]:
+    """The entries that may put a name on this receiver's dial.
+
+    Everything when no area is set, and otherwise that area plus two
+    kinds of entry that are the user's own: a ``[[station]]`` they
+    added, whatever area it carries, because they put it there; and
+    anything with no area at all, because the bundled data always
+    has one.
+
+    Not a filter on the catalogue itself.  ``list 北海道`` is a
+    question about Japan and this is a question about the dial, and
+    a receiver that would not look up a station a thousand
+    kilometres away is less useful, not more.
+
+    Falls back to everything if the area turns out to hold nothing,
+    which would otherwise leave the receiver unable to name any
+    station over a line in a file.
+    """
+    stations = list(stations)
+    if area is None:
+        return stations
+    mine = [s for s in stations
+            if s.area == area or not s.area or s.source == "user"]
+    if not mine:
+        logger.warning("Area %s holds no stations; naming from all of them",
+                       area)
+        return stations
+    return mine
 
 
 def nearest(stations: Iterable[Station], freq_hz: float,

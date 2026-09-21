@@ -692,6 +692,54 @@ def test_a_stale_block_is_dropped_before_the_new_tuning_is_started(receiver):
 
 
 # ----------------------------------------------------------------------
+# What it says about the station file
+# ----------------------------------------------------------------------
+
+def test_a_broken_station_file_is_complained_about_once(
+        tmp_path, capsys, no_user_config):
+    """The file is read twice - for the catalogue, and for where the
+    radio is - and one problem is one problem however many readers
+    trip over it.
+    """
+    broken = tmp_path / "stations.toml"
+    broken.write_text("[[station\nname = 'unclosed'\n", encoding="utf-8")
+
+    instance = FMReceiverController(light=True, stations_path=str(broken))
+    try:
+        said = capsys.readouterr().err.splitlines()
+    finally:
+        instance.quit_event.set()
+        instance.auto_gain.stop()
+        instance.audio_output.cleanup()
+
+    about_the_file = [line for line in said if "Station list:" in line]
+    assert about_the_file, "nothing was said about a file that will not parse"
+    assert len(about_the_file) == len(set(about_the_file)), (
+        "said twice: %s" % about_the_file)
+
+
+def test_the_dial_is_named_from_the_area_and_the_catalogue_is_not(
+        tmp_path, no_user_config):
+    """Two questions, two answers.
+
+    ``list 北海道`` is about Japan; the dial is about this receiver.
+    """
+    pytest.importorskip("tomllib", reason="the user layer needs 3.11+")
+    path = tmp_path / "stations.toml"
+    path.write_text('area = "関東"\n', encoding="utf-8")
+
+    instance = FMReceiverController(light=True, stations_path=str(path))
+    try:
+        assert instance.stations_in_area("北海道"), "the catalogue narrowed"
+        assert len(instance.get_catalogue()) > len(instance._here)
+        assert {s.area for s in instance._here} == {"関東"}
+    finally:
+        instance.quit_event.set()
+        instance.auto_gain.stop()
+        instance.audio_output.cleanup()
+
+
+# ----------------------------------------------------------------------
 # How clean the channel is
 # ----------------------------------------------------------------------
 

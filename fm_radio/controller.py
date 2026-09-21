@@ -48,7 +48,8 @@ from fm_radio.exceptions import (
     SDRDeviceError, AudioOutputError, RecordingError,
 )
 from fm_radio.stations import (
-    Station, load_stations, favorites, search, in_area, nearest,
+    Station, load_stations, favorites, here, home_area, search, in_area,
+    nearest,
 )
 from fm_radio import multipath
 from fm_radio.spectrum import (
@@ -306,8 +307,20 @@ class FMReceiverController:
         # problems are printed as well as logged: logging is off unless
         # --log was passed, and a station file that was silently ignored is
         # exactly the kind of thing the user needs to hear about.
+        # Problems with the station file are printed as well as
+        # logged, and said once however many readers trip over them.
+        self._said_about_stations: set[str] = set()
         self.catalogue: list[Station] = load_stations(
             stations_path, warn=self._warn_station_config)
+        # What may put a name on the dial, as against what exists.  A
+        # frequency is not unique in Japan, so without an area in the
+        # user's file the catalogue names almost anything the tuner
+        # sits on - and as readily after a transmitter a thousand
+        # kilometres away.  Looking a station up is a different
+        # question and still sees all of them.
+        self._here: list[Station] = here(
+            self.catalogue,
+            home_area(stations_path, warn=self._warn_station_config))
         self.presets: list[Station] = favorites(self.catalogue)
         if not self.catalogue:
             self.logger.warning(
@@ -388,9 +401,18 @@ class FMReceiverController:
             self.logger.error(f"Failed to initialize FM Receiver Controller: {e}", exc_info=True)
             raise
 
-    @staticmethod
-    def _warn_station_config(message: str) -> None:
-        """Put a station-list problem in front of the user, log or no log."""
+    def _warn_station_config(self, message: str) -> None:
+        """Put a station-list problem in front of the user, log or no log.
+
+        Once each.  The file is read twice - once for the catalogue
+        and once for where the radio is - so a file that will not
+        parse at all has the same complaint to make both times, and
+        one problem is one problem however many things tripped over
+        it.
+        """
+        if message in self._said_about_stations:
+            return
+        self._said_about_stations.add(message)
         print(f"Station list: {message}", file=sys.stderr)
 
     # ------------------------------------------------------------------
@@ -423,7 +445,7 @@ class FMReceiverController:
 
     def current_station(self) -> Station | None:
         """Return the catalogue entry the tuner is currently sitting on."""
-        return nearest(self.catalogue, self.get_frequency())
+        return nearest(self._here, self.get_frequency())
 
     def get_spectrum(self) -> "SpectrumFrame | None":
         """The latest picture of the band, or None if there is not one.
@@ -906,7 +928,7 @@ class FMReceiverController:
         cached_freq, cached_name = self._station_name_cache
         if freq_hz == cached_freq:
             return cached_name
-        station = nearest(self.catalogue, freq_hz)
+        station = nearest(self._here, freq_hz)
         name = station.name if station else ""
         self._station_name_cache = (freq_hz, name)
         return name

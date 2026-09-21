@@ -129,6 +129,10 @@ Windows, `~/.config/fm_radio/stations.toml` elsewhere, or anywhere you like
 with `--stations PATH`:
 
 ```toml
+# Where this radio is.  Keep this at the top of the file: TOML would
+# read it as a field of whatever table came before it.
+area = "関東"
+
 # Add a station the bundled list does not have
 [[station]]
 name = "レインボータウンFM"
@@ -143,6 +147,21 @@ match_name = "TOKYO FM"
 match_site = "八王子"
 hidden = true
 ```
+
+**Where you are.** A frequency is not unique in Japan — 983 transmitters
+cover 173 of the 191 channels between 76 and 95 MHz — so without `area` the
+receiver will put a name on almost anything you tune to, and it is as likely
+to be a transmitter a thousand kilometres away. Measured here in Tokyo: of
+twelve signals a band scan found, four were named after 北海道, 東北 and 四国.
+
+The areas are `北海道` `東北` `関東` `信越` `北陸` `東海` `近畿` `中国`
+`四国` `九州・沖縄`. Anything else is reported and ignored — a line in a file
+should not leave the receiver unable to name anything.
+
+It narrows what can be named and nothing else: `list all`, `list 北海道` and
+searching still see every transmitter, because looking a station up is a
+different question from naming the one on the dial. Stations you added
+yourself can always name it, whatever area they carry.
 
 **Presets.** `favorite` decides what `list` shows and what the numeric tune
 command indexes into:
