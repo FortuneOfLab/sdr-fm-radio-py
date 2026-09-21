@@ -7,11 +7,12 @@ values (clean run at CNR=35: Sep 70.3/72.3 dB, THD+N -57.2 dB, SNR
 RNG noise draws while still catching structural regressions.  How far
 below depends on the metric, taking the worse channel of each pair as
 the floors do: separation by 12-20 dB, THD by 8-12, and SNR by 5-7 -
-the thinnest of all being the 4.9 dB on dc-notch's right channel,
-where the measurement is set by the CNR rather than by the receiver
-and the floor has not moved in a long time.  See the FLOORS comment
-below for the per-scenario measurements and the history across tuning
-changes.
+the thinnest of all being the 4.9 dB on dc-notch's right channel.
+The SNR floor is the one this PR did not move; what limits the SNR
+measurement is not the CNR (taking the noise away leaves clean at
+30.373/30.377 dB against 30.369/30.363 with it) and has not been
+looked into.  See the FLOORS comment below for the per-scenario
+measurements and the history across tuning changes.
 
 The impaired scenarios exist because a pristine synthetic channel can
 hide whole bug classes: the FFT-Hilbert block-edge defect fixed in
@@ -106,9 +107,10 @@ SCENARIOS = {
 # they now discriminate far harder: with the phase corrector
 # disabled the clean scenario measures 5.0 dB of separation rather
 # than 70.  The SNR floor of 24 dB is the one this PR did not move
-# and the one with least room - 4.9 dB on dc-notch's right channel -
-# because at CNR 35 that measurement is set by the CNR and not by
-# the receiver.
+# and the one with least room: 4.9 dB on dc-notch's right channel.
+# Whatever sets that measurement, it is not the channel noise -
+# clean measures 30.369/30.363 dB at CNR 35 and 30.373/30.377 with
+# no noise at all - and nobody has yet looked into what does.
 # History of the clean row, all at 0 Hz and so all of the notch:
 # 2026-07 (windowed-median metrics, neutral HF ceilings and blend
 # stability, analog-exact pre-emphasis) Sep ~43/57, THD -36.9, SNR
