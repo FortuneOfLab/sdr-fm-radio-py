@@ -166,15 +166,16 @@ def test_final_audio_lowpass_is_common_and_reconverges_after_stereo(rng):
     so L/R sample counts, output grid and filter states re-match after
     genuinely divergent stereo history.
 
-    Side NR is disabled here to ISOLATE that local contract: with the
-    shared mid/side NR tail (issue #29) the first mono blocks after a
-    stereo -> mono switch legitimately return L != R while the NR
-    flushes the previous side content - the end-to-end switch
-    behaviour has its own test
-    (test_mono_stereo_switches_are_continuous).
+    Everything asserted here is UPSTREAM of the shared mid/side NR
+    tail (issue #29), which the mono path runs in bypass: the first
+    mono blocks after a stereo -> mono switch legitimately return
+    L != R while that tail flushes the previous side content, so the
+    L == R check waits for the flush - one audio block is 768
+    samples at 48 kHz and the tail holds frame - hop = 768 of them,
+    so it is empty after two.  The end-to-end switch behaviour has
+    its own test (test_mono_stereo_switches_are_continuous).
     """
     d = FMDemodulator(stereo=True)
-    d.side_nr_enabled = False
     assert np.array_equal(d.lp_audio_l.taps, d.lp_audio_r.taps)
     assert d.lp_audio_l is not d.lp_audio_r
 
@@ -190,7 +191,8 @@ def test_final_audio_lowpass_is_common_and_reconverges_after_stereo(rng):
     # transient; by the second block every state has re-matched and
     # the returned channels must be bit-identical.
     d.stereo = False
-    d.demodulate(rng.standard_normal(3072).astype(np.float64) * 0.1)
+    for _ in range(3):
+        d.demodulate(rng.standard_normal(3072).astype(np.float64) * 0.1)
     left, right = d.demodulate(rng.standard_normal(3072).astype(np.float64) * 0.1)
 
     # 4) L/R chains re-matched.

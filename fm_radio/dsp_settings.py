@@ -53,20 +53,81 @@ applies it whole; it never sees a set half written.  See
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+import numbers
+from dataclasses import dataclass, fields
+
+#: The longest mono-path delay a front end may ask for, in composite
+#: samples.  The setting exists to compensate the L-R FIR bank group
+#: delay, which is (STEREO_FIR_NTAPS - 1) / 2 = 160 samples, 0.83 ms
+#: at the 192 kHz composite rate; this is six times that and holds a
+#: 4 KiB delay line.  There has to be a limit, because the next block
+#: allocates whatever was asked for: 100_000_000 samples asks numpy
+#: for 400 MB, and 10**100 raises "Maximum allowed dimension
+#: exceeded" on the processing thread, where an exception costs the
+#: block.
+MAX_MONO_DELAY_SAMPLES = 1024
 
 
-def _finite(name: str, value: float) -> float:
-    """Return *value* as a float, or say which field was not a number."""
-    number = float(value)
+def _a_number(name: str, value) -> float:
+    """Return *value* as a float, or refuse what is not a number.
+
+    float() alone is not a check: it accepts a string, and then the
+    demodulator gets the string, because checking a value is not the
+    same as storing it.  Everything here is stored back onto the
+    frozen instance by __post_init__.  bool is a Real in Python, and
+    True as a gain is a mistake worth naming rather than reading as
+    1.0.
+    """
+    if isinstance(value, bool) or not isinstance(value, numbers.Real):
+        raise TypeError(f"{name} must be a real number, not {value!r}")
+    try:
+        number = float(value)
+    except OverflowError:
+        # An int with no float to convert to: out of range, not a
+        # type error, and not an ArithmeticError for a caller that
+        # is catching what a bad value raises.
+        raise ValueError(f"{name} is too large: {value!r}") from None
     if not math.isfinite(number):
         raise ValueError(f"{name} must be a finite number, not {value!r}")
     return number
 
 
-def _within(name: str, value: float, low: float, high: float) -> float:
+def _within(name: str, value, low: float, high: float) -> float:
     """Return *value* as a float, having checked it is in range."""
-    number = _finite(name, value)
+    number = _a_number(name, value)
+    if not low <= number <= high:
+        raise ValueError(
+            f"{name} must be between {low} and {high}, not {number}")
+    return number
+
+
+def _a_flag(name: str, value) -> bool:
+    """Return *value* as a bool, or refuse what is not one.
+
+    Strictly bool, because the near misses are all truthy: the string
+    "false", the string "off", a "0.0" read out of a text field.  A
+    flag that silently reads as its opposite is worse than one that
+    raises.
+    """
+    if not isinstance(value, bool):
+        raise TypeError(f"{name} must be True or False, not {value!r}")
+    return value
+
+
+def _whole(name: str, value, low: int, high: int) -> int:
+    """Return *value* as a whole number in range, or refuse it."""
+    if isinstance(value, bool) or not isinstance(value, numbers.Real):
+        raise TypeError(f"{name} must be a whole number, not {value!r}")
+    # Before int(), which raises its own ValueError on a nan, and
+    # without float(), which overflows on an int of a few hundred
+    # digits - one of which is a value to refuse, not to crash on.
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError(
+            f"{name} must be a whole number of samples, not {value!r}")
+    if int(value) != value:
+        raise ValueError(
+            f"{name} must be a whole number of samples, not {value!r}")
+    number = int(value)
     if not low <= number <= high:
         raise ValueError(
             f"{name} must be between {low} and {high}, not {number}")
@@ -114,25 +175,47 @@ class DspSettings:
         point of use - it clips the forced blend into 0..1 and lifts a
         band ceiling that has fallen below its floor - but not against
         all of them: a fractional ``mono_delay_samples`` reaches a
-        slice, and a negative ``side_nr_beta`` a gain that changes
-        sign.  ``SideNoiseReducer`` clamps beta in its constructor and
-        the constructor is not on this path.
+        slice, an enormous one an allocation, and a negative
+        ``side_nr_beta`` a gain that changes sign.
+        ``SideNoiseReducer`` clamps beta in its constructor, and the
+        constructor is not on this path.
+
+        Each value is checked AND STORED BACK, so what reaches the
+        demodulator is the checked number and not whatever was handed
+        in: ``"1.0"`` passes float() and is still a string, and
+        ``iq_phase_correction_enabled="false"`` is not False.
         """
-        blend = self.force_blend_factor
-        if blend is not None:
-            _within("force_blend_factor", blend, 0.0, 1.0)
-        _finite("subcarrier_phase_offset_rad", self.subcarrier_phase_offset_rad)
-        delay = self.mono_delay_samples
-        if int(delay) != delay or delay < 0:
-            raise ValueError(
-                f"mono_delay_samples must be a whole number of samples, "
-                f"not {delay!r}")
-        _within("lr_high_max_gain", self.lr_high_max_gain, 0.0, 1.0)
-        _within("lr_super_high_max_gain", self.lr_super_high_max_gain, 0.0, 1.0)
-        _within("side_nr_alpha_floor", self.side_nr_alpha_floor, 0.0, 1.0)
-        if _finite("side_nr_beta", self.side_nr_beta) < 0.0:
-            raise ValueError(
-                f"side_nr_beta must not be negative, not {self.side_nr_beta}")
+        checked = {
+            "force_blend_factor": (
+                None if self.force_blend_factor is None
+                else _within("force_blend_factor",
+                             self.force_blend_factor, 0.0, 1.0)),
+            "subcarrier_phase_offset_rad": _a_number(
+                "subcarrier_phase_offset_rad",
+                self.subcarrier_phase_offset_rad),
+            "mono_delay_samples": _whole(
+                "mono_delay_samples", self.mono_delay_samples,
+                0, MAX_MONO_DELAY_SAMPLES),
+            "iq_phase_correction_enabled": _a_flag(
+                "iq_phase_correction_enabled",
+                self.iq_phase_correction_enabled),
+            "lr_high_max_gain": _within(
+                "lr_high_max_gain", self.lr_high_max_gain, 0.0, 1.0),
+            "lr_super_high_max_gain": _within(
+                "lr_super_high_max_gain",
+                self.lr_super_high_max_gain, 0.0, 1.0),
+            "side_nr_enabled": _a_flag(
+                "side_nr_enabled", self.side_nr_enabled),
+            "side_nr_alpha_floor": _within(
+                "side_nr_alpha_floor", self.side_nr_alpha_floor, 0.0, 1.0),
+            "side_nr_beta": _within(
+                "side_nr_beta", self.side_nr_beta, 0.0, math.inf),
+        }
+        # All nine, so that a field added later cannot quietly go
+        # unchecked - and unnormalised.
+        assert checked.keys() == {f.name for f in fields(self)}
+        for name, value in checked.items():
+            object.__setattr__(self, name, value)
 
     @property
     def subcarrier_phase_offset_deg(self) -> float:

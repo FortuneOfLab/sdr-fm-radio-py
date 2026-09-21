@@ -33,6 +33,7 @@ import sys
 import time
 import threading
 import logging
+from dataclasses import replace as dsp_replace
 from pathlib import Path
 
 import numpy as np
@@ -379,6 +380,13 @@ class FMReceiverController:
             # thread's own.
             self._dsp_wanted: DspSettings = self._dsp_defaults
             self._dsp_in_effect: DspSettings = self._dsp_defaults
+            # Held only by the WRITERS, and only across a
+            # dataclasses.replace (isinstance checks, float() and
+            # int() on nine values) and one assignment.  Nothing
+            # else: no device, no disk, no logging.  The processing
+            # thread never takes it - it reads _dsp_wanted once per
+            # block and that read is a single load.
+            self._dsp_lock: threading.Lock = threading.Lock()
             # AudioOutput instance manages its own internal queue
             # The output is told how often blocks will arrive: it
             # decides how much to have in hand before it starts the
@@ -690,11 +698,16 @@ class FMReceiverController:
         the demodulator is running under.  A front end reading back
         the other one would redraw the control the user has just
         moved.
+
+        Read without the lock: one load of a reference to an
+        immutable object.  Reading this and writing the result back
+        is the sequence that is not safe against a second writer -
+        see :meth:`update_dsp_settings`.
         """
         return self._dsp_wanted
 
     def set_dsp_settings(self, settings: DspSettings) -> None:
-        """Ask the demodulator to run under *settings*.
+        """Ask the demodulator to run under *settings*, all nine of them.
 
         It takes effect on the next block, applied whole by the
         thread that owns the demodulator: no block is heard half
@@ -705,6 +718,15 @@ class FMReceiverController:
         While no blocks are arriving - the device has gone, or the
         receiver was never started - nothing is applied, and the next
         block to arrive, whenever it does, carries the settings.
+
+        This is LAST WRITER WINS over the whole set, which is what a
+        front end switching between two saved sets wants and is not
+        what a front end moving one control wants: two writers that
+        each read the settings, change a different parameter and
+        write the result back would undo each other, because the
+        second one writes nine values worked out before the first
+        one landed.  :meth:`update_dsp_settings` is that operation
+        done safely.
 
         Args:
             settings: what all nine parameters are to be.  Build it
@@ -718,7 +740,36 @@ class FMReceiverController:
             raise TypeError(
                 "set_dsp_settings wants a DspSettings, not %r"
                 % type(settings).__name__)
-        self._dsp_wanted = settings
+        with self._dsp_lock:
+            self._dsp_wanted = settings
+
+    def update_dsp_settings(self, **changes) -> DspSettings:
+        """Change some of the settings and leave the rest alone.
+
+        The read, the change and the write happen under one lock, so
+        two callers changing different parameters both keep their
+        change.  Takes effect on the next block, exactly as
+        :meth:`set_dsp_settings` does.
+
+        A value the DSP would misbehave on raises (TypeError or
+        ValueError, from ``DspSettings``) and nothing is changed.
+
+        Args:
+            **changes: parameters by name, as ``DspSettings`` spells
+                them, e.g. ``side_nr_enabled=False``.
+
+        Returns:
+            The settings now asked for, all nine.
+        """
+        with self._dsp_lock:
+            # Under the lock: dataclasses.replace, which runs
+            # DspSettings.__post_init__ - nine isinstance checks and
+            # nine conversions - and one assignment.  An unknown name
+            # raises out of replace with the lock released and
+            # nothing written.
+            wanted = dsp_replace(self._dsp_wanted, **changes)
+            self._dsp_wanted = wanted
+        return wanted
 
     def start_recording(self, filename: str | None = None) -> "Request":
         """Ask for a recording to start, and come straight back.

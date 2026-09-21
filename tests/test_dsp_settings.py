@@ -35,7 +35,9 @@ from fm_radio.constants import (
 )
 from fm_radio.controller import FMReceiverController
 from fm_radio.demodulator import FMDemodulator, FMDemodulatorLight
-from fm_radio.dsp_settings import DspSettings, apply, capture
+from fm_radio.dsp_settings import (
+    MAX_MONO_DELAY_SAMPLES, DspSettings, apply, capture,
+)
 
 
 # ----------------------------------------------------------------------
@@ -240,6 +242,50 @@ def test_a_value_the_dsp_would_misbehave_on_is_refused(field, value):
     assert field in str(refused.value)
 
 
+@pytest.mark.parametrize("field, value", [
+    ("force_blend_factor", "0.5"),
+    ("subcarrier_phase_offset_rad", "1.0"),
+    ("mono_delay_samples", True),
+    ("mono_delay_samples", "4"),
+    ("iq_phase_correction_enabled", "false"),
+    ("iq_phase_correction_enabled", 1),
+    ("side_nr_enabled", "off"),
+    ("lr_high_max_gain", True),
+    ("side_nr_beta", None),
+])
+def test_a_value_of_the_wrong_type_is_refused(field, value):
+    """float() is not a check, and every near miss for a flag is truthy.
+
+    "1.0" passes float() and is still a string when the demodulator
+    multiplies by it; "false" and "off" are both True.
+    """
+    with pytest.raises(TypeError) as refused:
+        replace(a_settings(), **{field: value})
+    assert field in str(refused.value)
+
+
+def test_a_checked_value_is_the_value_the_dsp_gets():
+    """The check stores what it checked, so nothing else can arrive."""
+    demod = FMDemodulatorLight(stereo=True)
+    apply(replace(capture(demod), mono_delay_samples=4.0,
+                  lr_high_max_gain=1), demod)
+    assert type(demod.mono_delay_samples) is int
+    assert type(demod.lr_high_max_gain) is float
+    # And the delay line is built from it: a float length raises.
+    assert list(demod._apply_mono_delay(np.ones(2, dtype=np.float32))) == [0.0, 0.0]
+
+
+def test_the_longest_mono_delay_is_bounded():
+    """The next block allocates whatever was asked for."""
+    at_the_limit = replace(a_settings(),
+                           mono_delay_samples=MAX_MONO_DELAY_SAMPLES)
+    assert at_the_limit.mono_delay_samples == MAX_MONO_DELAY_SAMPLES
+    for too_much in (MAX_MONO_DELAY_SAMPLES + 1, 100_000_000, 10 ** 100):
+        with pytest.raises(ValueError) as refused:
+            replace(a_settings(), mono_delay_samples=too_much)
+        assert "mono_delay_samples" in str(refused.value)
+
+
 def test_a_forced_blend_may_be_taken_off_again():
     assert replace(a_settings(), force_blend_factor=None).force_blend_factor is None
 
@@ -323,3 +369,210 @@ def test_a_forced_blend_reaches_the_demodulation(receiver, monkeypatch):
     feed(receiver, 2)
     run_until(receiver, done)
     assert receiver.fm_demodulator.blend_factor == 0.37
+
+
+# ----------------------------------------------------------------------
+# Switching a setting must not damage the stream
+# ----------------------------------------------------------------------
+
+def transparent_nr(demod):
+    """Make the noise reducer pass the side channel through unchanged.
+
+    alpha_floor 1.0 floors the Wiener gain at unity, beta 0 asks for
+    no over-subtraction, so the whole tail becomes an identity that
+    holds frame - hop samples.  Anything the output then differs from
+    the input by is the tail mishandling the stream, not denoising.
+    """
+    apply(replace(capture(demod), side_nr_alpha_floor=1.0,
+                  side_nr_beta=0.0), demod)
+
+
+def side_through_the_tail(demod, side_in):
+    """Push one block through the tail as pure side (mid = 0)."""
+    left, right = side_in, (-side_in).astype(np.float32)
+    out_l, out_r = demod._apply_side_nr(left, right)
+    return (0.5 * (out_l - out_r)).astype(np.float32)
+
+
+def test_switching_the_noise_reducer_does_not_disturb_the_stream():
+    """Off and on again, with the tail transparent: nothing moves.
+
+    Skipping the tail while the NR is off leaves what it is holding
+    inside it and takes 16 ms out of the timeline; the held samples
+    then replay when it is switched back on.  Running it in bypass
+    keeps the latency and the sample accounting the same in both
+    states, which is the fix issue #29 made for the mono/stereo
+    switch - the same tail, the same reason.
+    """
+    rng = np.random.default_rng(3)
+    blocks = [rng.standard_normal(1024).astype(np.float32) for _ in range(12)]
+
+    def run(off_at=None, on_at=None):
+        demod = FMDemodulatorLight(stereo=True)
+        transparent_nr(demod)
+        out = []
+        for i, side_in in enumerate(blocks):
+            if i == off_at or i == on_at:
+                apply(replace(capture(demod), side_nr_enabled=(i == on_at),
+                              side_nr_alpha_floor=1.0, side_nr_beta=0.0),
+                      demod)
+            out.append(side_through_the_tail(demod, side_in))
+        return np.concatenate(out), demod
+
+    fed = np.concatenate(blocks)
+    steady, demod = run()
+    toggled, _ = run(off_at=4, on_at=8)
+    hold = demod.side_nr.frame - demod.side_nr.hop
+    ramp_in = demod.side_nr.frame
+
+    # Same accounting as a run that was never touched, and the same
+    # samples in the same places.
+    assert steady.size == fed.size - hold
+    assert toggled.size == steady.size
+    assert np.max(np.abs(steady[ramp_in:] - fed[ramp_in:steady.size])) < 1e-5, (
+        "the tail is not transparent even without a switch")
+    assert np.max(np.abs(toggled[ramp_in:] - fed[ramp_in:toggled.size])) < 1e-5, (
+        "switching the noise reducer moved the stream")
+
+
+def test_the_noise_reducer_does_not_replay_what_it_held():
+    """Switch off over silence, switch on, and hear nothing.
+
+    The reviewer's case: three blocks of hard-panned signal, then
+    silence with the NR off, then the NR back on.  What it was
+    holding when it was switched off must have come out while it was
+    off, not on the way back in.
+    """
+    demod = FMDemodulatorLight(stereo=True)
+    transparent_nr(demod)
+    loud = np.ones(4096, dtype=np.float32)
+    quiet = np.zeros(4096, dtype=np.float32)
+
+    for _ in range(3):
+        assert np.max(np.abs(side_through_the_tail(demod, loud))) > 0.5
+
+    apply(replace(capture(demod), side_nr_enabled=False,
+                  side_nr_alpha_floor=1.0, side_nr_beta=0.0), demod)
+    flushed = [side_through_the_tail(demod, quiet) for _ in range(3)]
+    assert np.max(np.abs(flushed[1])) == 0.0, (
+        "the tail is still emptying a block after it was switched off")
+
+    apply(replace(capture(demod), side_nr_enabled=True,
+                  side_nr_alpha_floor=1.0, side_nr_beta=0.0), demod)
+    back_on = side_through_the_tail(demod, quiet)
+    assert np.max(np.abs(back_on)) == 0.0, (
+        "audio from before the noise reducer was switched off was replayed")
+
+
+def test_a_mono_delay_that_goes_through_zero_forgets_what_it_held():
+    """Zero is not a pause: the line has to drop what it is carrying.
+
+    Otherwise a return to the SAME delay finds a state array of the
+    right length, keeps it, and plays samples from before the
+    setting was changed.
+    """
+    demod = FMDemodulatorLight(stereo=True)
+    apply(replace(capture(demod), mono_delay_samples=4), demod)
+    demod._apply_mono_delay(np.arange(1, 9, dtype=np.float32))
+    assert list(demod._mono_delay_state) == [5.0, 6.0, 7.0, 8.0]
+
+    apply(replace(capture(demod), mono_delay_samples=0), demod)
+    straight = demod._apply_mono_delay(np.arange(20, 24, dtype=np.float32))
+    assert list(straight) == [20.0, 21.0, 22.0, 23.0]
+
+    apply(replace(capture(demod), mono_delay_samples=4), demod)
+    after = demod._apply_mono_delay(np.arange(30, 34, dtype=np.float32))
+    assert list(after) == [0.0, 0.0, 0.0, 0.0], (
+        "samples from before the delay was taken off came back out")
+
+
+# ----------------------------------------------------------------------
+# Changing one parameter while somebody else changes another
+# ----------------------------------------------------------------------
+
+def test_update_changes_one_parameter_and_leaves_the_rest(receiver):
+    before = receiver.get_dsp_settings()
+    after = receiver.update_dsp_settings(side_nr_enabled=False)
+    assert after.side_nr_enabled is False
+    assert after == replace(before, side_nr_enabled=False)
+    assert receiver.get_dsp_settings() == after
+
+
+def test_update_with_a_value_the_dsp_would_misbehave_on_changes_nothing(receiver):
+    before = receiver.get_dsp_settings()
+    for bad in ({"side_nr_alpha_floor": 1.5}, {"side_nr_enabled": "off"},
+                {"no_such_parameter": 1}):
+        with pytest.raises((TypeError, ValueError)):
+            receiver.update_dsp_settings(**bad)
+    assert receiver.get_dsp_settings() == before
+
+
+def test_two_writers_changing_different_parameters_do_not_undo_each_other(
+        receiver, monkeypatch):
+    """Both changes survive a read-modify-write that overlaps another.
+
+    The overlap is forced, not hoped for: the first writer is held
+    inside its own read-modify-write until the second has reached the
+    lock.  That is exactly the window in which a lock-free version
+    loses a change - the second writer would build its nine values
+    from the set the first one is in the middle of replacing.
+    """
+    import fm_radio.controller as controller_module
+
+    may_start = threading.Event()
+    at_the_lock = threading.Event()
+    second = {}
+
+    real_lock = receiver._dsp_lock
+
+    class Watched:
+        """The lock, saying when the second writer arrives at it."""
+
+        def acquire(self, *args, **kwargs):
+            if threading.get_ident() == second.get("id"):
+                at_the_lock.set()
+            return real_lock.acquire(*args, **kwargs)
+
+        def release(self):
+            real_lock.release()
+
+        def __enter__(self):
+            self.acquire()
+            return self
+
+        def __exit__(self, *exc):
+            self.release()
+
+    monkeypatch.setattr(receiver, "_dsp_lock", Watched())
+
+    real_replace = controller_module.dsp_replace
+    first = []
+
+    def replace_while_the_other_one_tries(settings, **changes):
+        if not first:
+            first.append(True)
+            may_start.set()
+            assert at_the_lock.wait(10), (
+                "the second writer never reached the lock - it did its own "
+                "read-modify-write inside the first one")
+        return real_replace(settings, **changes)
+
+    monkeypatch.setattr(controller_module, "dsp_replace",
+                        replace_while_the_other_one_tries)
+
+    def second_writer():
+        second["id"] = threading.get_ident()
+        may_start.wait(10)
+        receiver.update_dsp_settings(side_nr_beta=2.0)
+
+    other = threading.Thread(target=second_writer)
+    other.start()
+    try:
+        receiver.update_dsp_settings(side_nr_alpha_floor=0.4)
+    finally:
+        other.join(timeout=10)
+    assert not other.is_alive(), "the second writer never finished"
+
+    wanted = receiver.get_dsp_settings()
+    assert wanted.side_nr_alpha_floor == 0.4, "the first change was undone"
+    assert wanted.side_nr_beta == 2.0, "the second change was undone"
