@@ -247,8 +247,11 @@ class FakeRequest:
 class FakeSDR:
     sample_rate = 1.024e6
 
-    def __init__(self) -> None:
+    def __init__(self, at_hz: float = 80.0e6) -> None:
         self.tuning_generation = 0
+        #: The frequency the current generation stands for, kept with
+        #: it the way the real receiver keeps it.
+        self.generation_freq_hz = at_hz
         # The demodulator's own queue.  Reading from it is the defect
         # this fake is here to catch: a block taken out of it is a
         # block the receiver never sees.
@@ -257,7 +260,17 @@ class FakeSDR:
         self.watched = 0
         self.stopped_watching = 0
 
+    def the_tuning_and_its_frequency(self):
+        return self.tuning_generation, self.generation_freq_hz
+
+    def moved_to(self, freq_hz: float) -> None:
+        """What a tune that landed does to the tuner."""
+        self.tuning_generation += 1
+        self.generation_freq_hz = freq_hz
+
     def watch_the_blocks(self, depth: int = 1):
+        if self._tap is not None:
+            raise RuntimeError("something is already watching the blocks")
         self.watched += 1
         self._tap = _AlwaysABlock(self)
         return self._tap
@@ -297,13 +310,16 @@ class _AlwaysABlock:
                  + 1j * rng.standard_normal(16384)).astype(np.complex64)
         return self._sdr.tuning_generation, block
 
+    def put_nowait(self, item):             # pragma: no cover - unused
+        raise AssertionError("the fake feeds itself")
+
 
 class FakeController:
     """Enough receiver to be swept, and a record of what was asked."""
 
     def __init__(self, auto_gain: bool = True, at_hz: float = 80.0e6,
                  tune_answers=None, agc_answers=None) -> None:
-        self.sdr_receiver = FakeSDR()
+        self.sdr_receiver = FakeSDR(at_hz)
         self._freq = at_hz
         self._auto = auto_gain
         self.tuned_to: list[float] = []
@@ -333,7 +349,7 @@ class FakeController:
         self.tuned_to.append(freq_hz)
         if not answer.failed and not answer.superseded and answer.wait(0):
             self._freq = freq_hz
-            self.sdr_receiver.tuning_generation += 1
+            self.sdr_receiver.moved_to(freq_hz)
         return answer
 
     def set_agc_mode(self, enabled):
@@ -422,6 +438,57 @@ def test_the_sweeps_own_failure_is_the_one_that_is_raised(monkeypatch):
 
 
 # ----------------------------------------------------------------------
+# Which tuning a block belongs to
+# ----------------------------------------------------------------------
+
+def test_a_block_is_of_the_tuning_the_sweep_asked_for():
+    """Not of whatever the tuner happens to be on when it arrives.
+
+    The window can tune too.  If it does between the sweep's own
+    tune finishing and the block turning up, reading the generation
+    then takes the new station's samples for this hop - and nothing
+    complains, because the sweep's request finished long before it
+    was overtaken.
+    """
+    controller = FakeController()
+    scan = BandScan(controller)
+    sdr = controller.sdr_receiver
+    scan._blocks = sdr.watch_the_blocks()
+    ours = scan._tune_and_settle(78.0e6)
+
+    sdr.moved_to(90.5e6)            # somebody else, after ours landed
+
+    with pytest.raises(ScanFailed, match="90.5"):
+        scan._a_fresh_block(ours, timeout_sec=0.2)
+
+
+def test_a_tune_that_landed_somewhere_else_is_a_failure():
+    """The request says it worked; the tuner says otherwise."""
+    controller = FakeController()
+    scan = BandScan(controller)
+
+    def sideways(freq_hz):
+        controller.tuned_to.append(freq_hz)
+        controller.sdr_receiver.moved_to(freq_hz + 1e6)
+        return FakeRequest()
+
+    controller.tune = sideways
+
+    with pytest.raises(ScanFailed, match="the tuner is on"):
+        scan._tune_and_settle(78.0e6)
+
+
+def test_a_block_of_the_right_tuning_is_taken():
+    """The other half: nothing moved, so the block is this hop's."""
+    controller = FakeController()
+    scan = BandScan(controller)
+    scan._blocks = controller.sdr_receiver.watch_the_blocks()
+    ours = scan._tune_and_settle(78.0e6)
+
+    assert scan._a_fresh_block(ours, timeout_sec=0.5) is not None
+
+
+# ----------------------------------------------------------------------
 # Whose blocks are whose
 # ----------------------------------------------------------------------
 
@@ -464,6 +531,57 @@ def test_the_sweep_stops_watching_even_when_it_fails(monkeypatch):
 # ----------------------------------------------------------------------
 # How sure we are that a peak is a broadcast
 # ----------------------------------------------------------------------
+
+def test_a_second_watcher_is_an_error_rather_than_a_takeover():
+    """The one already there would just stop being fed.
+
+    It would find out as a hop that timed out with nothing to say
+    why, which is the kind of fault that takes an afternoon.
+    """
+    sdr = FakeSDR()
+    sdr.watch_the_blocks()
+
+    with pytest.raises(RuntimeError, match="already watching"):
+        sdr.watch_the_blocks()
+
+
+def test_a_queue_that_goes_wrong_is_not_a_hop_that_timed_out():
+    """Only an empty queue is a reason to go round again.
+
+    Anything else is something wrong with the queue, and turning it
+    into a slow, quiet, incomplete sweep loses the reason and the
+    hop together.
+    """
+    controller = FakeController()
+    scan = BandScan(controller)
+    ours = scan._tune_and_settle(78.0e6)
+
+    class Broken:
+        def get(self, timeout=None):
+            raise ValueError("the tap is wrong")
+
+    scan._blocks = Broken()
+
+    with pytest.raises(ValueError, match="the tap is wrong"):
+        scan._a_fresh_block(ours, timeout_sec=0.5)
+
+
+def test_an_empty_queue_is_waited_out():
+    """The one exception that is ordinary."""
+    import queue as queue_module
+
+    controller = FakeController()
+    scan = BandScan(controller)
+    ours = scan._tune_and_settle(78.0e6)
+
+    class Empty:
+        def get(self, timeout=None):
+            raise queue_module.Empty()
+
+    scan._blocks = Empty()
+
+    assert scan._a_fresh_block(ours, timeout_sec=0.2) is None
+
 
 def test_a_pilot_settles_it():
     found = classify([Signal(81.3e6, -2.0, 52.4)])

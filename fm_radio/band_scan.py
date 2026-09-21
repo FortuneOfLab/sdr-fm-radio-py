@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import queue
 import threading
 import time
 
@@ -414,8 +415,12 @@ class BandScan:
             try:
                 self._put_the_receiver_back(was_at, was_auto)
             except Exception as and_then:
-                went_wrong.add_note(
-                    "the receiver was not put back: %s" % and_then)
+                # add_note is 3.11 and this runs on 3.9; the log is
+                # where it goes when the exception cannot carry it.
+                logger.error("the receiver was not put back: %s", and_then)
+                if hasattr(went_wrong, "add_note"):
+                    went_wrong.add_note(
+                        "the receiver was not put back: %s" % and_then)
             raise
         finally:
             sdr.stop_watching(self._blocks)
@@ -462,8 +467,8 @@ class BandScan:
 
     def _frame_at(self, centre_hz: float):
         """Tune there and make one picture of what is around it."""
-        self._tune_and_settle(centre_hz)
-        block = self._a_fresh_block()
+        ours = self._tune_and_settle(centre_hz)
+        block = self._a_fresh_block(ours)
         if block is None:
             logger.debug("no block came back at %.1f MHz", centre_hz / 1e6)
             return None
@@ -473,7 +478,7 @@ class BandScan:
                             listen_sec: float) -> "Signal":
         """Stay on a candidate long enough to hear whether it is stereo."""
         self._say("listening at %.1f MHz" % signal.freq_mhz)
-        self._tune_and_settle(signal.freq_hz)
+        ours = self._tune_and_settle(signal.freq_hz)
         # Nothing of the last frequency in the filters: the first
         # block here is of this station and must be demodulated as
         # though it were the first of a session.
@@ -482,7 +487,7 @@ class BandScan:
         pilot = noise = 0.0
         blocks = 0
         while time.monotonic() < deadline and not self.cancelled:
-            block = self._a_fresh_block()
+            block = self._a_fresh_block(ours)
             if block is None:
                 break
             composite = self._demodulator.process_iq_samples(block)
@@ -512,18 +517,40 @@ class BandScan:
             self._wait_for(self.controller.set_agc_mode(False),
                            "holding the gain")
 
-    def _tune_and_settle(self, freq_hz: float) -> None:
+    def _tune_and_settle(self, freq_hz: float) -> int:
+        """Tune, and come back with the generation that tune made.
+
+        The generation has to be read here and carried, not read
+        again when a block turns up.  A sweep is not the only thing
+        that can tune: the window can, and if it does between this
+        returning and the block arriving, reading the generation
+        then would take the new station's samples as this hop's.
+        The request would not say so either - ours finished, so it
+        was never superseded.
+        """
         self._wait_for(self.controller.tune(freq_hz),
                        "tuning to %.1f MHz" % (freq_hz / 1e6))
+        generation, now_at = (
+            self.controller.sdr_receiver.the_tuning_and_its_frequency())
+        if abs(now_at - freq_hz) > 1.0:
+            raise ScanFailed(
+                "asked for %.1f MHz and the tuner is on %.1f MHz"
+                % (freq_hz / 1e6, now_at / 1e6))
+        return generation
 
-    def _a_fresh_block(self, timeout_sec: float = 1.0):
-        """The next block that belongs to where the tuner is now.
+    def _a_fresh_block(self, wanted: int, timeout_sec: float = 1.0):
+        """The next block of the tuning *wanted*, or None in time.
 
         From the watcher's queue, not from the one the demodulator
         reads: that is a work queue, so a block taken from it is a
         block the receiver never sees.  Taking them during a sweep
         left the demodulator with gaps its filters carried straight
         across, which is a worse noise than the sweep's own.
+
+        Only queue.Empty is a reason to go round again.  Anything
+        else coming out of the queue is something wrong with the
+        queue, and turning that into a hop that quietly timed out
+        loses both the reason and the hop.
         """
         if self._blocks is None:                # pragma: no cover - guard
             return None
@@ -532,10 +559,14 @@ class BandScan:
         while time.monotonic() < deadline:
             if self.cancelled:
                 return None
-            wanted = sdr.tuning_generation
+            now, now_at = sdr.the_tuning_and_its_frequency()
+            if now != wanted:
+                raise ScanFailed(
+                    "something else tuned to %.1f MHz part way through "
+                    "this hop" % (now_at / 1e6))
             try:
                 generation, block = self._blocks.get(timeout=0.1)
-            except Exception:
+            except queue.Empty:
                 continue
             if generation == wanted:
                 return block

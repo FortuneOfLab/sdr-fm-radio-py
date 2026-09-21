@@ -140,6 +140,9 @@ class SDRReceiver(SDRReceiverInterface):
         # see watch_the_blocks.  None when nobody is watching, which
         # is nearly always, and read on the realtime path.
         self._tap: "queue.Queue | None" = None
+        # Only the check-and-set and the compare-and-clear below; the
+        # callback never takes it, and reads the attribute once.
+        self._tap_lock: threading.Lock = threading.Lock()
         # Serialises concurrent ``start_iq_recording`` callers so only
         # one reaches ``wave.open`` (the file-truncating step).
         # Distinct from ``_iq_enqueue_lock`` so the SDR callback is
@@ -267,22 +270,38 @@ class SDRReceiver(SDRReceiverInterface):
         the receiver is still playing.  The blocks are the same
         arrays, so a watcher reads them and does not write to them.
 
-        Only one watcher at a time, which is all there has ever been
-        a use for; a second call replaces the first.  Blocks are
-        dropped rather than queued when the watcher is behind.
+        One watcher at a time, and a second one is an error rather
+        than a quiet takeover: the one already there would simply
+        stop being fed, and would find out as a hop that timed out
+        with nothing to say why.  Blocks are dropped rather than
+        queued when the watcher is behind.
 
         Returns:
             The queue to read ``(generation, block)`` from.  Hand it
             back to :meth:`stop_watching` when finished with it.
+
+        Raises:
+            RuntimeError: if somebody is already watching.
         """
         tap: "queue.Queue" = queue.Queue(maxsize=max(1, int(depth)))
-        self._tap = tap
+        with self._tap_lock:
+            if self._tap is not None:
+                raise RuntimeError(
+                    "something is already watching the blocks")
+            self._tap = tap
         return tap
 
     def stop_watching(self, tap: "queue.Queue") -> None:
-        """Stop feeding *tap*, unless somebody else has taken over."""
-        if self._tap is tap:
-            self._tap = None
+        """Stop feeding *tap*, unless somebody else has taken over.
+
+        A block can still land in *tap* just after this: the
+        callback reads the attribute once and may have read it
+        already.  Harmless - the owner is about to drop the queue -
+        and worth more than a lock on the realtime path.
+        """
+        with self._tap_lock:
+            if self._tap is tap:
+                self._tap = None
 
     def get_center_frequency(self) -> float:
         """Return the centre frequency in Hz, or the last one read.

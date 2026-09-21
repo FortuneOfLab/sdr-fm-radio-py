@@ -30,6 +30,85 @@ def _wav_frames(path):
         return r.getnframes()
 
 
+# ----------------------------------------------------------------------
+# Being handed the same blocks without taking them
+# ----------------------------------------------------------------------
+
+def a_block(n: int = 256) -> np.ndarray:
+    return (np.arange(n) + 1j * np.arange(n)).astype(np.complex64)
+
+
+def test_a_watcher_is_handed_the_same_block_the_demodulator_gets(
+        sdr_receiver):
+    """Not a copy, and not instead of: both get it.
+
+    A band scan runs while the receiver is still playing.  Reading
+    the demodulator's own queue would take blocks out of its stream,
+    and its filters carry straight across the gap.
+    """
+    tap = sdr_receiver.watch_the_blocks()
+    block = a_block()
+
+    sdr_receiver.callback(block, None)
+
+    _generation, theirs = sdr_receiver.data_queue.get_nowait()
+    _generation, ours = tap.get_nowait()
+    assert ours is theirs, "the watcher got a different array"
+    assert np.array_equal(ours, block)
+
+
+def test_nothing_is_handed_over_when_nobody_is_watching(sdr_receiver):
+    sdr_receiver.callback(a_block(), None)
+
+    assert sdr_receiver.data_queue.qsize() == 1
+    assert sdr_receiver._tap is None
+
+
+def test_a_watcher_that_is_behind_loses_blocks_rather_than_holding_up(
+        sdr_receiver):
+    """This is the realtime callback; it cannot wait for a reader."""
+    tap = sdr_receiver.watch_the_blocks(depth=1)
+
+    for _ in range(5):
+        sdr_receiver.callback(a_block(), None)
+
+    assert tap.qsize() == 1
+    assert sdr_receiver.data_queue.qsize() == 5, "the receiver lost blocks"
+
+
+def test_a_second_watcher_is_refused(sdr_receiver):
+    """Quietly replacing the first leaves it wondering why the
+    blocks stopped: a hop that timed out, with nothing to say why.
+    """
+    sdr_receiver.watch_the_blocks()
+
+    with pytest.raises(RuntimeError, match="already watching"):
+        sdr_receiver.watch_the_blocks()
+
+
+def test_watching_again_after_stopping_is_fine(sdr_receiver):
+    first = sdr_receiver.watch_the_blocks()
+    sdr_receiver.stop_watching(first)
+
+    second = sdr_receiver.watch_the_blocks()
+
+    sdr_receiver.callback(a_block(), None)
+    assert second.qsize() == 1
+    assert first.qsize() == 0
+
+
+def test_stopping_somebody_elses_watch_does_nothing(sdr_receiver):
+    """Whoever is watching now keeps watching."""
+    mine = sdr_receiver.watch_the_blocks()
+    sdr_receiver.stop_watching(mine)
+    theirs = sdr_receiver.watch_the_blocks()
+
+    sdr_receiver.stop_watching(mine)         # late, and not ours to stop
+
+    sdr_receiver.callback(a_block(), None)
+    assert theirs.qsize() == 1
+
+
 def test_callback_not_blocked_by_slow_disk(sdr_receiver, tmp_path):
     recv = sdr_receiver
     recv.start_iq_recording(str(tmp_path / "iq.wav"))
