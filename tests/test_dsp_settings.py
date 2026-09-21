@@ -539,44 +539,69 @@ def test_a_switched_off_noise_reducer_leaves_the_audio_alone():
     or throw the switched-off output away, so none of them would
     notice an NR that went on suppressing while it said it was off.
     This one watches the same stream through both states with the
-    reducer at its normal settings.
+    reducer at its normal settings, block by block, and compares
+    each output block with the input block it answers rather than
+    with an average: a switched-off reducer is an EXACT passthrough
+    (measured 1.5e-08 on a signal of amplitude 0.05), so there is
+    nothing to average over.
     """
     demod = FMDemodulatorLight(stereo=True)
     rng = np.random.default_rng(7)
     rate, block = 48000, 768
     half_a_second = int(0.5 * rate / block)
+    # The tail holds frame - hop = 768 samples, one block exactly,
+    # so the block that comes out answers the one fed before it.
+    held = [np.zeros(block, dtype=np.float32)]
 
-    def ratio(blocks, amplitude=0.05):
-        """Output over input RMS over *blocks* blocks of side noise."""
+    def run(blocks, amplitude=0.05):
+        """Feed *blocks* blocks; return (output over input, worst change).
+
+        The second number is what an exact passthrough makes zero.
+        """
         fed, got = [], []
         for _ in range(blocks):
             side = (amplitude * rng.standard_normal(block)).astype(np.float32)
-            fed.append(side)
-            got.append(side_through_the_tail(demod, side))
+            out = side_through_the_tail(demod, side)
+            answered, held[0] = held[0], side
+            if out.size == answered.size:
+                fed.append(answered)
+                got.append(out)
         a, b = np.concatenate(fed), np.concatenate(got)
-        n = min(a.size, b.size)
-        return float(np.sqrt(np.mean(b[:n] ** 2))
-                     / np.sqrt(np.mean(a[:n] ** 2)))
+        return (float(np.sqrt(np.mean(b ** 2)) / np.sqrt(np.mean(a ** 2))),
+                float(np.max(np.abs(b - a))))
 
-    ratio(6 * half_a_second)                     # learn a floor
-    suppressing = ratio(half_a_second)
+    run(6 * half_a_second)                       # learn a floor
+    suppressing, changed = run(half_a_second)
     assert suppressing < 0.9, "the reducer was not suppressing to begin with"
+    assert changed > 0.01
 
-    # The very first block after the switch is already part of the
-    # way there - it carries the tail's three hops of gained
-    # content, and measured 0.788 between 0.703 suppressed and 1.0
-    # untouched - and the block after it is all the way there.  A
-    # change that took two or three blocks to arrive would leave
-    # this first block reading like the old state.
+    # Block by block across the switch.  The first block out is a
+    # mixture - it carries three hops the reducer had already
+    # processed - and every block after it is the input, sample for
+    # sample.  A switch that took two or three blocks to arrive
+    # would leave one of these first two reading like the old state,
+    # which an average over the next half second would hide.
     apply(replace(capture(demod), side_nr_enabled=False), demod)
-    assert ratio(1) > suppressing + 0.05, (
+    first, first_changed = run(1)
+    assert first > suppressing + 0.05, (
         "the switch had not reached the first block after it")
-    assert abs(ratio(half_a_second) - 1.0) < 0.02, (
+    assert first_changed > 0.01, "nothing of the old setting is left in it"
+    second, second_changed = run(1)
+    assert second_changed < 1e-6, (
+        "the second block after the switch is still being changed")
+    assert second == pytest.approx(1.0, abs=1e-3)
+    steady, steady_changed = run(half_a_second)
+    assert steady_changed < 1e-6, (
         "a switched-off noise reducer is still changing the audio")
 
+    # And back: again the first block is a mixture and the second is
+    # already suppressing as hard as it was before.
     apply(replace(capture(demod), side_nr_enabled=True), demod)
-    assert ratio(1) < 0.95, "the switch back had not reached the next block"
-    assert ratio(half_a_second) < 0.9, "it did not start suppressing again"
+    back_first, _ = run(1)
+    assert back_first < 0.95
+    back_second, back_changed = run(1)
+    assert back_second < 0.8, "it did not start suppressing again"
+    assert back_changed > 0.01
 
 
 def test_the_noise_reducer_keeps_its_model_current_while_it_is_off():

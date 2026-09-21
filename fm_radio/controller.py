@@ -709,11 +709,21 @@ class FMReceiverController:
     def set_dsp_settings(self, settings: DspSettings) -> None:
         """Ask the demodulator to run under *settings*, all nine of them.
 
-        It takes effect on the next block, applied whole by the
-        thread that owns the demodulator: no block is heard half
-        under one set and half under another, and no caller of this
-        writes to the DSP while it is being used.  Blocks are 16 ms
-        apart in standard mode and 66 ms apart in light mode.
+        The nine are applied as one snapshot, by the thread that
+        owns the demodulator, before it starts the next block: no
+        call to process_iq_samples or demodulate sees half of one
+        set and half of another, and no caller of this writes to the
+        DSP while it is being used.  Blocks are 16 ms apart in
+        standard mode and 66 ms apart in light mode.
+
+        That is a contract about the PARAMETERS, not about the
+        sound.  A stage that carries state across blocks still has a
+        transition to make: the side-channel noise reducer holds
+        three hops of audio it has already processed, so the first
+        output block after it is switched is a mixture of the two
+        settings - measured 0.852 of the input passed, between 0.70
+        suppressed and 1.0 untouched - and the block after that is
+        entirely under the new settings.
 
         While no blocks are arriving - the device has gone, or the
         receiver was never started - nothing is applied, and the next
