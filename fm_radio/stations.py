@@ -85,6 +85,7 @@ import json
 import logging
 import math
 import os
+import re
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Iterable
@@ -218,6 +219,78 @@ def user_config_path() -> Path:
         base = os.environ.get("XDG_CONFIG_HOME")
         root = Path(base) if base else Path.home() / ".config"
     return root / "fm_radio" / USER_CONFIG_FILENAME
+
+
+#: What the line this writes looks like, and how to find one that is
+#: already there.  Only before the first table: TOML reads
+#: ``area = "関東"`` after a ``[[station]]`` as a field of that
+#: station, so a line further down is somebody else's and not to be
+#: touched.
+_AREA_LINE = re.compile(r"^\s*area\s*=")
+_TABLE_LINE = re.compile(r"^\s*\[")
+
+
+def remember_area(area: str, user_path: Path | str | None = None) -> Path:
+    """Write *area* into the user's file, leaving the rest of it alone.
+
+    The file is the user's, and most of what is in it was typed by
+    them: this replaces the one line if it is there and puts it at
+    the top if it is not, and touches nothing else.  There is no
+    TOML writer in the standard library and bringing one in to set
+    a single string would be a poor trade.
+
+    Only a line before the first table counts as the one to replace.
+    ``area`` inside a ``[[station]]`` is that station's own field -
+    which is exactly the trap the README warns about - and this
+    would make it worse by editing it.
+
+    Args:
+        area: One of :data:`AREAS`.
+        user_path: Where to write; ``None`` uses
+            :func:`user_config_path`.  Directories are created.
+
+    Returns:
+        The path written.
+
+    Raises:
+        ValueError: if *area* is not one of :data:`AREAS`.  Writing a
+            name the loader will refuse is worse than not writing.
+        OSError: if the file cannot be written.
+    """
+    if area not in AREAS:
+        raise ValueError("%r is not an area; the areas are %s"
+                         % (area, ", ".join(AREAS)))
+    path = Path(user_path) if user_path is not None else user_config_path()
+    try:
+        had = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        had = ""
+    lines = had.splitlines(keepends=True)
+    say = 'area = "%s"\n' % area
+
+    at = None
+    for index, line in enumerate(lines):
+        if _TABLE_LINE.match(line):
+            break                       # everything after here is a table's
+        if _AREA_LINE.match(line):
+            at = index
+            break
+    if at is None:
+        # At the top, where it has to be, and with a blank line after
+        # it if there is anything for it to run into.
+        lines.insert(0, say if not lines else say + "\n")
+    else:
+        lines[at] = say
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Written beside and moved into place: a half-written stations.toml
+    # is one the receiver will refuse to read at all, and the user
+    # typed most of what is in it.
+    spare = path.with_name(path.name + ".new")
+    spare.write_text("".join(lines), encoding="utf-8")
+    os.replace(spare, path)
+    logger.info("Wrote area %s to %s", area, path)
+    return path
 
 
 def _make_reporter(warn: Reporter | None) -> Reporter:

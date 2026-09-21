@@ -54,6 +54,7 @@ one.
 
 from __future__ import annotations
 
+import collections
 import dataclasses
 import logging
 import queue
@@ -125,6 +126,19 @@ UNCONFIRMED = "unconfirmed"
 #: far enough above it to be what this is the edge of.
 LIKELY_SKIRT = "likely skirt"
 
+#: How loud a find has to be to say where the receiver is.  The
+#: quiet end of a sweep is skirts, spurs and stations a hundred
+#: kilometres off, and those are the ones that belong to somewhere
+#: else.  Measured here: the four finds above this were all the one
+#: transmitter site, and everything below was not.
+HOME_EVIDENCE_DBFS: float = -20.0
+
+#: How far a site has to be ahead of the next to be believed.  Two
+#: sites that explain the same signals are not evidence for either,
+#: and a wrong area is worse than none - it takes the name off every
+#: station the receiver can hear.
+HOME_MARGIN: int = 2
+
 #: How far a skirt reaches, and how far below its station it is by
 #: then.  82.1 MHz is NHK-FM at 82.5 leaking through; the peak test
 #: only rejects skirts within 200 kHz, and widening that would lose
@@ -168,6 +182,65 @@ class Signal:
     @property
     def freq_mhz(self) -> float:
         return self.freq_hz / 1e6
+
+
+def where_this_is(signals: "list[Signal]", catalogue,
+                  loud_enough_dbfs: float = HOME_EVIDENCE_DBFS,
+                  margin: int = HOME_MARGIN) -> "str | None":
+    """The area the receiver is in, from the stations it can hear.
+
+    A frequency is not unique in Japan, but a handful of them
+    together is close to it: the four strong signals a sweep found
+    here are all transmitted from one site, and no other site in
+    the country carries more than two of them.
+
+    Scored by **transmitter site**, not by area.  An area is a lot
+    of places - 東北 has transmitters on most of the band, so it can
+    explain almost anything, and scoring by area picked it over 関東
+    nine finds to eight while the receiver was in Tokyo.  A site is
+    one place, and one place either carries these frequencies or
+    does not: 東京 explained four of four, and the next best site
+    two.
+
+    Only the loud confirmed finds count.  The quiet end of a sweep
+    is skirts and distant stations, which are evidence about
+    somewhere else.
+
+    Returns:
+        One of :data:`fm_radio.stations.AREAS`, or None when the
+        evidence does not point anywhere clearly enough - too few
+        signals, or two sites that explain the same ones.  None is
+        the right answer more often than a guess: a wrong area
+        takes the name off every station the receiver can hear.
+    """
+    evidence = [s for s in signals
+                if s.sort == CONFIRMED and s.power_dbfs >= loud_enough_dbfs]
+    if not evidence:
+        return None
+    entries = list(catalogue)
+    votes: "collections.Counter[str]" = collections.Counter()
+    area_of: "dict[str, str]" = {}
+    for signal in evidence:
+        sites = set()
+        for entry in entries:
+            if abs(entry.freq_hz - signal.freq_hz) <= STATION_WIDTH_HZ / 2.0:
+                sites.add(entry.site)
+                area_of.setdefault(entry.site, entry.area)
+        for site in sites:
+            votes[site] += 1
+    if not votes:
+        return None
+    ranked = votes.most_common()
+    best, best_votes = ranked[0]
+    runner_up = ranked[1][1] if len(ranked) > 1 else 0
+    if best_votes - runner_up < margin:
+        logger.info("Not sure where this is: %s",
+                    ", ".join("%s %d" % pair for pair in ranked[:3]))
+        return None
+    area = area_of.get(best) or None
+    logger.info("This looks like %s: %s explains %d of %d",
+                area, best, best_votes, len(evidence))
+    return area
 
 
 def classify(signals: "list[Signal]") -> "list[Signal]":
