@@ -551,26 +551,39 @@ class BandScan:
         else coming out of the queue is something wrong with the
         queue, and turning that into a hop that quietly timed out
         loses both the reason and the hop.
+
+        The tuning is checked before the wait and again after it.
+        The callback reads the generation before it converts the
+        samples, so a block stamped with this hop's tuning can
+        arrive after somebody else has retuned - the block is
+        honestly labelled and the receiver is somewhere else, and
+        carrying on would have the sweep tune again over whatever
+        the person just chose.
         """
         if self._blocks is None:                # pragma: no cover - guard
             return None
-        sdr = self.controller.sdr_receiver
         deadline = time.monotonic() + timeout_sec
         while time.monotonic() < deadline:
             if self.cancelled:
                 return None
-            now, now_at = sdr.the_tuning_and_its_frequency()
-            if now != wanted:
-                raise ScanFailed(
-                    "something else tuned to %.1f MHz part way through "
-                    "this hop" % (now_at / 1e6))
+            self._still_ours(wanted)
             try:
                 generation, block = self._blocks.get(timeout=0.1)
             except queue.Empty:
                 continue
             if generation == wanted:
+                self._still_ours(wanted)
                 return block
         return None
+
+    def _still_ours(self, wanted: int) -> None:
+        """Raise unless the tuner is still where this hop put it."""
+        sdr = self.controller.sdr_receiver
+        now, now_at = sdr.the_tuning_and_its_frequency()
+        if now != wanted:
+            raise ScanFailed(
+                "something else tuned to %.1f MHz part way through "
+                "this hop" % (now_at / 1e6))
 
     def _put_the_receiver_back(self, freq_hz: float, auto_gain: bool) -> None:
         """Where it was, however the sweep ended.

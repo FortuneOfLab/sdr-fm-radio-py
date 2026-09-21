@@ -478,6 +478,33 @@ def test_a_tune_that_landed_somewhere_else_is_a_failure():
         scan._tune_and_settle(78.0e6)
 
 
+def test_a_late_block_of_ours_does_not_hide_that_the_tuner_moved():
+    """The block is honestly labelled and the receiver has gone.
+
+    The callback stamps a block before it converts the samples, so
+    one of this hop's tuning can land in the queue after somebody
+    else has retuned.  Taking it and carrying on has the sweep tune
+    again over whatever the person just chose - the tuning is
+    checked after the wait as well as before it.
+    """
+    controller = FakeController()
+    scan = BandScan(controller)
+    sdr = controller.sdr_receiver
+    ours = scan._tune_and_settle(78.0e6)
+
+    class RetunedWhileWeWaited:
+        """Hands over a block of *ours*, from after somebody moved."""
+
+        def get(self, timeout=None):
+            sdr.moved_to(90.5e6)            # the window, mid-wait
+            return ours, np.zeros(16384, dtype=np.complex64)
+
+    scan._blocks = RetunedWhileWeWaited()
+
+    with pytest.raises(ScanFailed, match="90.5"):
+        scan._a_fresh_block(ours, timeout_sec=0.5)
+
+
 def test_a_block_of_the_right_tuning_is_taken():
     """The other half: nothing moved, so the block is this hop's."""
     controller = FakeController()
