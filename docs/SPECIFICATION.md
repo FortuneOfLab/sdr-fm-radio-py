@@ -129,8 +129,11 @@ USB 制御転送で決してブロックしないよう、遅い処理はすべ�
 - JIT プリウォーム（`_prewarm_jit`）
 - ステレオ / モノ、録音、IQ 録音、AGC、ゲインの facade メソッド
 - 局リストの公開（`get_stations_list` はプリセット、`get_catalogue` /
-  `search_stations` / `stations_in_area` / `current_station` は全件。
-  局名の解決は周波数をキーにキャッシュします — 3.9 参照）
+  `search_stations` / `stations_in_area` は全件）
+- ダイヤルの局名（`current_station` とスナップショットの `station`）は
+  `area` で絞った**命名ビュー**を使います。全件ではありません — 周波数は
+  全国で一意でないためで、3.9 に対照表があります。周波数をキーに
+  キャッシュします
 
 `_BlockProfiler` が per-block の処理時間・キュー深さを計測し、16 ms
 予算を越えるブロックや 60 秒サマリをログ出力します（`--log` 時のみ）。

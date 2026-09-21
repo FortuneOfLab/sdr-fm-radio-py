@@ -307,6 +307,9 @@ class FMReceiverController:
         # problems are printed as well as logged: logging is off unless
         # --log was passed, and a station file that was silently ignored is
         # exactly the kind of thing the user needs to hear about.
+        # Problems with the station file are printed as well as
+        # logged, and said once however many readers trip over them.
+        self._said_about_stations: set[str] = set()
         self.catalogue: list[Station] = load_stations(
             stations_path, warn=self._warn_station_config)
         # What may put a name on the dial, as against what exists.  A
@@ -398,9 +401,18 @@ class FMReceiverController:
             self.logger.error(f"Failed to initialize FM Receiver Controller: {e}", exc_info=True)
             raise
 
-    @staticmethod
-    def _warn_station_config(message: str) -> None:
-        """Put a station-list problem in front of the user, log or no log."""
+    def _warn_station_config(self, message: str) -> None:
+        """Put a station-list problem in front of the user, log or no log.
+
+        Once each.  The file is read twice - once for the catalogue
+        and once for where the radio is - so a file that will not
+        parse at all has the same complaint to make both times, and
+        one problem is one problem however many things tripped over
+        it.
+        """
+        if message in self._said_about_stations:
+            return
+        self._said_about_stations.add(message)
         print(f"Station list: {message}", file=sys.stderr)
 
     # ------------------------------------------------------------------
