@@ -33,6 +33,7 @@ import sys
 import time
 import threading
 import logging
+from pathlib import Path
 
 import numpy as np
 
@@ -48,8 +49,8 @@ from fm_radio.exceptions import (
     SDRDeviceError, AudioOutputError, RecordingError,
 )
 from fm_radio.stations import (
-    Station, load_stations, favorites, here, home_area, search, in_area,
-    nearest,
+    Station, load_stations, favorites, here, home_area, remember_area,
+    search, in_area, nearest,
 )
 from fm_radio import multipath
 from fm_radio.spectrum import (
@@ -318,9 +319,13 @@ class FMReceiverController:
         # sits on - and as readily after a transmitter a thousand
         # kilometres away.  Looking a station up is a different
         # question and still sees all of them.
-        self._here: list[Station] = here(
-            self.catalogue,
-            home_area(stations_path, warn=self._warn_station_config))
+        # Kept, because the area can be settled later: a band scan
+        # works out where the receiver is, and the answer goes in the
+        # user's file - see remember_where_this_is.
+        self._stations_path = stations_path
+        self._area: str | None = home_area(
+            stations_path, warn=self._warn_station_config)
+        self._here: list[Station] = here(self.catalogue, self._area)
         self.presets: list[Station] = favorites(self.catalogue)
         if not self.catalogue:
             self.logger.warning(
@@ -430,6 +435,52 @@ class FMReceiverController:
     def get_catalogue(self) -> list[Station]:
         """Return every known transmitter, sorted by area then frequency."""
         return self.catalogue
+
+    @property
+    def area(self) -> str | None:
+        """The area this receiver takes itself to be in, or None.
+
+        What :func:`fm_radio.stations.here` was given, rather than
+        what the file says now: the two are the same until something
+        writes to the file, and what the receiver is naming by is
+        the question anything asking this has.
+        """
+        return self._area
+
+    def remember_where_this_is(self, area: str) -> Path:
+        """Write *area* into the user's file, and name by it now.
+
+        Both, because either alone is half an answer: a setting that
+        is only in the file does nothing until the next start, and
+        one that is only in the receiver is gone by then.
+
+        Nothing changes here if the write does not happen.  The
+        exception carries what to type instead, and a receiver that
+        went on naming stations by a setting the file does not have
+        would be telling the user their next start keeps this.
+
+        Args:
+            area: One of :data:`fm_radio.stations.AREAS`.
+
+        Returns:
+            The path written.
+
+        Raises:
+            ValueError: if *area* is not one of the areas.
+            WillNotEdit: if the file could not be changed safely; it
+                was left alone.
+            OSError: if the file could not be written.
+        """
+        path = remember_area(area, self._stations_path)
+        self._area = area
+        # One rebinding, which the processing thread's next read sees
+        # whole: _station_name_for takes the list once and walks that
+        # one.  Filtering the list in place would have it walking a
+        # list being emptied.
+        self._here = here(self.catalogue, area)
+        self.logger.info("Naming stations from %s (%d of %d transmitters)",
+                         area, len(self._here), len(self.catalogue))
+        return path
 
     def search_stations(self, query: str) -> list[Station]:
         """Return catalogue entries matching *query*.

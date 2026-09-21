@@ -95,6 +95,97 @@ favorite = true
             == legacy_preset_mhz)
 
 
+needs_tomllib = pytest.mark.skipif(
+    stations.tomllib is None, reason="tomllib requires Python 3.11+")
+
+
+@needs_tomllib
+def test_the_area_it_names_by_is_the_one_in_the_file(build_controller,
+                                                     tmp_path):
+    path = tmp_path / "stations.toml"
+    path.write_text('area = "北海道"\n', encoding="utf-8")
+
+    instance = build_controller(path)
+
+    assert instance.area == "北海道"
+
+
+@needs_tomllib
+def test_settling_on_an_area_writes_it_and_names_by_it_now(build_controller,
+                                                            no_user_config):
+    """Either alone is half an answer: a setting only in the file
+    does nothing until the next start, and one only in the receiver
+    is gone by then.
+    """
+    instance = build_controller(no_user_config)
+    assert instance.area is None
+    # 80.0 MHz is TOKYO FM to a receiver that does not know where it
+    # is, and nothing at all to one in Hokkaido: no transmitter there
+    # is on that channel.  Which is the point of the setting.
+    was = instance.current_station()
+    assert was is not None and was.area == "関東"
+
+    written = instance.remember_where_this_is("北海道")
+
+    assert instance.area == "北海道"
+    assert stations.home_area(written) == "北海道"
+    assert instance.current_station() is None, "it is still naming Tokyo"
+
+
+@needs_tomllib
+def test_it_writes_to_the_file_it_was_given(build_controller, monkeypatch,
+                                            tmp_path):
+    """The receiver was pointed at a file; so is this."""
+    theirs = tmp_path / "somebody-elses.toml"
+    monkeypatch.setattr(stations, "user_config_path", lambda: theirs)
+    mine = tmp_path / "mine.toml"
+
+    instance = build_controller(mine)
+    written = instance.remember_where_this_is("関東")
+
+    assert written == mine
+    assert not theirs.exists(), "it wrote to the user's own file"
+
+
+@needs_tomllib
+def test_a_file_it_cannot_change_leaves_the_naming_where_it_was(
+        build_controller, tmp_path, capsys):
+    """A receiver naming stations by a setting the file does not
+    have would be telling the user their next start keeps this.
+    """
+    path = tmp_path / "stations.toml"
+    had = "[[station\nname = broken\n"
+    path.write_text(had, encoding="utf-8")
+    instance = build_controller(path)
+    capsys.readouterr()                 # the parse failure, already said
+
+    was = instance.current_station()
+
+    with pytest.raises(stations.WillNotEdit):
+        # Hokkaido, because narrowing to it would show: no
+        # transmitter there is on the frequency this starts at.
+        instance.remember_where_this_is("北海道")
+
+    assert instance.area is None
+    assert path.read_text(encoding="utf-8") == had
+    assert instance.current_station() is was, "it narrowed anyway"
+
+
+@needs_tomllib
+def test_an_area_that_is_not_one_is_refused_before_anything_is_written(
+        build_controller, no_user_config):
+    """The loader would refuse it at the next start, which is a
+    receiver that names nothing and a file the user has to find.
+    """
+    instance = build_controller(no_user_config)
+
+    with pytest.raises(ValueError):
+        instance.remember_where_this_is("Kanto")
+
+    assert instance.area is None
+    assert not no_user_config.exists()
+
+
 def test_broken_stations_file_is_reported_with_logging_disabled(
         build_controller, tmp_path, capsys):
     """--log is off by default, so a print is the only channel left."""

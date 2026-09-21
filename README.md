@@ -158,6 +158,13 @@ The areas are `北海道` `東北` `関東` `信越` `北陸` `東海` `近畿` 
 `四国` `九州・沖縄`. Anything else is reported and ignored — a line in a file
 should not leave the receiver unable to name anything.
 
+You do not have to work it out yourself. After a band scan the GUI
+matches what it heard against the transmitter sites in the catalogue, and
+if that points somewhere clearly enough it offers to save it: yes writes
+that one line and leaves the rest of the file as you typed it, and the
+naming changes at once rather than at the next start. If the file cannot
+be changed safely it is left alone and you are told what to add.
+
 It narrows what can be named and nothing else: `list all`, `list 北海道` and
 searching still see every transmitter, because looking a station up is a
 different question from naming the one on the dial. Stations you added
