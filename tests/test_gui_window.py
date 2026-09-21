@@ -65,6 +65,7 @@ class FakeController:
         self.finishing_iq = False
         self.recording_path = None
         self.calls: list[tuple] = []
+        self.cleanups: list[str] = []
         self.quit_event = _Event()
         self.station = _Station("TOKYO FM")
         self.presets = [("TOKYO FM", 80.0e6), ("J-WAVE", 81.3e6)]
@@ -154,6 +155,15 @@ class FakeController:
         self.last_tune = self.device_worker.submit(
             TUNE, f"Tuned to {freq_hz / 1e6:.1f} MHz", write)
         return self.last_tune
+
+    def cleanup(self) -> None:
+        """Give the device back, as the window asks when one goes.
+
+        The window calls this off its own thread once it has shown
+        why nothing is coming; the real one closes the recording and
+        the audio stream.
+        """
+        self.cleanups.append("cleanup")
 
     def set_agc_mode(self, enabled):
         """Switch Auto now and write later, as AutoGainController does.
@@ -1579,6 +1589,161 @@ def test_a_sweep_that_found_nothing_says_that_too(window, monkeypatch,
 
     assert "nothing" in view._health.text()
     assert view._found.count() == 1, "a heading and no finds"
+
+
+def test_the_refresh_does_not_hand_the_gain_back_mid_sweep(
+        window, monkeypatch, qt_app):
+    """The sweep turns the AGC off, and the window used to believe it.
+
+    A refresh saw manual gain, handed the slider back, and a gain
+    moved then puts the sweep's hops in different units - two
+    frequencies measured at two gains, compared as though they were
+    not.  Nothing in the sweep can notice that; it only watches the
+    tuning.
+    """
+    let_it_go = threading.Event()
+    view, controller, _ = a_scan(window, monkeypatch, hold=let_it_go)
+    view._scan_button.click()
+    qt_app.processEvents()
+    assert not view._gain_slider.isEnabled()
+
+    # What BandScan does to the receiver, arriving in a snapshot.
+    controller.status = snapshot(auto_gain=False)
+    view.refresh()
+    qt_app.processEvents()
+
+    try:
+        assert not view._gain_slider.isEnabled(), \
+            "the slider was handed back in the middle of a sweep"
+        assert not view._auto_gain.isEnabled()
+    finally:
+        let_it_go.set()
+        finish(view, qt_app)
+
+
+def test_the_gain_comes_back_on_manual_when_the_sweep_is_over(
+        window, monkeypatch, qt_app):
+    """And the slider follows the Auto box again, as it did before."""
+    view, controller, _ = a_scan(window, monkeypatch, found=[])
+    view._scan_button.click()
+    finish(view, qt_app)
+
+    controller.status = snapshot(auto_gain=False)
+    view.refresh()
+
+    assert view._gain_slider.isEnabled()
+
+    controller.status = snapshot(auto_gain=True)
+    view.refresh()
+
+    assert not view._gain_slider.isEnabled()
+
+
+def test_what_the_sweep_is_doing_survives_a_refresh(window, monkeypatch,
+                                                     qt_app):
+    """The window refreshes every 50 ms and the sweep takes seconds.
+
+    The progress line shared a sort with a tune's, and the refresh
+    clears that whenever the window has no tune of its own
+    outstanding - which is every refresh during a scan, because the
+    scan's tunes are the scan's.  The line lasted under 50 ms.
+    """
+    let_it_go = threading.Event()
+    view, _controller, _ = a_scan(window, monkeypatch, hold=let_it_go)
+    view._scan_button.click()
+    qt_app.processEvents()
+    said = view._health.text()
+    assert "76.4 MHz" in said, said
+
+    view.refresh()
+
+    try:
+        assert view._health.text() == said, "the refresh wiped it"
+    finally:
+        let_it_go.set()
+        finish(view, qt_app)
+
+
+def test_a_device_that_goes_mid_sweep_keeps_the_controls_shut(
+        window, monkeypatch, qt_app):
+    """A sweep that ends afterwards must not hand them back.
+
+    The refresh timer stops when the device goes, so anything
+    wrongly re-enabled then stays that way - offering to tune a
+    receiver that has been given back.
+    """
+    from fm_radio.band_scan import ScanFailed
+
+    view, controller, _ = a_scan(
+        window, monkeypatch, fails=ScanFailed("the SDR went"))
+    view._scan_button.click()
+    finish(view, qt_app)
+    assert view._down.isEnabled(), "this test needs a live receiver first"
+
+    controller.device_failure = "the SDR was unplugged"
+    view.refresh()
+    qt_app.processEvents()
+
+    for widget in (view._down, view._up, view._presets, view._found,
+                   view._auto_gain, view._gain_slider, view._scan_button):
+        assert not widget.isEnabled(), "%s still offers to work" % widget
+
+
+def test_a_sweep_ending_after_the_device_went_changes_nothing(
+        window, monkeypatch, qt_app):
+    """The order that really happens: the device goes, then the
+    sweep notices and says it failed.
+    """
+    let_it_go = threading.Event()
+    view, controller, _ = a_scan(window, monkeypatch, hold=let_it_go)
+    view._scan_button.click()
+    qt_app.processEvents()
+
+    controller.device_failure = "the SDR was unplugged"
+    view.refresh()
+    let_it_go.set()
+    finish(view, qt_app)
+
+    for widget in (view._down, view._up, view._presets, view._found,
+                   view._auto_gain, view._gain_slider, view._scan_button):
+        assert not widget.isEnabled(), "%s was handed back" % widget
+
+
+def test_a_device_that_goes_mid_sweep_cancels_it(window, monkeypatch,
+                                                  qt_app):
+    """There is no band to sweep any more."""
+    let_it_go = threading.Event()
+    view, controller, _ = a_scan(window, monkeypatch, hold=let_it_go)
+    view._scan_button.click()
+    qt_app.processEvents()
+    sweep = view._sweep
+
+    controller.device_failure = "the SDR was unplugged"
+    view.refresh()
+
+    assert sweep._scan.cancelled
+    let_it_go.set()
+    finish(view, qt_app)
+
+
+def test_finished_sweeps_do_not_pile_up_under_the_window(window,
+                                                          monkeypatch,
+                                                          qt_app):
+    """Each one holds a demodulator and a spectrum maker.
+
+    Their parent is the window, so without being deleted every
+    sweep ever run stays a child of it.
+    """
+    from fm_radio.gui.main_window import Sweep
+
+    view, _controller, _ = a_scan(window, monkeypatch, found=[])
+
+    for _ in range(4):
+        view._scan_button.click()
+        finish(view, qt_app)
+    qt_app.processEvents()              # deleteLater happens here
+
+    assert view.findChildren(Sweep) == []
 
 
 def test_closing_the_window_stops_a_sweep(window, monkeypatch, qt_app):
