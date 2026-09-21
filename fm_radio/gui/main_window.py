@@ -383,7 +383,9 @@ class ReceiverWindow(QMainWindow):
         self._scan_button = QPushButton("Scan", box)
         self._scan_button.setToolTip(
             "Sweep 76-95 MHz for whatever is transmitting. "
-            "Takes a few seconds, and the radio goes with it.")
+            "Takes a few seconds, and the radio goes with it. "
+            "A recording that is running will be ended: the first "
+            "hop is a tune, and a tune closes the file.")
         self._scan_button.clicked.connect(self._scan_or_stop)
         row.addWidget(self._scan_button)
         return box
@@ -606,8 +608,13 @@ class ReceiverWindow(QMainWindow):
         # Stopping is the one thing still worth offering mid-sweep,
         # and nothing is once the device has gone.
         self._scan_button.setEnabled(alive and not self._stopping)
+        # Recording goes with the rest.  A tune shuts any recording
+        # that is running - that is the receiver's rule, and a sweep
+        # is two dozen tunes - so a button pressed mid-sweep makes a
+        # file less than one hop long and then stops.  It offers
+        # something it cannot do.
         for widget in (self._record_audio, self._record_iq):
-            widget.setEnabled(alive)
+            widget.setEnabled(usable)
 
     def _show_what_was_found(self, found) -> None:
         """Fill the list of what is on the band, newest sweep only."""

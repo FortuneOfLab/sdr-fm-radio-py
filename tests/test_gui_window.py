@@ -1746,6 +1746,38 @@ def test_finished_sweeps_do_not_pile_up_under_the_window(window,
     assert view.findChildren(Sweep) == []
 
 
+def test_recording_is_not_offered_during_a_sweep(window, monkeypatch,
+                                                  qt_app):
+    """The button could not keep its promise.
+
+    A tune shuts any recording that is running, and a sweep is two
+    dozen tunes: a recording started mid-sweep is a file less than
+    one hop long, ended by the next hop.
+    """
+    let_it_go = threading.Event()
+    view, _controller, _ = a_scan(window, monkeypatch, hold=let_it_go)
+
+    view._scan_button.click()
+    qt_app.processEvents()
+
+    try:
+        assert not view._record_audio.isEnabled()
+        assert not view._record_iq.isEnabled()
+    finally:
+        let_it_go.set()
+        finish(view, qt_app)
+
+    assert view._record_audio.isEnabled(), "not given back afterwards"
+    assert view._record_iq.isEnabled()
+
+
+def test_the_scan_button_says_a_recording_will_be_ended(window):
+    """It is a surprise worth not having."""
+    view, _ = window(FakeController(snapshot()))
+
+    assert "recording" in view._scan_button.toolTip()
+
+
 def test_closing_the_window_stops_a_sweep(window, monkeypatch, qt_app):
     """It would go on retuning a receiver being taken apart."""
     let_it_go = threading.Event()
