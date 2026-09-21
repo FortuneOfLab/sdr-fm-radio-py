@@ -54,6 +54,7 @@ one.
 
 from __future__ import annotations
 
+import collections
 import dataclasses
 import logging
 import queue
@@ -125,6 +126,36 @@ UNCONFIRMED = "unconfirmed"
 #: far enough above it to be what this is the edge of.
 LIKELY_SKIRT = "likely skirt"
 
+#: How far below the loudest find a signal can be and still say
+#: where the receiver is.  Relative, not a dBFS figure: the gain is
+#: held for a sweep so the hops can be compared with each other,
+#: but not between sweeps - it is whatever the AGC had settled on,
+#: or whatever gain the user set.  An absolute threshold would find
+#: no evidence at all after tuning to a strong station, and too
+#: much of it at a high manual gain.  Measured here: the four finds
+#: within this of the loudest were all one transmitter site, and
+#: the next was 14 dB further down.
+HOME_EVIDENCE_RANGE_DB: float = 25.0
+
+#: How many signals it takes.  One frequency is not unique; a
+#: handful of them together nearly is, and two is the fewest that
+#: can rule a site out.
+HOME_EVIDENCE_LEAST: int = 2
+
+#: How near a find has to be to a catalogue entry to be that
+#: entry.  Both sit on the 0.1 MHz allocation grid, so this is
+#: about which channel and not about how wide a signal is: half a
+#: channel, the same tolerance nearest() uses.  A station's width
+#: would reach the channels either side and count a transmitter
+#: that has 80.1 and 81.4 as evidence for hearing 80.0 and 81.3.
+HOME_SAME_CHANNEL_HZ: float = CHANNEL_STEP_HZ / 2.0
+
+#: How far a site has to be ahead of the next to be believed.  Two
+#: sites that explain the same signals are not evidence for either,
+#: and a wrong area is worse than none - it takes the name off every
+#: station the receiver can hear.
+HOME_MARGIN: int = 2
+
 #: How far a skirt reaches, and how far below its station it is by
 #: then.  82.1 MHz is NHK-FM at 82.5 leaking through; the peak test
 #: only rejects skirts within 200 kHz, and widening that would lose
@@ -168,6 +199,83 @@ class Signal:
     @property
     def freq_mhz(self) -> float:
         return self.freq_hz / 1e6
+
+
+def where_this_is(signals: "list[Signal]", catalogue,
+                  within_db: float = HOME_EVIDENCE_RANGE_DB,
+                  margin: int = HOME_MARGIN,
+                  least: int = HOME_EVIDENCE_LEAST) -> "str | None":
+    """The area the receiver is in, from the stations it can hear.
+
+    A frequency is not unique in Japan, but a handful of them
+    together is close to it: the four strong signals a sweep found
+    here are all transmitted from one site, and no other site in
+    the country carries more than two of them.
+
+    Scored by **transmitter site**, not by area.  An area is a lot
+    of places - 東北 has transmitters on most of the band, so it can
+    explain almost anything, and scoring by area picked it over 関東
+    nine finds to eight while the receiver was in Tokyo.  A site is
+    one place, and one place either carries these frequencies or
+    does not: 東京 explained four of four, and the next best site
+    two.
+
+    Only the loud confirmed finds count, and loud is measured
+    against the loudest of them rather than in dBFS: the gain is
+    held for a sweep, so its hops compare with each other and not
+    with another sweep's.  The quiet end is skirts and distant
+    stations, which are evidence about somewhere else.
+
+    Returns:
+        One of :data:`fm_radio.stations.AREAS`, or None when the
+        evidence does not point anywhere clearly enough - too few
+        signals, or two sites that explain the same ones.  None is
+        the right answer more often than a guess: a wrong area
+        takes the name off every station the receiver can hear.
+    """
+    from fm_radio.stations import AREAS
+
+    confirmed = [s for s in signals if s.sort == CONFIRMED]
+    if len(confirmed) < least:
+        return None
+    loudest = max(s.power_dbfs for s in confirmed)
+    evidence = [s for s in confirmed
+                if s.power_dbfs >= loudest - within_db]
+    if len(evidence) < least:
+        return None
+
+    entries = list(catalogue)
+    # Keyed on the place, which is the area and the site together:
+    # a site name is not unique in Japan either.  "小国" is 89.8 MHz
+    # in 東北 and 80.4 MHz in 九州・沖縄, and counting them as one
+    # transmitter would have two unrelated signals vote for it.
+    votes: "collections.Counter[tuple[str, str]]" = collections.Counter()
+    for signal in evidence:
+        places = set()
+        for entry in entries:
+            if abs(entry.freq_hz - signal.freq_hz) > HOME_SAME_CHANNEL_HZ:
+                continue
+            if not entry.site or entry.area not in AREAS:
+                # Nothing to be a place: the user's own entries carry
+                # whatever site and area they typed, and this is
+                # supposed to answer with one of the areas.
+                continue
+            places.add((entry.area, entry.site))
+        for place in places:
+            votes[place] += 1
+    if not votes:
+        return None
+    ranked = votes.most_common()
+    (area, site), best_votes = ranked[0]
+    runner_up = ranked[1][1] if len(ranked) > 1 else 0
+    if best_votes - runner_up < margin:
+        logger.info("Not sure where this is: %s",
+                    ", ".join("%s %s %d" % (a, t, n) for (a, t), n
+                              in ranked[:3]))
+        return None
+    logger.info("This looks like %s: %s explains %d of %d",
+                area, site, best_votes, len(evidence))
+    return area
 
 
 def classify(signals: "list[Signal]") -> "list[Signal]":

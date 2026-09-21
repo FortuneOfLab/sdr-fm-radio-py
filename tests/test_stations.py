@@ -280,6 +280,311 @@ def test_asking_where_the_radio_is_without_a_file_says_nothing(tmp_path):
     assert st.home_area(tmp_path / "there is none.toml") is None
 
 
+# ----------------------------------------------------------------------
+# Writing down where the radio is
+# ----------------------------------------------------------------------
+
+def test_the_area_is_written_where_there_was_no_file(tmp_path):
+    path = tmp_path / "somewhere" / "stations.toml"
+
+    written = st.remember_area("関東", path)
+
+    assert written == path
+    assert path.read_text(encoding="utf-8") == 'area = "関東"\n'
+
+
+def test_the_area_goes_at_the_top_of_a_file_that_has_none(tmp_path):
+    """It has to.  TOML reads a line after a [[station]] as that
+    station's own field, silently, and the setting would do nothing.
+    """
+    path = tmp_path / "stations.toml"
+    path.write_text('[[station]]\nname = "うちの局"\nfreq_mhz = 79.2\n',
+                    encoding="utf-8")
+
+    st.remember_area("関東", path)
+
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert lines[0] == 'area = "関東"'
+    assert "[[station]]" in lines
+
+
+def test_the_rest_of_the_file_is_left_alone(tmp_path):
+    """Most of what is in it was typed by the user."""
+    path = tmp_path / "stations.toml"
+    had = """# my stations, do not lose this
+
+[[station]]
+name = "レインボータウンFM"
+freq_mhz = 79.2
+site = "江東"
+favorite = true
+
+[[override]]
+match_name = "TOKYO FM"
+hidden = true
+"""
+    path.write_text(had, encoding="utf-8")
+
+    st.remember_area("関東", path)
+
+    now = path.read_text(encoding="utf-8")
+    assert had in now, "something the user wrote was changed"
+    assert now.startswith('area = "関東"\n')
+
+
+def test_an_area_already_there_is_replaced_rather_than_repeated(tmp_path):
+    path = tmp_path / "stations.toml"
+    path.write_text('# where I am\narea = "北海道"\n\n[[station]]\n'
+                    'name = "x"\nfreq_mhz = 80.0\n', encoding="utf-8")
+
+    st.remember_area("関東", path)
+
+    now = path.read_text(encoding="utf-8")
+    assert now.count("area =") == 1
+    assert 'area = "関東"' in now
+    assert "北海道" not in now
+    assert now.startswith("# where I am\n"), "the comment was moved"
+
+
+def test_an_area_inside_a_station_is_not_the_one_to_replace(tmp_path):
+    """That is the station's own field, and the trap the README warns
+    about.  Editing it would make the trap worse.
+    """
+    path = tmp_path / "stations.toml"
+    path.write_text('[[station]]\nname = "x"\nfreq_mhz = 80.0\n'
+                    'area = "北海道"\n', encoding="utf-8")
+
+    st.remember_area("関東", path)
+
+    now = path.read_text(encoding="utf-8")
+    assert 'area = "北海道"' in now, "the station's own area was overwritten"
+    assert now.startswith('area = "関東"\n')
+
+
+@needs_tomllib
+def test_what_is_written_is_what_is_read_back(tmp_path):
+    """The whole point: the loader has to agree with the writer."""
+    path = tmp_path / "stations.toml"
+    path.write_text('[[station]]\nname = "うちの局"\nfreq_mhz = 79.2\n'
+                    'site = "うち"\n', encoding="utf-8")
+
+    st.remember_area("関東", path)
+
+    assert st.home_area(path) == "関東"
+    catalogue = st.load_stations(user_path=path)
+    assert [x.name for x in catalogue if x.name == "うちの局"]
+    assert {x.area for x in st.here(catalogue, st.home_area(path))} <= {
+        "関東", ""}
+
+
+@needs_tomllib
+def test_writing_twice_leaves_one_line(tmp_path):
+    path = tmp_path / "stations.toml"
+
+    st.remember_area("関東", path)
+    st.remember_area("北海道", path)
+
+    assert path.read_text(encoding="utf-8").count("area =") == 1
+    assert st.home_area(path) == "北海道"
+
+
+@pytest.mark.parametrize("not_an_area", ["かんとう", "Kanto", "", "関東 "])
+def test_an_area_the_loader_would_refuse_is_not_written(tmp_path,
+                                                         not_an_area):
+    """Writing something that will be reported on every start is
+    worse than not writing.
+    """
+    path = tmp_path / "stations.toml"
+
+    with pytest.raises(ValueError):
+        st.remember_area(not_an_area, path)
+
+    assert not path.exists()
+
+
+@needs_tomllib
+def test_a_quoted_key_is_the_same_setting_and_is_replaced(tmp_path):
+    """Writing a second one would be two of the same key, and
+    tomllib refuses a file with that in it - all of it, not just
+    the line.  A working file would stop working.
+    """
+    path = tmp_path / "stations.toml"
+    path.write_text('"area" = "北海道"\n', encoding="utf-8")
+
+    st.remember_area("関東", path)
+
+    assert st.home_area(path) == "関東"
+    assert path.read_text(encoding="utf-8").count("area") == 1
+
+
+@needs_tomllib
+def test_a_file_with_a_byte_order_mark_is_left_alone(tmp_path):
+    """tomllib will not read one whatever is done to it.
+
+    A mark belongs at the start of a file and nowhere else, so a
+    line cannot go above it; and leaving it where it is writes into
+    a file the receiver still cannot read.  Neither is worth doing,
+    and the user is told what to type.
+    """
+    path = tmp_path / "stations.toml"
+    had = '\ufeff[[station]]\nname = "x"\nfreq_mhz = 80.0\n'
+    path.write_text(had, encoding="utf-8")
+
+    with pytest.raises(st.WillNotEdit) as complaint:
+        st.remember_area("関東", path)
+
+    assert path.read_text(encoding="utf-8") == had
+    assert 'area = "関東"' in str(complaint.value)
+
+
+@needs_tomllib
+def test_an_area_inside_a_long_string_is_not_the_setting(tmp_path):
+    """It is somebody's text, and editing it would change what they
+    wrote and still not set the area.
+    """
+    path = tmp_path / "stations.toml"
+    had = 'note = """\narea = "北海道"\n"""\n'
+    path.write_text(had, encoding="utf-8")
+
+    with pytest.raises(st.WillNotEdit):
+        st.remember_area("関東", path)
+
+    assert path.read_text(encoding="utf-8") == had
+
+
+@needs_tomllib
+def test_a_file_that_does_not_parse_is_left_alone(tmp_path):
+    """Editing blind could only make it worse, and the receiver
+    already tells the user it cannot read it.
+    """
+    path = tmp_path / "stations.toml"
+    had = "[[station\nname = 'unclosed'\n"
+    path.write_text(had, encoding="utf-8")
+
+    with pytest.raises(st.WillNotEdit):
+        st.remember_area("関東", path)
+
+    assert path.read_text(encoding="utf-8") == had
+
+
+@needs_tomllib
+def test_what_it_refuses_to_do_it_says_how_to_do(tmp_path):
+    """The user is going to have to type it themselves."""
+    path = tmp_path / "stations.toml"
+    path.write_text("[[station\n", encoding="utf-8")
+
+    with pytest.raises(st.WillNotEdit) as complaint:
+        st.remember_area("関東", path)
+
+    assert 'area = "関東"' in str(complaint.value)
+
+
+@needs_tomllib
+def test_an_empty_file_is_written_to(tmp_path):
+    """Nothing to lose and nothing to misread."""
+    path = tmp_path / "stations.toml"
+    path.write_text("", encoding="utf-8")
+
+    st.remember_area("関東", path)
+
+    assert st.home_area(path) == "関東"
+
+
+@needs_tomllib
+def test_a_comment_on_the_area_line_is_kept(tmp_path):
+    """Replacing the line takes it away, and the check afterwards
+    does not notice: what is left still parses.
+    """
+    path = tmp_path / "stations.toml"
+    path.write_text('area = "北海道"  # 旅行中だけ変更\n',
+                    encoding="utf-8")
+
+    st.remember_area("関東", path)
+
+    now = path.read_text(encoding="utf-8")
+    assert "# 旅行中だけ変更" in now, "the note went"
+    assert st.home_area(path) == "関東"
+
+
+@needs_tomllib
+def test_the_spacing_on_the_area_line_is_kept(tmp_path):
+    """It is how they chose to write it."""
+    path = tmp_path / "stations.toml"
+    path.write_text('area   =   "北海道"\n', encoding="utf-8")
+
+    st.remember_area("関東", path)
+
+    assert path.read_text(encoding="utf-8") == 'area   =   "関東"\n'
+
+
+@needs_tomllib
+def test_the_line_endings_the_file_uses_are_kept(tmp_path):
+    """Reading in the usual way turns every CRLF into a LF, and
+    writing that back rewrites every line in the file.
+    """
+    path = tmp_path / "stations.toml"
+    had = 'area = "北海道"\r\n\r\n[[station]]\r\nname = "x"\r\nfreq_mhz = 80.0\r\n'
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        handle.write(had)
+
+    st.remember_area("関東", path)
+
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        now = handle.read()
+    assert now.count("\r\n") == had.count("\r\n"), "the endings changed"
+    assert "\n\n" not in now.replace("\r\n", "\r"), "a lone LF crept in"
+    assert st.home_area(path) == "関東"
+
+
+@needs_tomllib
+def test_a_new_line_uses_the_endings_the_file_already_has(tmp_path):
+    path = tmp_path / "stations.toml"
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        handle.write('[[station]]\r\nname = "x"\r\nfreq_mhz = 80.0\r\n')
+
+    st.remember_area("関東", path)
+
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        now = handle.read()
+    assert now.startswith('area = "関東"\r\n'), now[:40]
+    assert "\n" not in now.replace("\r\n", ""), "a lone LF crept in"
+
+
+@needs_tomllib
+def test_an_area_written_in_a_way_this_cannot_change_is_left_alone(tmp_path):
+    """A value it cannot take apart is a line to leave alone."""
+    path = tmp_path / "stations.toml"
+    had = 'area = """北海道"""\n'
+    path.write_text(had, encoding="utf-8")
+
+    with pytest.raises(st.WillNotEdit):
+        st.remember_area("関東", path)
+
+    assert path.read_text(encoding="utf-8") == had
+
+
+def test_a_file_that_is_not_utf_8_is_left_alone(tmp_path):
+    """Saved as CP932 by an editor on this machine, most likely."""
+    path = tmp_path / "stations.toml"
+    had = 'area = "北海道"\n'.encode("cp932")
+    path.write_bytes(had)
+
+    with pytest.raises(st.WillNotEdit) as complaint:
+        st.remember_area("関東", path)
+
+    assert path.read_bytes() == had
+    assert "UTF-8" in str(complaint.value)
+
+
+def test_nothing_is_left_beside_the_file(tmp_path):
+    """It is written beside and moved into place; the spare goes."""
+    path = tmp_path / "stations.toml"
+
+    st.remember_area("関東", path)
+
+    assert [x.name for x in tmp_path.iterdir()] == ["stations.toml"]
+
+
 @needs_tomllib
 def test_user_station_replaces_a_colliding_bundled_entry(write_toml):
     path = write_toml("""

@@ -85,6 +85,7 @@ import json
 import logging
 import math
 import os
+import re
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Iterable
@@ -218,6 +219,198 @@ def user_config_path() -> Path:
         base = os.environ.get("XDG_CONFIG_HOME")
         root = Path(base) if base else Path.home() / ".config"
     return root / "fm_radio" / USER_CONFIG_FILENAME
+
+
+#: How to find the line to replace.  Only before the first table:
+#: TOML reads ``area = "関東"`` after a ``[[station]]`` as a field
+#: of that station, so a line further down is somebody else's and
+#: not to be touched.  The key can be quoted - ``"area" = "関東"``
+#: is the same setting - and a file that says it that way has to be
+#: found rather than written a second time, which would be two of
+#: the same key and a file tomllib refuses whole.
+_AREA_LINE = re.compile(r"""^\s*(?:area|"area"|'area')\s*=""")
+_TABLE_LINE = re.compile(r"^\s*\[")
+
+#: The same line taken apart, so that the value can be changed and
+#: nothing else on it.  What the user wrote around the value is
+#: theirs - the spacing, and a comment saying why - and replacing
+#: the line would take it away without the verification noticing,
+#: because what is left still parses.  A value this cannot take
+#: apart, a multi-line string or one with escapes in it, is a line
+#: to leave alone.
+_AREA_VALUE = re.compile(
+    r"""^(?P<before>\s*(?:area|"area"|'area')\s*=\s*)"""
+    r"""(?P<value>"[^"\\\n]*"|'[^'\n]*')"""
+    r"""(?P<after>[^\S\r\n]*(?:\#[^\r\n]*)?\r?\n?)$""")
+
+
+class WillNotEdit(Exception):
+    """The station file could not be changed safely, so it was not."""
+
+
+def remember_area(area: str, user_path: Path | str | None = None) -> Path:
+    """Write *area* into the user's file, leaving the rest of it alone.
+
+    The file is the user's, and most of what is in it was typed by
+    them: this replaces the one line if it is there and puts it at
+    the top if it is not, and touches nothing else.  There is no
+    TOML writer in the standard library and bringing one in to set
+    a single string would be a poor trade.
+
+    Only a line before the first table counts as the one to replace.
+    ``area`` inside a ``[[station]]`` is that station's own field -
+    which is exactly the trap the README warns about - and this
+    would make it worse by editing it.
+
+    On the line itself only the value changes.  The spacing the
+    user chose and a comment saying why are theirs, and replacing
+    the line would take them away without the check below noticing
+    - what is left still parses.
+
+    Lines are not TOML, though, so the file is parsed as well as
+    read.  What the parser says is there has to agree with what the
+    line search found, and the result is parsed again before it is
+    put in place: between them they cover the ways a line can lie
+    about what it is - a key written ``"area"``, an ``area =``
+    inside a multi-line string, a file that does not parse at all.
+    Nothing is written when they disagree.  The file is the user's
+    and a receiver that will not start is a worse outcome than a
+    setting they have to type themselves.
+
+    Args:
+        area: One of :data:`AREAS`.
+        user_path: Where to write; ``None`` uses
+            :func:`user_config_path`.  Directories are created.
+
+    Returns:
+        The path written.
+
+    Raises:
+        ValueError: if *area* is not one of :data:`AREAS`.  Writing a
+            name the loader will refuse is worse than not writing.
+        WillNotEdit: if the file cannot be changed safely - it does
+            not parse, or this cannot be sure which line is the
+            setting, or the result would not read back as asked.
+        OSError: if the file cannot be written.
+    """
+    if area not in AREAS:
+        raise ValueError("%r is not an area; the areas are %s"
+                         % (area, ", ".join(AREAS)))
+    path = Path(user_path) if user_path is not None else user_config_path()
+    try:
+        # newline="" so that the line endings come back as they are
+        # written.  Reading in the usual way turns every CRLF into a
+        # LF, and writing the result back would rewrite every line
+        # in the file to say that one setting.
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            raw = handle.read()
+    except FileNotFoundError:
+        raw = ""
+    except UnicodeError as exc:
+        raise WillNotEdit(
+            "%s is not UTF-8 (%s); save it as UTF-8 and add at the top: "
+            'area = "%s"' % (path, exc, area)) from exc
+    # A byte order mark belongs at the start of the file and nowhere
+    # else; inserting a line above it would leave it in the middle.
+    mark = "\ufeff" if raw.startswith("\ufeff") else ""
+    body = raw[len(mark):]
+
+    already = _has_a_top_level_area(body)
+    at = _where_the_area_line_is(body)
+    if already is None and body.strip():
+        raise WillNotEdit(
+            "%s cannot be read as TOML, so it will not be written to; "
+            "add: area = \"%s\"" % (path, area))
+    if already and at is None:
+        raise WillNotEdit(
+            "%s sets an area somewhere this cannot find; change it by "
+            "hand to: area = \"%s\"" % (path, area))
+    if at is not None and not already:
+        raise WillNotEdit(
+            "a line in %s looks like the setting and is not it; add at "
+            "the top: area = \"%s\"" % (path, area))
+
+    lines = body.splitlines(keepends=True)
+    if at is None:
+        # At the top, where it has to be, and with a blank line after
+        # it if there is anything for it to run into.  In the line
+        # ending the file already uses.
+        ending = "\r\n" if "\r\n" in body else "\n"
+        say = 'area = "%s"%s' % (area, ending)
+        lines.insert(0, say if not lines else say + ending)
+    else:
+        taken_apart = _AREA_VALUE.match(lines[at])
+        if taken_apart is None:
+            raise WillNotEdit(
+                "the area in %s is written in a way this cannot change "
+                'without rewriting the line; change it by hand to: '
+                'area = "%s"' % (path, area))
+        # Only the value.  Whatever the user put around it - the
+        # spacing they chose, a comment saying why - stays.
+        lines[at] = "%s\"%s\"%s" % (taken_apart.group("before"), area,
+                                     taken_apart.group("after"))
+    now = mark + "".join(lines)
+
+    if _reads_back_as(now, area) is False:
+        raise WillNotEdit(
+            "editing %s would not have said what it was meant to - a byte "
+            "order mark does this, and tomllib will not read one either "
+            "way.  It has been left alone; add at the top: area = \"%s\""
+            % (path, area))
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Written beside and moved into place: a half-written stations.toml
+    # is one the receiver will refuse to read at all, and the user
+    # typed most of what is in it.
+    spare = path.with_name(path.name + ".new")
+    with spare.open("w", encoding="utf-8", newline="") as handle:
+        handle.write(now)
+    os.replace(spare, path)
+    logger.info("Wrote area %s to %s", area, path)
+    return path
+
+
+def _reads_back_as(text: str, area: str) -> "bool | None":
+    """Whether *text* is TOML that sets exactly this area.
+
+    The last check before anything is written, and the one that
+    covers what the line search cannot see: a key the search
+    matched inside a string, a byte order mark, anything else that
+    makes the result not what it looks like.  None when there is no
+    tomllib to ask, which is handled before this is reached.
+    """
+    if tomllib is None:
+        return None
+    try:
+        return tomllib.loads(text).get("area") == area
+    except Exception:
+        return False
+
+
+def _has_a_top_level_area(body: str) -> "bool | None":
+    """Whether the file sets a top-level ``area``, or None if unknown.
+
+    None means the question could not be answered: the text does not
+    parse, or this interpreter has no tomllib.  Either way it is not
+    a file to edit blind.
+    """
+    if tomllib is None:
+        return None
+    try:
+        parsed = tomllib.loads(body)
+    except Exception:
+        return None
+    return isinstance(parsed, dict) and "area" in parsed
+
+
+def _where_the_area_line_is(body: str) -> "int | None":
+    """The line that sets a top-level area, by the look of it."""
+    for index, line in enumerate(body.splitlines()):
+        if _TABLE_LINE.match(line):
+            return None                 # everything after here is a table's
+        if _AREA_LINE.match(line):
+            return index
+    return None
 
 
 def _make_reporter(warn: Reporter | None) -> Reporter:

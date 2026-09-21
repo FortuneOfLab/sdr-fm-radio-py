@@ -15,7 +15,7 @@ import pytest
 from fm_radio.band_scan import (
     BAND_END_HZ, BAND_START_HZ, CONFIRMED, LIKELY_SKIRT, PILOT_HZ,
     PILOT_OVER_NOISE_DB, SETTLING_BLOCKS, UNCONFIRMED, BandScan,
-    ScanFailed, Signal,
+    ScanFailed, Signal, where_this_is,
     channel_powers, classify, hop_centres, over_noise_db, peaks,
     pilot_and_noise_power, pilot_over_noise_db,
 )
@@ -220,6 +220,211 @@ def test_a_block_too_short_to_resolve_the_bands_says_nothing():
 ])
 def test_what_counts_as_stereo(reading, stereo):
     assert Signal(80.0e6, -10.0, reading).stereo is stereo
+
+
+# ----------------------------------------------------------------------
+# Where the radio is
+# ----------------------------------------------------------------------
+
+def a_transmitter(mhz: float, site: str, area: str, name: str = "x"):
+    from fm_radio.stations import Station
+
+    return Station(name=name, freq_mhz=mhz, site=site, area=area)
+
+
+def loud(mhz: float, power: float = -5.0):
+    return Signal(mhz * 1e6, power, 40.0, CONFIRMED)
+
+
+def test_the_sweep_says_where_it_is_from_what_it_heard():
+    """One place either carries these frequencies or it does not."""
+    catalogue = [
+        a_transmitter(80.0, "東京", "関東"),
+        a_transmitter(81.3, "東京", "関東"),
+        a_transmitter(82.5, "東京", "関東"),
+        a_transmitter(80.0, "札幌", "北海道"),
+    ]
+
+    assert where_this_is([loud(80.0), loud(81.3), loud(82.5)],
+                         catalogue) == "関東"
+
+
+def test_a_site_is_scored_and_not_an_area():
+    """An area is a lot of places, and a big one explains anything.
+
+    Scoring by area picked 東北 over 関東, nine finds to eight,
+    while the receiver was in Tokyo: 東北 has transmitters on most
+    of the band between them.  Here 東北 has three sites covering
+    the same three frequencies one 関東 site covers alone.
+    """
+    catalogue = [
+        a_transmitter(80.0, "東京", "関東"),
+        a_transmitter(81.3, "東京", "関東"),
+        a_transmitter(82.5, "東京", "関東"),
+        a_transmitter(80.0, "仙台", "東北"),
+        a_transmitter(81.3, "山形", "東北"),
+        a_transmitter(82.5, "青森", "東北"),
+    ]
+
+    assert where_this_is([loud(80.0), loud(81.3), loud(82.5)],
+                         catalogue) == "関東"
+
+
+def test_the_same_site_name_in_two_places_is_two_places():
+    """A site name is not unique in Japan either.
+
+    The bundled catalogue has 小国 at 89.8 MHz in 東北 and at
+    80.4 MHz in 九州・沖縄 - different transmitters, same name.
+    Counting them as one would let two unrelated signals vote for
+    it together and carry an area on their own.
+    """
+    catalogue = [
+        a_transmitter(89.8, "小国", "東北"),
+        a_transmitter(80.4, "小国", "九州・沖縄"),
+    ]
+
+    assert where_this_is([loud(89.8), loud(80.4)], catalogue) is None
+
+
+def test_a_transmitter_on_the_next_channel_is_not_this_one():
+    """Both sit on the 0.1 MHz grid, so this is about which channel.
+
+    Matching a whole station's width instead would reach the
+    channels either side: a transmitter that has 80.1 and 81.4
+    would be evidence for hearing 80.0 and 81.3.
+    """
+    catalogue = [
+        a_transmitter(80.0, "東京", "関東"),
+        a_transmitter(81.3, "東京", "関東"),
+        a_transmitter(80.1, "遠く", "北海道"),
+        a_transmitter(81.4, "遠く", "北海道"),
+    ]
+
+    assert where_this_is([loud(80.0), loud(81.3)], catalogue) == "関東"
+
+
+def test_an_entry_with_no_site_is_not_a_place():
+    """The user's own entries carry whatever they typed, and this
+    is supposed to answer with one of the areas.
+    """
+    from fm_radio.stations import Station
+
+    catalogue = [
+        Station(name="mine", freq_mhz=80.0, site="", area="関東"),
+        Station(name="mine", freq_mhz=81.3, site="", area="関東"),
+    ]
+
+    assert where_this_is([loud(80.0), loud(81.3)], catalogue) is None
+
+
+def test_an_area_that_is_not_one_is_not_an_answer():
+    """where_this_is answers with an area or with nothing, and
+    remember_area would refuse anything else anyway.
+    """
+    from fm_radio.stations import Station
+
+    catalogue = [
+        Station(name="mine", freq_mhz=80.0, site="home", area="Home"),
+        Station(name="mine", freq_mhz=81.3, site="home", area="Home"),
+    ]
+
+    assert where_this_is([loud(80.0), loud(81.3)], catalogue) is None
+
+
+def test_nothing_heard_says_nothing():
+    assert where_this_is([], [a_transmitter(80.0, "東京", "関東")]) is None
+
+
+def test_a_find_far_below_the_loudest_is_not_evidence():
+    """The quiet end of a sweep is skirts and distant stations.
+
+    Measured against the loudest of them rather than in dBFS.  The
+    gain is held for a sweep so its hops compare with each other,
+    but it is whatever the AGC had settled on - an absolute figure
+    would find no evidence at all after tuning to a strong station.
+    """
+    catalogue = [a_transmitter(80.0, "東京", "関東"),
+                 a_transmitter(81.3, "東京", "関東"),
+                 a_transmitter(88.1, "札幌", "北海道"),
+                 a_transmitter(89.1, "札幌", "北海道"),
+                 a_transmitter(90.1, "札幌", "北海道")]
+    sweep = [loud(80.0), loud(81.3),
+             Signal(88.1e6, -50.0, 40.0, CONFIRMED),
+             Signal(89.1e6, -51.0, 40.0, CONFIRMED),
+             Signal(90.1e6, -52.0, 40.0, CONFIRMED)]
+
+    assert where_this_is(sweep, catalogue) == "関東", (
+        "the far-off ones outvoted the ones actually being heard")
+
+
+def test_the_same_sweep_at_any_gain_says_the_same_place():
+    """Which is why it is measured against the loudest."""
+    catalogue = [a_transmitter(80.0, "東京", "関東"),
+                 a_transmitter(81.3, "東京", "関東"),
+                 a_transmitter(82.5, "東京", "関東")]
+    sweep = [loud(80.0, -5.0), loud(81.3, -9.0), loud(82.5, -12.0)]
+    quieter = [Signal(s.freq_hz, s.power_dbfs - 40.0,
+                      s.pilot_over_noise_db, s.sort) for s in sweep]
+
+    assert where_this_is(sweep, catalogue) == "関東"
+    assert where_this_is(quieter, catalogue) == "関東"
+
+
+@pytest.mark.parametrize("sort", [UNCONFIRMED, LIKELY_SKIRT])
+def test_only_a_confirmed_find_is_evidence(sort):
+    catalogue = [a_transmitter(80.0, "東京", "関東"),
+                 a_transmitter(81.3, "東京", "関東")]
+    unproven = [Signal(80.0e6, -5.0, 2.0, sort),
+                Signal(81.3e6, -5.0, 2.0, sort)]
+
+    assert where_this_is(unproven, catalogue) is None
+
+
+def test_two_places_that_explain_the_same_signals_say_nothing():
+    """A wrong area takes the name off every station it can hear.
+
+    Saying nothing leaves the receiver where it was, which is
+    working; saying 北海道 in Tokyo is worse than saying nothing.
+    """
+    catalogue = [
+        a_transmitter(80.0, "東京", "関東"),
+        a_transmitter(81.3, "東京", "関東"),
+        a_transmitter(80.0, "札幌", "北海道"),
+        a_transmitter(81.3, "札幌", "北海道"),
+    ]
+
+    assert where_this_is([loud(80.0), loud(81.3)], catalogue) is None
+
+
+def test_one_signal_is_not_enough_to_go_on():
+    """A frequency is not unique; a handful of them nearly is."""
+    catalogue = [a_transmitter(80.0, "東京", "関東")]
+
+    assert where_this_is([loud(80.0)], catalogue) is None
+
+
+def test_a_frequency_nothing_in_the_catalogue_has_says_nothing():
+    catalogue = [a_transmitter(80.0, "東京", "関東")]
+
+    assert where_this_is([loud(76.1), loud(76.3)], catalogue) is None
+
+
+def test_the_real_sweep_of_a_real_band_says_where_it_was():
+    """The twelve signals this was written against, in Tokyo."""
+    from fm_radio.stations import load_stations
+
+    catalogue = load_stations(user_path=None, warn=lambda _m: None)
+    sweep = [
+        Signal(82.5e6, -1.0, 46.1, CONFIRMED),
+        Signal(80.0e6, -7.0, 37.6, CONFIRMED),
+        Signal(89.7e6, -12.0, 30.5, CONFIRMED),
+        Signal(81.3e6, -13.0, 39.4, CONFIRMED),
+        Signal(78.9e6, -27.0, 3.0, UNCONFIRMED),
+        Signal(82.1e6, -36.0, 15.0, LIKELY_SKIRT),
+        Signal(93.0e6, -47.0, 2.6, UNCONFIRMED),
+    ]
+
+    assert where_this_is(sweep, catalogue) == "関東"
 
 
 # ----------------------------------------------------------------------
