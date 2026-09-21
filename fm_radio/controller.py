@@ -39,6 +39,9 @@ import numpy as np
 
 from fm_radio.sdr_receiver import SDRReceiver
 from fm_radio.demodulator import FMDemodulator, FMDemodulatorLight
+from fm_radio.dsp_settings import (
+    DspSettings, apply as dsp_apply, capture as dsp_capture,
+)
 from fm_radio.audio_output import AudioOutput
 from fm_radio.cli import CommandLineInterface, build_recording_path
 from fm_radio.auto_gain import AutoGainController
@@ -359,6 +362,23 @@ class FMReceiverController:
                     final_audio_rate=AUDIO_OUTPUT_RATE,
                     stereo=True
                 )
+            # What the demodulator this variant built is running
+            # under, read before anything can have changed it: this
+            # IS the default, and the two variants do not share one
+            # (see fm_radio.dsp_settings).
+            self._dsp_defaults: DspSettings = dsp_capture(self.fm_demodulator)
+            # What a front end has asked for, and what the processing
+            # thread has put on the demodulator.  Two slots, rather
+            # than one pending slot that is cleared once applied: a
+            # clear loses a change made between the read and the
+            # clear, a comparison cannot - the block after finds the
+            # two still differing and applies it.  _dsp_wanted is
+            # rebound by whoever sets it, one rebinding of an
+            # immutable object, which the processing thread's next
+            # read sees whole; _dsp_in_effect is the processing
+            # thread's own.
+            self._dsp_wanted: DspSettings = self._dsp_defaults
+            self._dsp_in_effect: DspSettings = self._dsp_defaults
             # AudioOutput instance manages its own internal queue
             # The output is told how often blocks will arrive: it
             # decides how much to have in hand before it starts the
@@ -654,6 +674,51 @@ class FMReceiverController:
             self.fm_demodulator.stereo = enabled
             return True
         return False
+
+    def get_dsp_defaults(self) -> DspSettings:
+        """Return the settings the demodulator started under.
+
+        The ``constants.py`` values as the running variant reads
+        them, which is what resetting a parameter goes back to.
+        """
+        return self._dsp_defaults
+
+    def get_dsp_settings(self) -> DspSettings:
+        """Return the settings that have been asked for.
+
+        What was asked for, which for up to one block is not yet what
+        the demodulator is running under.  A front end reading back
+        the other one would redraw the control the user has just
+        moved.
+        """
+        return self._dsp_wanted
+
+    def set_dsp_settings(self, settings: DspSettings) -> None:
+        """Ask the demodulator to run under *settings*.
+
+        It takes effect on the next block, applied whole by the
+        thread that owns the demodulator: no block is heard half
+        under one set and half under another, and no caller of this
+        writes to the DSP while it is being used.  Blocks are 16 ms
+        apart in standard mode and 66 ms apart in light mode.
+
+        While no blocks are arriving - the device has gone, or the
+        receiver was never started - nothing is applied, and the next
+        block to arrive, whenever it does, carries the settings.
+
+        Args:
+            settings: what all nine parameters are to be.  Build it
+                from :meth:`get_dsp_settings` or
+                :meth:`get_dsp_defaults` and ``dataclasses.replace``.
+        """
+        if not isinstance(settings, DspSettings):
+            # Anything else would be applied attribute by attribute
+            # until one was missing, leaving the demodulator running
+            # a set that was never asked for.
+            raise TypeError(
+                "set_dsp_settings wants a DspSettings, not %r"
+                % type(settings).__name__)
+        self._dsp_wanted = settings
 
     def start_recording(self, filename: str | None = None) -> "Request":
         """Ask for a recording to start, and come straight back.
@@ -1171,6 +1236,22 @@ class FMReceiverController:
         dt_ms = (time.perf_counter() - t0) * 1000.0
         self.logger.info(f"JIT pre-warming complete in {dt_ms:.1f} ms")
 
+    def _take_any_dsp_change(self) -> None:
+        """Put any settings a front end has asked for onto the demodulator.
+
+        On the processing thread, between blocks.  A block that
+        changed nothing - nearly every block - pays one identity
+        comparison and returns.
+        """
+        wanted = self._dsp_wanted
+        if wanted is self._dsp_in_effect:
+            return
+        dsp_apply(wanted, self.fm_demodulator)
+        # After the apply, never before: the thread must not record
+        # as running a set it has not finished writing.
+        self._dsp_in_effect = wanted
+        self.logger.info("DSP settings changed to %s", wanted)
+
     def processing_thread(self) -> None:
         """Retrieve IQ samples from SDR, perform FM demodulation and audio conversion,
         then add the resulting audio data to the output queue via AudioOutput.
@@ -1200,6 +1281,12 @@ class FMReceiverController:
 
                 if not self._block_is_still_wanted(generation):
                     continue
+
+                # Here and nowhere else: between two blocks is the
+                # only moment at which the DSP can be reconfigured
+                # without some block being demodulated half under
+                # each set.
+                self._take_any_dsp_change()
 
                 # Snapshot queue depth at the moment we pulled this block.
                 q_depth_after_get = self.sdr_receiver.data_queue.qsize()
