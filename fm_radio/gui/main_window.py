@@ -47,15 +47,18 @@ import time
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QGridLayout, QGroupBox, QHBoxLayout,
-    QLabel, QMainWindow, QProgressBar, QPushButton, QSizePolicy, QSlider,
-    QStatusBar,
+    QLabel, QMainWindow, QMessageBox, QProgressBar, QPushButton, QSizePolicy,
+    QSlider, QStatusBar,
     QVBoxLayout, QWidget,
 )
 
-from fm_radio.band_scan import BandScan, CONFIRMED, LIKELY_SKIRT
+from fm_radio.band_scan import (
+    BandScan, CONFIRMED, LIKELY_SKIRT, where_this_is,
+)
 from fm_radio.exceptions import SDRDeviceError
 from fm_radio.gui.band_view import BandView
 from fm_radio.multipath import NOISE_AM_DEPTH
+from fm_radio.stations import WillNotEdit
 from fm_radio.device_worker import TUNE
 from fm_radio.telemetry import SILENCE_DBFS, StatusSnapshot
 
@@ -244,6 +247,18 @@ class Sweep(QObject):
     def cancel(self) -> None:
         """Ask it to stop at the next hop."""
         self._scan.cancel()
+
+    @property
+    def cancelled(self) -> bool:
+        """True if it was asked to stop, however it then ended.
+
+        A cancelled sweep still hands back what it found before it
+        was stopped, so what it found is not the question: everything
+        that cancels one - the user pressing Stop, the device going,
+        the window closing - is a reason not to put a question in
+        front of them about it.
+        """
+        return self._scan.cancelled
 
     def wait(self) -> None:
         """Block until the sweep has finished, one way or the other."""
@@ -569,6 +584,11 @@ class ReceiverWindow(QMainWindow):
         """On the GUI thread: the sweep is over, for whatever reason."""
         sweep, self._sweep = self._sweep, None
         self._stopping = False
+        # Whether it ran to the end of the band, asked before the
+        # sweep is handed to Qt to delete.  A sweep this window no
+        # longer holds is one stop_any_sweep took, which is the
+        # window closing.
+        the_whole_band = sweep is not None and not sweep.cancelled
         if sweep is not None:
             # Its parent is the window, so without this every sweep
             # ever run stays a child of it - and each one holds a
@@ -582,6 +602,79 @@ class ReceiverWindow(QMainWindow):
         self._set_notice(
             "scan found %d" % len(found) if found
             else "scan found nothing", _SCANNING)
+        if the_whole_band:
+            self._offer_to_keep_the_area(found)
+
+    def _offer_to_keep_the_area(self, found) -> None:
+        """Ask whether to keep the area the sweep points at.
+
+        A frequency is not unique in Japan, so with no area set the
+        catalogue will name almost anything the tuner sits on, as
+        readily after a transmitter a thousand kilometres away.  The
+        end of a sweep is the one moment the radio has the evidence
+        to work out which of them it is hearing, and the file it
+        goes in is the user's: they are asked, and they are told
+        what it will do.
+
+        Nothing is said when there is nothing to say - the evidence
+        points nowhere clearly enough, or it points where the
+        receiver already is.  A dialog that only ever says "no
+        change" is one the user learns to dismiss unread.
+        """
+        area = where_this_is(found, self.controller.get_catalogue())
+        if area is None or area == self.controller.area:
+            return
+        if self._ask(
+                "Where is this radio?",
+                "The scan matches transmitters in %s." % area,
+                "Save it in your station file?  Stations will be named "
+                "from %s from now on, and at every start - which is what "
+                "stops a frequency being named after a transmitter on "
+                "the other side of the country." % area) != QMessageBox.Yes:
+            return
+        try:
+            path = self.controller.remember_where_this_is(area)
+        except (WillNotEdit, OSError) as trouble:
+            # Said in full and in a box, not summarised onto the
+            # status line: it names the file and the line to type,
+            # which is all the user has left to go on, and it is the
+            # answer to a question they were just asked.
+            self._tell_them(
+                "The area was not saved", str(trouble),
+                QMessageBox.Warning)
+            self._set_notice("the area was not saved")
+            return
+        self._set_notice("stations are named from %s now (saved in %s)"
+                         % (area, path))
+
+    def _ask(self, title: str, text: str, detail: str) -> int:
+        """Put a yes-or-no question up and return the button pressed."""
+        return self._a_box(title, text, detail, QMessageBox.Question,
+                           QMessageBox.Yes | QMessageBox.No,
+                           QMessageBox.Yes).exec()
+
+    def _tell_them(self, title: str, text: str, icon) -> None:
+        """Put something the user has to read up, and wait for them."""
+        self._a_box(title, text, "", icon, QMessageBox.Ok,
+                    QMessageBox.Ok).exec()
+
+    def _a_box(self, title: str, text: str, detail: str, icon,
+               buttons, default) -> QMessageBox:
+        """One place that builds the modal boxes, so they match.
+
+        Parented on the window, so a box outlives neither it nor the
+        receiver behind it, and so the user cannot start a second
+        sweep behind one.
+        """
+        box = QMessageBox(self)
+        box.setWindowTitle(title)
+        box.setIcon(icon)
+        box.setText(text)
+        if detail:
+            box.setInformativeText(detail)
+        box.setStandardButtons(buttons)
+        box.setDefaultButton(default)
+        return box
 
     def _say_what_can_be_used(self) -> None:
         """Work out what is live, from everything that decides it.
@@ -683,7 +776,19 @@ class ReceiverWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _set_notice(self, message: str, sort: str = _FAILURE) -> None:
-        """Put *message* in the status bar and keep it there to be read."""
+        """Put *message* in the status bar and keep it there to be read.
+
+        Nothing goes over the line that says the receiver has
+        stopped.  That line is the last thing the window will say -
+        the refresh stops with it - so anything written after it
+        stays written: a sweep that ends after the cable comes out
+        would leave the window saying "scan found 3" about a radio
+        that is not there, and a question answered after it the
+        same.  _show_the_device_has_gone writes that line itself and
+        does not come through here.
+        """
+        if getattr(self.controller, "device_failure", None) is not None:
+            return
         self._notice = (message, time.monotonic() + NOTICE_SECONDS, sort)
         self._health.setText(message)
 

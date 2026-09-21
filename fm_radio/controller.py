@@ -33,6 +33,7 @@ import sys
 import time
 import threading
 import logging
+from pathlib import Path
 
 import numpy as np
 
@@ -48,8 +49,8 @@ from fm_radio.exceptions import (
     SDRDeviceError, AudioOutputError, RecordingError,
 )
 from fm_radio.stations import (
-    Station, load_stations, favorites, here, home_area, search, in_area,
-    nearest,
+    Station, load_stations, favorites, here, home_area, remember_area,
+    search, in_area, nearest,
 )
 from fm_radio import multipath
 from fm_radio.spectrum import (
@@ -318,9 +319,18 @@ class FMReceiverController:
         # sits on - and as readily after a transmitter a thousand
         # kilometres away.  Looking a station up is a different
         # question and still sees all of them.
-        self._here: list[Station] = here(
-            self.catalogue,
-            home_area(stations_path, warn=self._warn_station_config))
+        # Kept, because the area can be settled later: a band scan
+        # works out where the receiver is, and the answer goes in the
+        # user's file - see remember_where_this_is.
+        self._stations_path = stations_path
+        self._area: str | None = home_area(
+            stations_path, warn=self._warn_station_config)
+        self._here: list[Station] = here(self.catalogue, self._area)
+        # Bumped whenever _here is replaced, and part of the key the
+        # name cache is kept under: the cached answer was worked out
+        # from one of these lists, and which one is the question the
+        # frequency alone cannot answer.  See _station_name_for.
+        self._naming_generation: int = 0
         self.presets: list[Station] = favorites(self.catalogue)
         if not self.catalogue:
             self.logger.warning(
@@ -385,10 +395,12 @@ class FMReceiverController:
                 current_generation=lambda: self.sdr_receiver.tuning_generation)
             self._spectrum_maker = SpectrumMaker(
                 self.sdr_receiver.sample_rate)
-            # Naming the tuned station means scanning the catalogue, which
-            # only has a different answer when the frequency changes.  The
-            # cache is written and read on the processing thread only.
-            self._station_name_cache: tuple[float, str] = (float("nan"), "")
+            # Naming the tuned station means scanning the catalogue,
+            # which only has a different answer when the frequency
+            # moves or the list to name from is replaced.  Written and
+            # read on the processing thread only.
+            self._station_name_cache: "tuple[int, float, str]" = (
+                -1, float("nan"), "")
             # Rate limiting for the warning about a snapshot that will not
             # build; both are touched only from the processing thread.
             self._telemetry_failures: int = 0
@@ -430,6 +442,59 @@ class FMReceiverController:
     def get_catalogue(self) -> list[Station]:
         """Return every known transmitter, sorted by area then frequency."""
         return self.catalogue
+
+    @property
+    def area(self) -> str | None:
+        """The area this receiver takes itself to be in, or None.
+
+        What :func:`fm_radio.stations.here` was given, rather than
+        what the file says now: the two are the same until something
+        writes to the file, and what the receiver is naming by is
+        the question anything asking this has.
+        """
+        return self._area
+
+    def remember_where_this_is(self, area: str) -> Path:
+        """Write *area* into the user's file, and name by it now.
+
+        Both, because either alone is half an answer: a setting that
+        is only in the file does nothing until the next start, and
+        one that is only in the receiver is gone by then.
+
+        Nothing changes here if the write does not happen.  The
+        exception carries what to type instead, and a receiver that
+        went on naming stations by a setting the file does not have
+        would be telling the user their next start keeps this.
+
+        Args:
+            area: One of :data:`fm_radio.stations.AREAS`.
+
+        Returns:
+            The path written.
+
+        Raises:
+            ValueError: if *area* is not one of the areas.
+            WillNotEdit: if the file could not be changed safely; it
+                was left alone.
+            OSError: if the file could not be written.
+        """
+        path = remember_area(area, self._stations_path)
+        self._area = area
+        # One rebinding, which the processing thread's next read sees
+        # whole: _station_name_for takes the list once and walks that
+        # one.  Filtering the list in place would have it walking a
+        # list being emptied.
+        self._here = here(self.catalogue, area)
+        # After the list, never before.  A processing thread that
+        # reads the generation, is interrupted here, and then reads
+        # the list gets the new list under the old number - one
+        # wasted lookup.  The other order gets the old list under the
+        # new number, which is the old name cached as though it were
+        # the new one, and nothing after that would notice.
+        self._naming_generation += 1
+        self.logger.info("Naming stations from %s (%d of %d transmitters)",
+                         area, len(self._here), len(self.catalogue))
+        return path
 
     def search_stations(self, query: str) -> list[Station]:
         """Return catalogue entries matching *query*.
@@ -923,14 +988,23 @@ class FMReceiverController:
 
         nearest() walks the whole catalogue - ~270 us over 983 transmitters,
         which is most of what a snapshot would otherwise cost - and the
-        answer only changes when the tuner moves.
+        answer only changes when the tuner moves, or when the list to
+        name from is replaced under it.  The second is why the
+        generation is part of the key: settling on an area leaves the
+        receiver sitting on the frequency it was already on, which is
+        exactly the frequency this has an answer for.
         """
-        cached_freq, cached_name = self._station_name_cache
-        if freq_hz == cached_freq:
+        # The generation first, so that a list replaced while this
+        # is working is cached under the number it was read with -
+        # see remember_where_this_is.
+        generation = self._naming_generation
+        cached_generation, cached_freq, cached_name = (
+            self._station_name_cache)
+        if freq_hz == cached_freq and generation == cached_generation:
             return cached_name
         station = nearest(self._here, freq_hz)
         name = station.name if station else ""
-        self._station_name_cache = (freq_hz, name)
+        self._station_name_cache = (generation, freq_hz, name)
         return name
 
     def _build_snapshot(self, iq_samples: np.ndarray, left: np.ndarray,

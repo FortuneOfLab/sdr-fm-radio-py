@@ -11,8 +11,10 @@ Qt runs offscreen (see the ``qt_app`` fixture), so these need no display.
 from __future__ import annotations
 
 import logging
+import sys
 import threading
 import time
+import traceback
 
 import pytest
 
@@ -69,6 +71,13 @@ class FakeController:
         self.quit_event = _Event()
         self.station = _Station("TOKYO FM")
         self.presets = [("TOKYO FM", 80.0e6), ("J-WAVE", 81.3e6)]
+        # Where the radio is, and what it knows is out there.  Empty
+        # is the honest default: a receiver with no catalogue cannot
+        # work out where it is, and nothing should ask.
+        self.catalogue: list = []
+        self.area: str | None = None
+        self.saved: list[str] = []
+        self.save_error: Exception | None = None
         self.tune_error: Exception | None = None
         self.record_error: Exception | None = None
         # As in the controller: bumped by every stop, so a start asked
@@ -123,6 +132,9 @@ class FakeController:
     def get_stations_list(self):
         return list(self.presets)
 
+    def get_catalogue(self):
+        return list(self.catalogue)
+
     def tuned(self, timeout: float = 5.0) -> None:
         """Wait for the tune that was asked for, as a test may.
 
@@ -155,6 +167,19 @@ class FakeController:
         self.last_tune = self.device_worker.submit(
             TUNE, f"Tuned to {freq_hz / 1e6:.1f} MHz", write)
         return self.last_tune
+
+    def remember_where_this_is(self, area):
+        """Write it and use it, as the real one does - or neither.
+
+        The real one names by the new area only once the file has
+        taken it, so a failure here leaves the area as it was.
+        """
+        self.calls.append(("remember_where_this_is", area))
+        if self.save_error is not None:
+            raise self.save_error
+        self.area = area
+        self.saved.append(area)
+        return "/home/someone/.config/fm_radio/stations.toml"
 
     def cleanup(self) -> None:
         """Give the device back, as the window asks when one goes.
@@ -324,8 +349,18 @@ def snapshot(**overrides) -> StatusSnapshot:
 
 @pytest.fixture
 def window(qt_app):
-    """A window over a stand-in controller, closed afterwards."""
+    """A window over a stand-in controller, closed afterwards.
+
+    Anything a slot raises is caught on the way out and fails the
+    test.  Qt has nowhere to send an exception raised in a slot, so
+    it prints it and carries on - which meant a window that broke
+    halfway through handling a signal left every assertion after it
+    still passing, because what came before had already been done.
+    """
     built = []
+    swallowed = []
+    was = sys.excepthook
+    sys.excepthook = lambda *trouble: swallowed.append(trouble)
 
     def _build(controller=None):
         controller = controller or FakeController(snapshot())
@@ -333,10 +368,15 @@ def window(qt_app):
         built.append(instance)
         return instance, controller
 
-    yield _build
-    for instance in built:
-        instance._timer.stop()
-        instance.close()
+    try:
+        yield _build
+        for instance in built:
+            instance._timer.stop()
+            instance.close()
+    finally:
+        sys.excepthook = was
+    assert not swallowed, "a slot raised: %s" % "".join(
+        traceback.format_exception(*swallowed[0]))
 
 
 # ----------------------------------------------------------------------
@@ -1471,10 +1511,10 @@ def test_the_sweep_does_not_run_on_the_thread_that_draws(window,
 
     class WatchingStandIn:
         def __init__(self, controller, on_progress=None):
-            pass
+            self.cancelled = False
 
         def cancel(self):
-            pass
+            self.cancelled = True
 
         def run(self, listen_sec=0.25):
             where.append(threading.current_thread())
@@ -1804,6 +1844,341 @@ def test_the_window_says_where_the_sweep_has_got_to(window, monkeypatch,
     # The progress line is overwritten by the result; what matters is
     # that the sweep's own words reached the window at all.
     assert view._health.text()
+
+
+# ----------------------------------------------------------------------
+# What the sweep makes of where the radio is
+# ----------------------------------------------------------------------
+
+def a_transmitter(mhz: float, site: str = "東京",
+                  area: str = "関東"):
+    """One catalogue entry, of the shape where_this_is scores."""
+    from fm_radio.stations import Station
+
+    return Station(name="%s %.1f" % (site, mhz), freq_mhz=mhz, site=site,
+                   area=area)
+
+
+def one_place(mhz=(80.0, 81.3)):
+    """A catalogue that puts those frequencies in one place.
+
+    Two of them from one site is what where_this_is wants: two
+    finds it explains, and nothing else explaining either.
+    """
+    return [a_transmitter(each) for each in mhz]
+
+
+def watch_the_boxes(monkeypatch, answer=None, meanwhile=None):
+    """Catch the modal boxes instead of putting one on the screen.
+
+    ``exec`` is what is patched, not the window's own asking, so
+    what these tests read is the box the window really built - its
+    words, its buttons, and what it made of the answer.  A box that
+    reached a screen here would hold the test up until it timed out.
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    shown = []
+
+    def instead(box):
+        shown.append(box)
+        if meanwhile is not None and len(shown) == 1:
+            # What a timer firing inside the modal loop does.  Qt
+            # goes on delivering them while a box is up, so the
+            # window behind it keeps refreshing - and can find out
+            # that the receiver has gone.
+            meanwhile()
+        return QMessageBox.Yes if answer is None else answer
+
+    monkeypatch.setattr(QMessageBox, "exec", instead)
+    return shown
+
+
+def test_a_sweep_that_places_the_radio_offers_to_keep_it(window,
+                                                          monkeypatch,
+                                                          qt_app):
+    """The sweep is the one moment the evidence is in hand."""
+    view, controller, _ = a_scan(window, monkeypatch,
+                                 found=[a_find(80.0), a_find(81.3)])
+    controller.catalogue = one_place()
+    shown = watch_the_boxes(monkeypatch)
+
+    view._scan_button.click()
+    finish(view, qt_app)
+
+    assert len(shown) == 1, "it asked %d times" % len(shown)
+    said = shown[0].text() + shown[0].informativeText()
+    assert "関東" in said, said
+    assert controller.saved == ["関東"]
+    assert "関東" in view._health.text()
+
+
+def test_it_asks_before_it_writes(window, monkeypatch, qt_app):
+    """The file is the user's, and an area they are not in takes
+    the name off every station they can hear.
+    """
+    view, controller, _ = a_scan(window, monkeypatch,
+                                 found=[a_find(80.0), a_find(81.3)])
+    controller.catalogue = one_place()
+    from PySide6.QtWidgets import QMessageBox
+    shown = watch_the_boxes(monkeypatch, answer=QMessageBox.No)
+
+    view._scan_button.click()
+    finish(view, qt_app)
+
+    assert len(shown) == 1, "it did not ask"
+    assert controller.saved == [], "it wrote anyway"
+    assert ("remember_where_this_is", "関東") not in controller.calls
+
+
+def test_a_question_with_two_answers_offers_two_buttons(window,
+                                                         monkeypatch,
+                                                         qt_app):
+    """A box with only Ok on it is not a question, whatever it says."""
+    from PySide6.QtWidgets import QMessageBox
+
+    view, controller, _ = a_scan(window, monkeypatch,
+                                 found=[a_find(80.0), a_find(81.3)])
+    controller.catalogue = one_place()
+    shown = watch_the_boxes(monkeypatch)
+
+    view._scan_button.click()
+    finish(view, qt_app)
+
+    buttons = shown[0].standardButtons()
+    assert buttons & QMessageBox.Yes and buttons & QMessageBox.No
+
+
+def test_it_says_nothing_when_the_area_is_the_one_already_set(window,
+                                                               monkeypatch,
+                                                               qt_app):
+    """A box that only ever says "no change" is one the user learns
+    to dismiss unread, and the next one will be dismissed with it.
+    """
+    view, controller, _ = a_scan(window, monkeypatch,
+                                 found=[a_find(80.0), a_find(81.3)])
+    controller.catalogue = one_place()
+    controller.area = "関東"
+    shown = watch_the_boxes(monkeypatch)
+
+    view._scan_button.click()
+    finish(view, qt_app)
+
+    assert shown == [], "it asked about the area it is already in"
+    assert controller.saved == []
+
+
+@pytest.mark.parametrize("already", [None, "関東"])
+def test_it_says_nothing_when_the_sweep_points_nowhere(window, monkeypatch,
+                                                        qt_app, already):
+    """Two sites that explain the same finds are not an answer, and
+    a guess put in the file names every station wrongly.
+
+    Both ways round: with an area already set, "nowhere" is not the
+    same answer as the one set, and a window comparing the two
+    without looking at what nowhere is would ask about it.
+    """
+    view, controller, _ = a_scan(window, monkeypatch,
+                                 found=[a_find(80.0), a_find(81.3)])
+    controller.area = already
+    controller.catalogue = one_place() + [
+        a_transmitter(80.0, "札幌", "北海道"),
+        a_transmitter(81.3, "札幌", "北海道"),
+    ]
+    shown = watch_the_boxes(monkeypatch)
+
+    view._scan_button.click()
+    finish(view, qt_app)
+
+    assert shown == [], "it asked about a place it had not worked out"
+    assert controller.saved == []
+
+
+def test_a_sweep_the_user_stopped_is_not_asked_about(window, monkeypatch,
+                                                      qt_app):
+    """It saw part of the band, and they were on their way somewhere.
+
+    What it found before it stopped still comes back, so what it
+    found is not what says this: the sweep having been cancelled is.
+    """
+    let_it_go = threading.Event()
+    view, controller, _ = a_scan(window, monkeypatch, hold=let_it_go,
+                                 found=[a_find(80.0), a_find(81.3)])
+    controller.catalogue = one_place()
+    shown = watch_the_boxes(monkeypatch)
+
+    view._scan_button.click()
+    qt_app.processEvents()
+    view._scan_button.click()           # Stop
+    let_it_go.set()
+    finish(view, qt_app)
+
+    assert shown == [], "it asked after a sweep the user stopped"
+    assert controller.saved == []
+
+
+def test_a_sweep_the_device_went_out_from_under_is_not_asked_about(
+        window, monkeypatch, qt_app):
+    """The window is already showing why the radio stopped."""
+    let_it_go = threading.Event()
+    view, controller, _ = a_scan(window, monkeypatch, hold=let_it_go,
+                                 found=[a_find(80.0), a_find(81.3)])
+    controller.catalogue = one_place()
+    shown = watch_the_boxes(monkeypatch)
+
+    view._scan_button.click()
+    qt_app.processEvents()
+    controller.device_failure = "the SDR was unplugged"
+    view.refresh()
+    let_it_go.set()
+    finish(view, qt_app)
+
+    assert shown == [], "it asked over a window showing a dead radio"
+    assert controller.saved == []
+
+
+def test_a_sweep_the_window_no_longer_holds_is_not_asked_about(window,
+                                                                monkeypatch,
+                                                                qt_app):
+    """Closing takes the sweep, and its last signal can be behind it.
+
+    stop_any_sweep waits for the sweeping thread, but the signal it
+    already emitted is a queued event: it is delivered by whatever
+    event loop runs next, which is the one taking the window apart.
+    """
+    view, controller = window(FakeController(snapshot()))
+    controller.catalogue = one_place()
+    shown = watch_the_boxes(monkeypatch)
+
+    view.stop_any_sweep()               # as closing does
+    view._scan_ended([a_find(80.0), a_find(81.3)], "")
+
+    assert shown == [], "it asked about a sweep it had let go of"
+    assert controller.saved == []
+
+
+def test_a_radio_that_goes_while_the_question_is_up_still_says_so(
+        window, monkeypatch, qt_app):
+    """The line about the device is the last one the window writes.
+
+    The refresh stops with it, so a notice put up after it stays up:
+    the window would sit there saying the stations are named from
+    関東 now, about a radio that is not there.
+    """
+    view, controller, _ = a_scan(window, monkeypatch,
+                                 found=[a_find(80.0), a_find(81.3)])
+    controller.catalogue = one_place()
+
+    def the_cable_comes_out():
+        controller.device_failure = "the SDR was unplugged"
+        view.refresh()                  # the timer, inside the modal loop
+
+    watch_the_boxes(monkeypatch, meanwhile=the_cable_comes_out)
+
+    view._scan_button.click()
+    finish(view, qt_app)
+
+    assert "SDR disconnected" in view._health.text(), view._health.text()
+    # Still written: the file is about the next start, and the user
+    # answered the question.
+    assert controller.saved == ["関東"]
+
+
+def test_a_sweep_that_ends_after_the_device_went_does_not_talk_over_it(
+        window, monkeypatch, qt_app):
+    """The same line, and the same reason.  A sweep ends a few
+    hundred milliseconds after the device goes - it stops at the
+    next hop - and it used to report what it found over the top of
+    the explanation the user was reading.
+    """
+    let_it_go = threading.Event()
+    view, controller, _ = a_scan(window, monkeypatch, hold=let_it_go,
+                                 found=[a_find(89.7)])
+
+    view._scan_button.click()
+    qt_app.processEvents()
+    controller.device_failure = "the SDR was unplugged"
+    view.refresh()
+    let_it_go.set()
+    finish(view, qt_app)
+
+    assert "SDR disconnected" in view._health.text(), view._health.text()
+
+
+def test_nothing_is_written_over_the_line_about_the_device(window):
+    """One place decides it, for every notice there is."""
+    view, controller = window(FakeController(snapshot()))
+    controller.device_failure = "the SDR was unplugged"
+    view.refresh()
+    was = view._health.text()
+
+    view._set_notice("something happened")
+
+    assert view._health.text() == was
+
+
+def test_a_file_that_cannot_be_changed_is_said_in_full(window, monkeypatch,
+                                                        qt_app):
+    """What it refuses to do it says how to do, and the words are
+    the only thing the user has left to go on - the file, and the
+    line to type into it.  A status line would take the end off.
+    """
+    from fm_radio.stations import WillNotEdit
+    from PySide6.QtWidgets import QMessageBox
+
+    view, controller, _ = a_scan(window, monkeypatch,
+                                 found=[a_find(80.0), a_find(81.3)])
+    controller.catalogue = one_place()
+    controller.save_error = WillNotEdit(
+        '/home/someone/stations.toml cannot be read as TOML, so it will '
+        'not be written to; add: area = "関東"')
+    shown = watch_the_boxes(monkeypatch)
+
+    view._scan_button.click()
+    finish(view, qt_app)
+
+    assert len(shown) == 2, "asked, and then said nothing about it"
+    told = shown[1]
+    assert str(controller.save_error) in told.text()
+    assert told.icon() == QMessageBox.Warning
+    assert "not saved" in view._health.text()
+
+
+def test_the_window_still_works_after_a_file_it_could_not_change(
+        window, monkeypatch, qt_app):
+    """It is one setting, not the end of the session."""
+    from fm_radio.stations import WillNotEdit
+
+    view, controller, _ = a_scan(window, monkeypatch,
+                                 found=[a_find(80.0), a_find(81.3)])
+    controller.catalogue = one_place()
+    controller.save_error = WillNotEdit("no")
+    watch_the_boxes(monkeypatch)
+
+    view._scan_button.click()
+    finish(view, qt_app)
+
+    assert view._scan_button.isEnabled()
+    assert view._up.isEnabled()
+    assert view._found.count() == 3, "the finds went with the failure"
+
+
+def test_a_file_that_will_not_open_is_said_in_full_too(window, monkeypatch,
+                                                        qt_app):
+    """A read-only directory is the same story as a file that will
+    not parse: nothing was written, and the user has to do it.
+    """
+    view, controller, _ = a_scan(window, monkeypatch,
+                                 found=[a_find(80.0), a_find(81.3)])
+    controller.catalogue = one_place()
+    controller.save_error = PermissionError(13, "Permission denied")
+    shown = watch_the_boxes(monkeypatch)
+
+    view._scan_button.click()
+    finish(view, qt_app)
+
+    assert len(shown) == 2
+    assert "Permission denied" in shown[1].text()
 
 
 # ----------------------------------------------------------------------
