@@ -171,41 +171,33 @@ STEREO_PHASE_SIDE_GATE_DB = -18.0   # Minimum demodulated side power relative to
                                     # noiseless-mono residue median = -32 dB, mono at
                                     # CNR 20 = -22 dB (also blocked by the anisotropy
                                     # gate), so -18 leaves ~7 dB of margin both ways.
-                                    # This is the gate that decides whether a
-                                    # cold tracker acquires on a near-mono
-                                    # programme, which is worth knowing before
-                                    # reading anything into a station that never
-                                    # does.  Acquisition happens in the first
-                                    # seconds, and for those seconds the
-                                    # side-over-noise gate is passing nearly
-                                    # everything - the pilot-band noise estimate
-                                    # takes about 3 s to come up when there is
-                                    # programme present (on silence it is there at
-                                    # once), and until it has, every side-over-noise
-                                    # reading is 4-5 dB high.  So the side/mono gate
-                                    # is the one saying no.  Measured 2026-09-21 on
-                                    # synthetic programme narrowed by steps, with a
-                                    # 30 / 60 deg rotation to correct, reading the
-                                    # settled blocks of a 6 s run:
+                                    # On a clean, loud signal this is the gate
+                                    # that closes on a near-mono programme, and the
+                                    # side-over-noise gate is nowhere near closing -
+                                    # which is worth knowing before reading anything
+                                    # into a station that never acquires.  Measured
+                                    # 2026-09-21, synthetic programme narrowed by
+                                    # steps at CNR 35, a 30 deg rotation to correct,
+                                    # off the DC notch (see A_REAL_OFFSET_HZ in the
+                                    # tests - at zero carrier offset these readings
+                                    # are worth nothing):
                                     #   nominal  measured  side gate  noise gate  acq
-                                    #     -10      -9.2      100.0%     100.0%    yes
-                                    #     -20     -17.0      100.0%      15.5%    yes
-                                    #     -25     -21.1        0.0%       3.7%    no
-                                    #     -30 c20 -19.6        0.0%       0.0%    no
-                                    # Settled, the two shut together - a side band
-                                    # with nothing in it is both quiet against the
-                                    # mono and quiet against the noise - and at -25
-                                    # opening this gate alone is still enough to
-                                    # acquire while opening the other alone is not.
-                                    # Down to -20 the rotation comes out in full,
-                                    # though not as fast: a wide programme converges
-                                    # in 0.1 s and that one in 1.8 s.  Below it the
-                                    # tracker holds the hardware-trim prior, which
-                                    # costs how far that prior is from the truth: on
-                                    # the blocks that carry real side content the
-                                    # measured axis is within +-7 deg of the prior on
-                                    # all four reference captures - 0.06 dB of side
+                                    #     -10      -9.5      100.0%     100.0%    yes
+                                    #     -15     -14.5      100.0%     100.0%    yes
+                                    #     -20     -19.5        0.0%     100.0%    no
+                                    #     -25     -24.5        0.0%     100.0%    no
+                                    # The crossing is this gate's own, at -18: above
+                                    # it the rotation comes out in full, below it the
+                                    # tracker holds the hardware-trim prior and the
+                                    # other gate never gets a say.  What the prior
+                                    # costs is how far it is from the truth: on the
+                                    # blocks that carry real side content the
+                                    # measured axis is within +-7 deg of it on all
+                                    # four reference captures - 0.06 dB of side
                                     # level - which is the best answer they give.
+                                    # This is the clean, loud corner only.  Block by
+                                    # block on real programme the two gates share
+                                    # the work; see the other constant's comment.
 STEREO_PHASE_ACQUIRE_BLOCKS = 6     # Consecutive informative blocks (~100 ms) required
                                     # before cold-start acquisition; the initial angle is
                                     # the doubled-angle circular mean over the streak,
@@ -246,15 +238,17 @@ STEREO_PHASE_SIDE_OVER_NOISE_DB = 26.0  # Minimum demodulated side power above t
                                     # acquired, so was this set too high).  It is not.
                                     # Silence still stops just under it: CNR
                                     # 45/35/25/15 read med 22.6 / max 24.8, a 1.2 dB
-                                    # margin, and on silence the reading is there
-                                    # from the first block.  Above it there is less
-                                    # room than that: a genuinely stereo but narrow
-                                    # programme (side/mono -17 dB, CNR 35) settles at
-                                    # a median of 25.6 - under the gate - and
-                                    # acquires on the 15% of blocks that come in
-                                    # above it, while the same programme against a
-                                    # 29 dB gate never acquires at all.  Both halves
-                                    # are pinned by tests now.
+                                    # margin, and the same at a carrier offset of
+                                    # 0, 60 or 1237 Hz.  Above it there is about as
+                                    # little room: a quiet passage of stereo
+                                    # programme - 32 dB below full deviation, CNR
+                                    # 35, side/mono -13.9 dB so the other gate is
+                                    # open - reads 27 dB and acquires, and the same
+                                    # passage against a 29 dB gate never acquires at
+                                    # all.  That is where this gate does its work:
+                                    # not on a narrow programme (the side/mono gate
+                                    # has already refused those) but on a quiet one.
+                                    # Both halves are pinned by tests now.
                                     # Opening it to 6 dB on the four reference
                                     # captures moves the audio by -58.5 / -50.7 /
                                     # -69.6 / -59.2 dB and the tracked angle by at
