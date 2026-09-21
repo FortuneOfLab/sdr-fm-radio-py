@@ -372,11 +372,10 @@ def test_noise_alone_stays_under_the_side_over_noise_gate():
 
     Re-measured 2026-09-21 through the FIR path: silence reads med
     22.7 / max 24.2 at CNR 45/35/25/15, and measures the same at a
-    carrier offset of 0, 60 or 1237 Hz.  This fixture is silent
-    audio, not a silent transmitter - the pilot and the carrier are
-    both there - so that is an observation and not a prediction;
-    what it means is that this one measurement, unlike every other
-    in this file, was not reading the DC notch.
+    carrier offset of 0, 60 or 1237 Hz.  That is an observation and
+    not a prediction - this fixture is silent audio, not a silent
+    transmitter, and its pilot and carrier are discrete lines like
+    any other - so it runs at A_REAL_OFFSET_HZ with the rest.
     """
     from fm_radio.constants import (
         AUDIO_OUTPUT_RATE, COMPOSITE_RATE, SDR_SAMPLE_RATE, SDR_BLOCK_SIZE,
