@@ -542,10 +542,12 @@ class SideNoiseReducer:
         self.prev_gamma = None
 
     def process(self, x: np.ndarray, adapt: bool = True,
-                bypass: bool = False) -> np.ndarray:
+                bypass: bool = False,
+                apply_gain: bool = True) -> np.ndarray:
         """Denoise a streaming chunk.
 
-        Two orthogonal controls (codex P1 rounds 2-4 on PR #31):
+        Three orthogonal controls (codex P1 rounds 2-4 on PR #31,
+        and round 2 on PR #59):
 
         ``adapt`` - may this call's samples train the LEARNED model
         (the minimum-statistics ``noise_floor``)?  Tracked per SAMPLE
@@ -573,6 +575,19 @@ class SideNoiseReducer:
         step exactly when reception degrades.  Untrained freeze
         frames (floor is None) fall back to unity since there is no
         model to apply.
+        ``apply_gain`` - is the computed gain put on the output?
+        False runs everything (learning, the tracker, the DD state)
+        and emits the frame unchanged.  Used by a SWITCHED-OFF side
+        NR, where the model has to stay current or switching it back
+        on gives a floor learned before whatever happened while it
+        was off: measured after 5 s off across a 20 dB change in the
+        side noise, the first 0.5 s back on passed 0.954 of the
+        input against 0.697 for an NR that stayed on, and took about
+        5 s to come back (0.953, 0.892, 0.832 at 1, 2, 3 s).  This
+        is NOT bypass: bypass skips the FFT and freezes the model,
+        and is for the mono path, where the side is ~ 0 and learning
+        from it would destroy the floor.
+
         Completely zero frames freeze both floor and fast power/DD state,
         independent of adapt; OLA and emission still advance normally.
         """
@@ -713,6 +728,11 @@ class SideNoiseReducer:
             self.prev_gamma = gamma.astype(np.float32)
 
             gain = self.band_mask * gain + (1.0 - self.band_mask)
+            if not apply_gain:
+                # Everything above still happened - the floor, the
+                # fast power, the DD state are all current.  Only
+                # the output is left alone.
+                gain = np.ones_like(gain)
 
             spec_out = spec * gain
             out_frame = (

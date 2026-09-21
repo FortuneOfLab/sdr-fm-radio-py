@@ -360,8 +360,8 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         self.subcarrier_phase_offset_rad: float = np.deg2rad(
             subcarrier_phase_offset_deg + HARDWARE_SUBCARRIER_PHASE_TRIM_DEG
         )
-        self.mono_delay_samples: int = max(0, int(STEREO_MONO_DELAY_SAMPLES))
-        self._mono_delay_state: np.ndarray = np.zeros(self.mono_delay_samples, dtype=np.float32)
+        # Through the property below, which builds the delay line.
+        self.mono_delay_samples = max(0, int(STEREO_MONO_DELAY_SAMPLES))
         self._pilot_phase_last: float | None = None
         self._pilot_mix_phase: float = 0.0
         self.lr_side_cap_gain: float = 1.0
@@ -372,9 +372,9 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         self.lr_super_high_max_gain: float = float(LR_SUPER_HIGH_MAX_GAIN)
 
         # --- Side-channel STFT noise reduction (post de-emphasis) ---
-        # False means bypassed, not removed: the tail stays in the
-        # chain at unity gain so the latency does not move.  See
-        # _apply_side_nr.
+        # False means "computed but not applied", not removed: the
+        # tail stays in the chain, keeps its model current and
+        # leaves the audio alone.  See _apply_side_nr.
         self.side_nr_enabled: bool = bool(SIDE_NR_ENABLE)
         self.side_nr = SideNoiseReducer(
             sample_rate=self.final_audio_rate,
@@ -579,17 +579,42 @@ class BaseFMDemodulator(FMDemodulatorInterface):
             self._pilot_phase_last = float(pilot_phase[-1])
         return pilot_phase, meas_in
 
+    @property
+    def mono_delay_samples(self) -> int:
+        """Mono-path delay compensation, in composite samples."""
+        return self._mono_delay_samples
+
+    @mono_delay_samples.setter
+    def mono_delay_samples(self, samples: int) -> None:
+        """Set the delay and, if it changed, start a new delay line.
+
+        The clearing belongs here rather than in _apply_mono_delay,
+        which only the stereo path calls: a delay changed during
+        mono operation would otherwise keep its line, and a change
+        away and back - 4 to 0 to 4 - would find an array of the
+        right length on the way back and replay samples from before
+        the change.  Here it happens when the setting changes,
+        whatever the demodulator is doing.
+
+        Only when it CHANGES: a settings apply writes all nine
+        values, and clearing the line on a change to the noise
+        reducer would put a click in the audio for nothing.
+
+        Callers: the constructor, DspSettings.apply (on the
+        processing thread, between blocks) and quality_selftest.
+        """
+        samples = max(0, int(samples))
+        if getattr(self, "_mono_delay_samples", None) == samples:
+            return
+        self._mono_delay_samples: int = samples
+        self._mono_delay_state: np.ndarray = np.zeros(samples,
+                                                      dtype=np.float32)
+
     def _apply_mono_delay(self, mono: np.ndarray) -> np.ndarray:
         """Delay mono path to compensate LR path group delay."""
         delay = self.mono_delay_samples
         mono_f32 = np.asarray(mono, dtype=np.float32)
         if delay <= 0:
-            # Drop what the line is holding.  Without this the state
-            # survives a trip through zero, and a return to the SAME
-            # delay finds an array of the right length and replays
-            # samples from before the setting was changed.
-            if self._mono_delay_state.size:
-                self._mono_delay_state = np.zeros(0, dtype=np.float32)
             return mono_f32.astype(np.float64, copy=False)
         if self._mono_delay_state.size != delay:
             self._mono_delay_state = np.zeros(delay, dtype=np.float32)
@@ -1255,17 +1280,27 @@ class BaseFMDemodulator(FMDemodulatorInterface):
           tail in both paths the latency is mode-independent and the
           output timeline is continuous across switches.
 
-        A SWITCHED-OFF NR (``side_nr_enabled = False``) is the same
-        case as the mono path and takes the same route: bypassed,
-        not skipped.  Skipping it leaves whatever the tail is
+        A SWITCHED-OFF NR (``side_nr_enabled = False``) is not
+        skipped and not bypassed: it runs with ``apply_gain=False``,
+        which computes everything and leaves the audio alone.
+
+        Not skipped, because skipping leaves whatever the tail is
         holding inside it and takes the tail's 16 ms back out of the
-        timeline, so switching the NR off jumps the output forward
-        and switching it on again replays the held audio (measured
-        on the transition: mean |side| 0.1875 of old programme over
-        a block of silence).  Bypassed, the latency and the sample
-        accounting are the same in both states and a front end can
-        A/B the NR without a click.  It costs 83 us per 16 ms block
-        against 867 us for the denoising path.
+        timeline: switching off jumped the output forward and
+        switching on again replayed the held audio (measured on the
+        transition: mean |side| 0.1875 of old programme over a block
+        of silence).  That is the defect issue #29 fixed for the
+        mono/stereo switch, in this same tail.
+
+        Not bypassed, because bypass freezes the model: after 5 s
+        off across a 20 dB change in the side noise, the first 0.5 s
+        back on passed 0.954 of the input against 0.697 for an NR
+        that had stayed on, and took ~5 s to recover.  Learning
+        while off costs what the NR costs - 1046 us per 16 ms block
+        against 1061 us with it on, the same within the spread -
+        instead of the 85 us a bypass costs, and buys what an A/B
+        needs: the two states differ in the gain and in nothing
+        else.
 
         The mono path passes ``adapt=False``: the NR's temporal
         machinery (input buffer, STFT/OLA, emission schedule) keeps
@@ -1314,7 +1349,8 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         # side-noise step exactly when reception degrades (codex
         # P1-2, round 4).
         side_clean = self.side_nr.process(
-            side, adapt=adapt, bypass=bypass or not self.side_nr_enabled,
+            side, adapt=adapt, bypass=bypass,
+            apply_gain=self.side_nr_enabled,
         )
         mid_aligned = self.side_nr_mid_aligner.feed_and_take(
             mid, side_clean.size,

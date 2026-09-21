@@ -275,6 +275,29 @@ def test_a_checked_value_is_the_value_the_dsp_gets():
     assert list(demod._apply_mono_delay(np.ones(2, dtype=np.float32))) == [0.0, 0.0]
 
 
+@pytest.mark.parametrize("value, trouble", [
+    (np.int64(4), None),
+    (np.float32(4.0), None),
+    (np.float32(2.5), ValueError),
+    (np.float32(np.inf), ValueError),
+    (np.float64(np.nan), ValueError),
+    (np.bool_(True), TypeError),
+])
+def test_a_numpy_value_is_taken_or_refused_but_never_crashes(value, trouble):
+    """Whatever a caller hands in comes back as TypeError or ValueError.
+
+    int() on a numpy infinity raises OverflowError, which is neither,
+    and update_dsp_settings promises callers the other two.
+    """
+    if trouble is None:
+        assert replace(a_settings(),
+                       mono_delay_samples=value).mono_delay_samples == 4
+        return
+    with pytest.raises(trouble) as refused:
+        replace(a_settings(), mono_delay_samples=value)
+    assert "mono_delay_samples" in str(refused.value)
+
+
 def test_the_longest_mono_delay_is_bounded():
     """The next block allocates whatever was asked for."""
     at_the_limit = replace(a_settings(),
@@ -464,6 +487,56 @@ def test_the_noise_reducer_does_not_replay_what_it_held():
         "audio from before the noise reducer was switched off was replayed")
 
 
+def nr_ratio(off_seconds: float, keep_learning: bool) -> float:
+    """Output over input RMS with the NR on, after the noise changed.
+
+    Two seconds of quiet side noise to learn a floor, then a stretch
+    twenty times louder either with the NR switched off or with it
+    left on, then half a second measured with it on.  A reducer whose
+    model went stale while it was off passes nearly all of the input.
+    """
+    demod = FMDemodulatorLight(stereo=True)
+    rng = np.random.default_rng(11)
+    block = 768
+    rate = 48000
+
+    def push(amplitude, seconds):
+        fed, got = [], []
+        for _ in range(int(seconds * rate / block)):
+            side = (amplitude * rng.standard_normal(block)).astype(np.float32)
+            fed.append(side)
+            got.append(side_through_the_tail(demod, side))
+        return np.concatenate(fed), np.concatenate(got)
+
+    push(0.01, 2.0)
+    demod.side_nr_enabled = keep_learning
+    push(0.2, off_seconds)
+    demod.side_nr_enabled = True
+    fed, got = push(0.2, 0.5)
+    n = min(fed.size, got.size)
+    return float(np.sqrt(np.mean(got[:n] ** 2))
+                 / np.sqrt(np.mean(fed[:n] ** 2)))
+
+
+def test_the_noise_reducer_keeps_its_model_current_while_it_is_off():
+    """Off is "computed, not applied", not "frozen".
+
+    A bypass freezes the learned floor, so an NR switched back on
+    after the noise around it changed suppresses nothing for
+    seconds: 0.954 of the input passed, against 0.697 for one that
+    stayed on, recovering over about 5 s.  That is no use for an A/B
+    where the point is to hear the difference the moment it is
+    switched.
+    """
+    stayed_on = nr_ratio(5.0, keep_learning=True)
+    switched = nr_ratio(5.0, keep_learning=False)
+    assert stayed_on < 0.8, "the reducer is not suppressing at all"
+    assert switched < 0.8, (
+        "an NR switched back on after 5 s off passed %.3f of the input "
+        "against %.3f for one that stayed on" % (switched, stayed_on))
+    assert abs(switched - stayed_on) < 0.05
+
+
 def test_a_mono_delay_that_goes_through_zero_forgets_what_it_held():
     """Zero is not a pause: the line has to drop what it is carrying.
 
@@ -484,6 +557,41 @@ def test_a_mono_delay_that_goes_through_zero_forgets_what_it_held():
     after = demod._apply_mono_delay(np.arange(30, 34, dtype=np.float32))
     assert list(after) == [0.0, 0.0, 0.0, 0.0], (
         "samples from before the delay was taken off came back out")
+
+
+def test_a_mono_delay_changed_during_mono_clears_the_line_then():
+    """The delay line is only READ by the stereo path.
+
+    So the clearing cannot wait until it is next read: a delay
+    changed while the receiver is in mono, and changed back before
+    it returns to stereo, would find its old line intact.
+    """
+    demod = FMDemodulatorLight(stereo=True)
+    apply(replace(capture(demod), mono_delay_samples=4), demod)
+    demod._apply_mono_delay(np.arange(1, 9, dtype=np.float32))
+    assert list(demod._mono_delay_state) == [5.0, 6.0, 7.0, 8.0]
+
+    demod.stereo = False
+    apply(replace(capture(demod), mono_delay_samples=0), demod)
+    assert demod._mono_delay_state.size == 0, (
+        "the line still holds the last stereo block's samples")
+    apply(replace(capture(demod), mono_delay_samples=4), demod)
+    demod.stereo = True
+    back = demod._apply_mono_delay(np.arange(30, 34, dtype=np.float32))
+    assert list(back) == [0.0, 0.0, 0.0, 0.0], (
+        "samples from before the receiver went mono came back out")
+
+
+def test_changing_something_else_leaves_the_delay_line_alone():
+    """Clearing on every apply would click on every unrelated change."""
+    demod = FMDemodulatorLight(stereo=True)
+    apply(replace(capture(demod), mono_delay_samples=4), demod)
+    demod._apply_mono_delay(np.arange(1, 9, dtype=np.float32))
+    held = list(demod._mono_delay_state)
+
+    apply(replace(capture(demod), side_nr_alpha_floor=0.5), demod)
+    assert list(demod._mono_delay_state) == held
+    assert list(demod._apply_mono_delay(np.zeros(4, dtype=np.float32))) == held
 
 
 # ----------------------------------------------------------------------

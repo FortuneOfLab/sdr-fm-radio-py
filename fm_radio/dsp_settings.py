@@ -118,15 +118,20 @@ def _whole(name: str, value, low: int, high: int) -> int:
     """Return *value* as a whole number in range, or refuse it."""
     if isinstance(value, bool) or not isinstance(value, numbers.Real):
         raise TypeError(f"{name} must be a whole number, not {value!r}")
-    # Before int(), which raises its own ValueError on a nan, and
-    # without float(), which overflows on an int of a few hundred
-    # digits - one of which is a value to refuse, not to crash on.
-    if isinstance(value, float) and not math.isfinite(value):
-        raise ValueError(
-            f"{name} must be a whole number of samples, not {value!r}")
-    if int(value) != value:
-        raise ValueError(
-            f"{name} must be a whole number of samples, not {value!r}")
+    if not isinstance(value, numbers.Integral):
+        # Anything real that is not an integer type - float, numpy
+        # float, Fraction - goes through float() first, because
+        # int() on a nan or an infinity raises something else
+        # entirely (ValueError "cannot convert", OverflowError) and
+        # both of those are values to refuse, not to crash on.  An
+        # integer type skips it: float() is what overflows on an int
+        # of a few hundred digits, and the range check below has an
+        # answer for that one.
+        as_float = float(value)
+        if not math.isfinite(as_float) or int(as_float) != as_float:
+            raise ValueError(
+                f"{name} must be a whole number of samples, not {value!r}")
+        value = int(as_float)
     number = int(value)
     if not low <= number <= high:
         raise ValueError(
