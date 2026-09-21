@@ -1339,15 +1339,17 @@ class BaseFMDemodulator(FMDemodulatorInterface):
             adapt = self._side_nr_adapt
         mid = (0.5 * (left_48 + right_48)).astype(np.float32)
         side = (0.5 * (left_48 - right_48)).astype(np.float32)
-        # bypass=True for the mono path (side ~ 0, unity OLA, gain
-        # state bit-frozen) and for an NR that has been switched off,
-        # which is the same situation: nothing to suppress, and
-        # everything still flowing.  The stereo low-blend gate uses
-        # FREEZE mode (adapt=False, bypass=False): the learned floor
-        # is protected while the gain computation keeps suppressing
-        # continuously - a unity bypass here measured a +6.5 dB
-        # side-noise step exactly when reception degrades (codex
-        # P1-2, round 4).
+        # bypass=True is the MONO path and nothing else (side ~ 0,
+        # unity OLA, gain state bit-frozen): there is nothing to
+        # suppress and learning from an artificial zero would
+        # destroy the floor.  A switched-off NR keeps computing and
+        # learning and passes apply_gain=False, so only the output
+        # is left alone.  The stereo low-blend gate is a third
+        # combination, FREEZE (adapt=False, bypass=False): the
+        # learned floor is protected while the gain computation
+        # keeps suppressing continuously - a unity bypass here
+        # measured a +6.5 dB side-noise step exactly when reception
+        # degrades (codex P1-2, round 4).
         side_clean = self.side_nr.process(
             side, adapt=adapt, bypass=bypass,
             apply_gain=self.side_nr_enabled,

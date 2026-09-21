@@ -435,10 +435,11 @@ def test_switching_the_noise_reducer_does_not_disturb_the_stream():
 
     Skipping the tail while the NR is off leaves what it is holding
     inside it and takes 16 ms out of the timeline; the held samples
-    then replay when it is switched back on.  Running it in bypass
-    keeps the latency and the sample accounting the same in both
-    states, which is the fix issue #29 made for the mono/stereo
-    switch - the same tail, the same reason.
+    then replay when it is switched back on.  Keeping the tail in
+    the chain - computing, and only withholding the gain - keeps
+    the latency and the sample accounting the same in both states,
+    which is the fix issue #29 made for the mono/stereo switch: the
+    same tail, the same reason.
     """
     rng = np.random.default_rng(3)
     blocks = [rng.standard_normal(1024).astype(np.float32) for _ in range(12)]
@@ -543,10 +544,12 @@ def test_a_switched_off_noise_reducer_leaves_the_audio_alone():
     demod = FMDemodulatorLight(stereo=True)
     rng = np.random.default_rng(7)
     rate, block = 48000, 768
+    half_a_second = int(0.5 * rate / block)
 
-    def ratio(seconds, amplitude=0.05):
+    def ratio(blocks, amplitude=0.05):
+        """Output over input RMS over *blocks* blocks of side noise."""
         fed, got = [], []
-        for _ in range(int(seconds * rate / block)):
+        for _ in range(blocks):
             side = (amplitude * rng.standard_normal(block)).astype(np.float32)
             fed.append(side)
             got.append(side_through_the_tail(demod, side))
@@ -555,18 +558,25 @@ def test_a_switched_off_noise_reducer_leaves_the_audio_alone():
         return float(np.sqrt(np.mean(b[:n] ** 2))
                      / np.sqrt(np.mean(a[:n] ** 2)))
 
-    ratio(3.0)                                   # learn a floor
-    suppressing = ratio(0.5)
+    ratio(6 * half_a_second)                     # learn a floor
+    suppressing = ratio(half_a_second)
     assert suppressing < 0.9, "the reducer was not suppressing to begin with"
 
+    # The very first block after the switch is already part of the
+    # way there - it carries the tail's three hops of gained
+    # content, and measured 0.788 between 0.703 suppressed and 1.0
+    # untouched - and the block after it is all the way there.  A
+    # change that took two or three blocks to arrive would leave
+    # this first block reading like the old state.
     apply(replace(capture(demod), side_nr_enabled=False), demod)
-    ratio(0.05)                                  # one block to flush
-    assert abs(ratio(0.5) - 1.0) < 0.02, (
+    assert ratio(1) > suppressing + 0.05, (
+        "the switch had not reached the first block after it")
+    assert abs(ratio(half_a_second) - 1.0) < 0.02, (
         "a switched-off noise reducer is still changing the audio")
 
     apply(replace(capture(demod), side_nr_enabled=True), demod)
-    ratio(0.05)
-    assert ratio(0.5) < 0.9, "it did not start suppressing again"
+    assert ratio(1) < 0.95, "the switch back had not reached the next block"
+    assert ratio(half_a_second) < 0.9, "it did not start suppressing again"
 
 
 def test_the_noise_reducer_keeps_its_model_current_while_it_is_off():
