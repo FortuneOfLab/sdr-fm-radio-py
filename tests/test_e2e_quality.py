@@ -1,12 +1,18 @@
 """End-to-end synthetic quality gates, clean and impaired.
 
 Runs the full MPX -> FM IQ -> demodulator chain and asserts conservative
-floors for the objective metrics.  The floors sit well below the
-measured values (clean run at CNR=35: Sep ~43/57 dB, THD+N ~-37 dB,
-SNR ~35 dB with pre-emphasis on) so they are robust across
-platforms and RNG noise draws while still catching structural
-regressions.  See the FLOORS comment below for the measurement
-history across tuning changes.
+floors for the objective metrics.  The floors sit below the measured
+values (clean run at CNR=35: Sep 70.3/72.3 dB, THD+N -57.2 dB, SNR
+30.4 dB with pre-emphasis on) so they are robust across platforms and
+RNG noise draws while still catching structural regressions.  How far
+below depends on the metric, taking the worse channel of each pair as
+the floors do: separation by 12-20 dB, THD by 8-12, and SNR by 5-7 -
+the thinnest of all being the 4.9 dB on dc-notch's right channel.
+The SNR floor is the one this PR did not move; what limits the SNR
+measurement is not the CNR (taking the noise away leaves clean at
+30.373/30.377 dB against 30.369/30.363 with it) and has not been
+looked into.  See the FLOORS comment below for the per-scenario
+measurements and the history across tuning changes.
 
 The impaired scenarios exist because a pristine synthetic channel can
 hide whole bug classes: the FFT-Hilbert block-edge defect fixed in
@@ -19,8 +25,15 @@ clock mismatch.  Each scenario models one real-world impairment:
   tuning-30kHz    receiver tuning error: DC in the composite and
                   asymmetric sideband filtering in the IQ lowpass
   multipath       two-ray echo, 3 us / -12 dB / 60 deg
+  dc-notch        the carrier tuned exactly to 0 Hz, where the DC
+                  blocker's notch takes the synthetic signal's
+                  carrier line and the removal intermodulates across
+                  the composite
 
-Marked slow: run explicitly with `pytest -m slow` or as part of CI.
+Marked slow - run explicitly with `pytest -m slow` or as part of CI -
+with one exception: test_the_scenarios_are_not_measured_in_the_dc_notch
+reads the module's own settings and runs no DSP, so it is left
+unmarked and runs with the quick tests.
 """
 
 from __future__ import annotations
@@ -31,6 +44,20 @@ import pytest
 from fm_radio.quality_selftest import evaluate_quality
 
 
+#: Away from the DC blocker's notch, and away from the tone comb.
+#: A synthetic signal is a handful of discrete lines, and at zero
+#: carrier offset the carrier line sits in the notch (see
+#: DC_BLOCK_CUTOFF_HZ, and the warning quality_selftest prints for
+#: offsets inside it).  What that costs is not small: the clean
+#: scenario measures 50.2/57.3 dB of separation and -40.3 dB THD
+#: there against 70.3/72.3 and -57.2 here, so every number this file
+#: used to record was of the notch rather than of the receiver.
+#: 1237 Hz is the tooling's own recommendation, off the tone comb;
+#: this hardware's residual offset is ~60 Hz and the two measure
+#: alike.  The notch is still worth a scenario of its own - see
+#: SCENARIOS - but not worth being the default.
+A_REAL_OFFSET_HZ = 1237.0
+
 BASE_KWARGS = dict(
     duration_s=3.0,
     tone_hz=1000.0,
@@ -38,6 +65,7 @@ BASE_KWARGS = dict(
     pilot_amp=0.10,
     freq_dev_hz=75_000.0,
     warmup_s=0.8,
+    carrier_offset_hz=A_REAL_OFFSET_HZ,
 )
 
 SCENARIOS = {
@@ -47,25 +75,58 @@ SCENARIOS = {
     "multipath": dict(
         multipath_delay_us=3.0, multipath_gain=0.25, multipath_phase_deg=60.0,
     ),
+    # Overrides the realistic offset on purpose: this one is the
+    # pathology, kept so that a change which makes it worse is seen.
+    # Its floors are its own, ~10 dB under what it measures.
+    "dc-notch": dict(carrier_offset_hz=0.0),
 }
 
-# Measured values (2026-07, windowed-median metrics, neutral HF
-# ceilings AND neutral blend-stability term, analog-exact pre-emphasis
-# + analog-fitted de-emphasis): clean Sep ~43/57, THD -36.9, SNR 34.9.
-# History: before the blend-stability neutralisation the same chain
-# measured clean Sep 30.2/30.5 - the blend itself (0.95-0.997 on
-# synthetic) capped separation at 20*log10((1+b)/(1-b)).  Earlier
-# still: with the
-# bilinear pre-emphasis + matched-Z de-emphasis mismatch these were
-# Sep 29.3/30.7, THD -32.8, SNR 32.7; with the earlier 0.85/0.50 HF
-# damping ceilings Sep 24.4/28.4, THD -31..-32.5, SNR 30.9-34.2.
-# THD is duration-stable to ~0.5 dB (was swinging -18..-32 with the
-# whole-signal single-FFT metric).
+# Measured 2026-09-21, off the DC notch (see A_REAL_OFFSET_HZ - the
+# same measurements at 0 Hz are in the dc-notch row, and every number
+# recorded here before that date was taken there):
+#
+#   scenario       sepL>R  sepR>L    thdL    thdR    snrL    snrR
+#   clean            70.3    72.3   -57.2   -57.2    30.4    30.4
+#   clock-200ppm     70.5    73.3   -57.2   -57.2    30.4    30.4
+#   tuning-30kHz     56.2    63.5   -38.7   -39.4    35.3    31.2
+#   multipath        37.3    37.2   -55.9   -55.9    31.1    31.1
+#   dc-notch         50.2    57.3   -40.3   -40.9    31.1    28.9
+#
+# Both channels, because each floor is asserted against both.  The
+# margin left on the worse one, per scenario and metric:
+#
+#   scenario         sep    thd    snr
+#   clean           20.3   12.2    6.4
+#   clock-200ppm    20.5   12.2    6.4
+#   tuning-30kHz    16.2    8.7    7.2
+#   multipath       12.2   10.9    7.1
+#   dc-notch        15.2    8.3    4.9
+#
+# The separation floors sit 12-20 dB under those, which is where
+# they were before relative to what was then being measured, and
+# they now discriminate far harder: with the phase corrector
+# disabled the clean scenario measures 5.0 dB of separation rather
+# than 70.  The SNR floor of 24 dB is the one this PR did not move
+# and the one with least room: 4.9 dB on dc-notch's right channel.
+# Whatever sets that measurement, it is not the channel noise -
+# clean measures 30.369/30.363 dB at CNR 35 and 30.373/30.377 with
+# no noise at all - and nobody has yet looked into what does.
+# History of the clean row, all at 0 Hz and so all of the notch:
+# 2026-07 (windowed-median metrics, neutral HF ceilings and blend
+# stability, analog-exact pre-emphasis) Sep ~43/57, THD -36.9, SNR
+# 34.9; before the blend-stability neutralisation Sep 30.2/30.5 (the
+# blend itself, 0.95-0.997 on synthetic, capped separation at
+# 20*log10((1+b)/(1-b))); with the bilinear/matched-Z emphasis
+# mismatch Sep 29.3/30.7, THD -32.8, SNR 32.7; with the earlier
+# 0.85/0.50 HF damping ceilings Sep 24.4/28.4, THD -31..-32.5, SNR
+# 30.9-34.2.  THD is duration-stable to ~0.5 dB (it swung -18..-32
+# with the whole-signal single-FFT metric).
 FLOORS = {
-    "clean": dict(sep=18.0, thd=-20.0, snr=24.0),
-    "clock-200ppm": dict(sep=18.0, thd=-20.0, snr=24.0),
-    "tuning-30kHz": dict(sep=18.0, thd=-20.0, snr=24.0),
-    "multipath": dict(sep=16.0, thd=-20.0, snr=24.0),
+    "clean": dict(sep=50.0, thd=-45.0, snr=24.0),
+    "clock-200ppm": dict(sep=50.0, thd=-45.0, snr=24.0),
+    "tuning-30kHz": dict(sep=40.0, thd=-30.0, snr=24.0),
+    "multipath": dict(sep=25.0, thd=-45.0, snr=24.0),
+    "dc-notch": dict(sep=35.0, thd=-32.0, snr=24.0),
 }
 
 
@@ -79,6 +140,10 @@ def test_blend_snr_ramp_protects_weak_signal():
     closing within a bounded time after a good->weak SNR step.
     Statistics: per-block blend over 16384-sample IQ blocks, first
     0.5 s of each segment excluded as settling.
+
+    Off the DC notch like the rest of the file, though this one
+    measured the same either way (1.000 / 0.000 / 0.000 at both): the
+    blend reads the pilot, and the notch takes the carrier line.
     """
     from fm_radio.demodulator import FMDemodulator
     from fm_radio.quality_selftest import _synthesize_iq_tone, _apply_channel
@@ -87,8 +152,10 @@ def test_blend_snr_ramp_protects_weak_signal():
     np.random.seed(0)
     clean = _synthesize_iq_tone(8.0, fs, 1000.0, 0.6, 0.6, 0.10, 75_000.0)
     half = int(4.0 * fs)
-    good = _apply_channel(clean[:half], fs, 35.0)
-    weak = _apply_channel(clean[half:], fs, 0.0)
+    good = _apply_channel(clean[:half], fs, 35.0,
+                          carrier_offset_hz=A_REAL_OFFSET_HZ)
+    weak = _apply_channel(clean[half:], fs, 0.0,
+                          carrier_offset_hz=A_REAL_OFFSET_HZ)
     iq = np.concatenate([good, weak])
     d = FMDemodulator(stereo=True)
     blends = []
@@ -166,19 +233,23 @@ def test_hf_separation_maintained_at_14k():
 
     Canonical sweep conditions (hifi TX, constant modulation,
     noiseless): the IIR chain measured -3.7 dB at 14 kHz, the FIR
-    bank 34.0/35.2 dB.  Floor at 30 dB keeps the structural
-    improvement while tolerating measurement scatter; it also guards
-    the final audio lowpass (a band limit encroaching below 15 kHz
-    would show up here first).
+    bank 34.0/35.2 dB.  Both of those were measured at a zero carrier
+    offset, in the DC blocker's notch; off it the same FIR bank
+    measures 46.6/46.9 dB (2026-09-21, and 35.5/35.9 with the offset
+    put back, which is the old number).  Floor at 40 dB keeps the
+    structural improvement while tolerating measurement scatter; it
+    also guards the final audio lowpass (a band limit encroaching
+    below 15 kHz would show up here first).
     """
     np.random.seed(0)
     m = evaluate_quality(
         duration_s=4.0, tone_hz=14_000.0, cnr_db=None,
         pilot_amp=0.10, freq_dev_hz=75_000.0, warmup_s=0.8,
         hifi_tx=True, hifi_constant_mod=True,
+        carrier_offset_hz=A_REAL_OFFSET_HZ,
     )
-    assert m.separation_l_to_r_db > 30.0, m
-    assert m.separation_r_to_l_db > 30.0, m
+    assert m.separation_l_to_r_db > 40.0, m
+    assert m.separation_r_to_l_db > 40.0, m
 
 
 @pytest.mark.slow
@@ -197,8 +268,14 @@ def test_phase_corrector_recovers_large_static_error():
                            -75, no clamp truncation of the estimate
                            distribution)
 
-    The floors keep the pre-tracker discrimination (fail at clamp 60)
-    and the tracker clears them by ~4-7 dB.
+    All of those were measured at a zero carrier offset, inside the
+    DC blocker's notch, so they are not comparable with what this
+    measures now: off the notch the gated tracker takes the error out
+    completely and the scenario reads 70.3 / 72.3 dB, against 5.0 /
+    5.0 with the corrector disabled.  The floor is set from that pair
+    rather than from the clamp history - the clamps are gone and
+    cannot be re-measured - and it discriminates by 50 dB where the
+    old one discriminated by 4-7.
     """
     from fm_radio.constants import STEREO_SUBCARRIER_PHASE_OFFSET_DEG
     np.random.seed(0)
@@ -206,8 +283,8 @@ def test_phase_corrector_recovers_large_static_error():
         **BASE_KWARGS,
         subcarrier_phase_offset_deg=STEREO_SUBCARRIER_PHASE_OFFSET_DEG - 75.0,
     )
-    assert m.separation_l_to_r_db > 23.5, m
-    assert m.separation_r_to_l_db > 26.5, m
+    assert m.separation_l_to_r_db > 55.0, m
+    assert m.separation_r_to_l_db > 55.0, m
 
 
 @pytest.mark.slow
@@ -245,16 +322,6 @@ def test_phase_tracker_never_acquires_on_mono_broadcast():
             d.demodulate(d.process_iq_samples(c))
         assert not d._phase_acquired, cnr
         assert d.stereo_phase_err_ema == 0.0, cnr
-
-
-#: Away from the DC blocker's notch, and away from the tone comb.
-#: A synthetic programme is a handful of discrete lines, and at zero
-#: carrier offset one of them lands in the notch: measured, the same
-#: -20 dB programme reads a side-over-noise median of 25.6 dB at 0 Hz
-#: and 45.4 dB at this offset, and its side/mono 2.5 dB high.  Every
-#: gate reading here would be about that instead of about the gates.
-#: See DC_BLOCK_CUTOFF_HZ; the tooling prints the same warning.
-A_REAL_OFFSET_HZ = 1237.0
 
 
 def _side_and_mono(duration_s, width_db, fs, level_db=0.0):
@@ -548,6 +615,10 @@ def test_phase_tracker_acquires_correct_branch_at_boundary():
     wrong 180-deg branch (permanent L/R swap) with that probability.
     The doubled-angle circular mean over the acquisition streak is
     invariant to the wrap, so separation stays high and positive.
+
+    Off the DC notch this reads 70.3 / 72.3 dB against 1.0 / 1.0 with
+    the corrector disabled, so the floor is set the same way as the
+    one above (it was 24.0 when both were measured in the notch).
     """
     from fm_radio.constants import STEREO_SUBCARRIER_PHASE_OFFSET_DEG
     np.random.seed(0)
@@ -555,8 +626,8 @@ def test_phase_tracker_acquires_correct_branch_at_boundary():
         **BASE_KWARGS,
         subcarrier_phase_offset_deg=STEREO_SUBCARRIER_PHASE_OFFSET_DEG - 88.0,
     )
-    assert m.separation_l_to_r_db > 24.0, m
-    assert m.separation_r_to_l_db > 24.0, m
+    assert m.separation_l_to_r_db > 55.0, m
+    assert m.separation_r_to_l_db > 55.0, m
 
 
 @pytest.mark.slow
@@ -680,21 +751,55 @@ def test_phase_tracker_follows_drift_beyond_90_deg():
     residual at the end - roughly 8 dB of separation in the late
     windows), and past 90 deg the raw principal-axis estimate wraps
     to the opposite branch.  The continuity-based tracker follows the
-    pi-periodic family and holds full separation throughout
-    (measured 30.8 / 29.5 dB, floors well below).
+    pi-periodic family and holds full separation throughout: off the
+    DC notch this measures 58.7 / 59.4 dB against 6.3 / 6.2 with the
+    corrector disabled.  The 30.8 / 29.5 dB in the history of this
+    test, and its floor of 24, were measured at a zero carrier
+    offset inside the notch.
     """
     np.random.seed(0)
     m = evaluate_quality(**BASE_KWARGS, dsb_phase_drift_deg_per_s=-40.0)
-    assert m.separation_l_to_r_db > 24.0, m
-    assert m.separation_r_to_l_db > 24.0, m
+    assert m.separation_l_to_r_db > 45.0, m
+    assert m.separation_r_to_l_db > 45.0, m
     assert m.thdn_left_db < -20.0, m
+
+
+# Not slow any more, and not marked so: it stopped measuring
+# anything when it stopped asserting the size of the pathology.
+def test_the_scenarios_are_not_measured_in_the_dc_notch():
+    """Every floor here but the dc-notch row was set off the notch.
+
+    A default that drifted back to zero would take them all with it,
+    and quietly: the floors sit far enough below the measurements
+    that a notched run still clears several of them.  So the
+    arrangement itself is asserted rather than measured - the
+    default is outside the notch, and the one scenario that is
+    inside it says so on purpose.
+
+    Asserting the arrangement and not the gap between the two is
+    deliberate.  Measured, that gap is 20 dB of separation and 17 of
+    THD, but it is the size of a defect in the DC blocker: fixing
+    that would shrink it, and a test that demanded it stay would
+    fail on the improvement.  What the notch costs is watched by the
+    dc-notch row's own floors, where it belongs.
+    """
+    from fm_radio.constants import DC_BLOCK_CUTOFF_HZ
+
+    assert BASE_KWARGS["carrier_offset_hz"] == A_REAL_OFFSET_HZ
+    assert abs(A_REAL_OFFSET_HZ) > 3.0 * DC_BLOCK_CUTOFF_HZ, (
+        "the default offset is inside the notch transition")
+    assert SCENARIOS["dc-notch"]["carrier_offset_hz"] == 0.0, (
+        "the scenario that is supposed to sit in the notch does not")
 
 
 @pytest.mark.slow
 @pytest.mark.parametrize("scenario", list(SCENARIOS))
 def test_synthetic_quality_floors(scenario):
     np.random.seed(0)  # _fm_modulate_iq uses the legacy global RNG
-    m = evaluate_quality(**BASE_KWARGS, **SCENARIOS[scenario])
+    # Merged rather than passed as two mappings: two of the scenarios
+    # set a carrier offset of their own, and theirs is the one that
+    # counts.
+    m = evaluate_quality(**{**BASE_KWARGS, **SCENARIOS[scenario]})
     floors = FLOORS[scenario]
     assert m.separation_l_to_r_db > floors["sep"], (scenario, m)
     assert m.separation_r_to_l_db > floors["sep"], (scenario, m)
