@@ -4,11 +4,13 @@ Runs the full MPX -> FM IQ -> demodulator chain and asserts conservative
 floors for the objective metrics.  The floors sit below the measured
 values (clean run at CNR=35: Sep 70.3/72.3 dB, THD+N -57.2 dB, SNR
 30.4 dB with pre-emphasis on) so they are robust across platforms and
-RNG noise draws while still catching structural regressions: most sit
-12-20 dB under, and the two thinnest - the THD floors for
-tuning-30kHz and dc-notch - about 8 dB.  See the FLOORS comment below
-for the per-scenario measurements and the history across tuning
-changes.
+RNG noise draws while still catching structural regressions.  How far
+below depends on the metric: separation by 12-20 dB, THD by 8-12, and
+SNR by 6-11 - the thinnest of all being the 6.4 dB on the clean and
+clock scenarios, where the measurement is set by the CNR rather than
+by the receiver and the floor has not moved in a long time.  See the
+FLOORS comment below for the per-scenario measurements and the
+history across tuning changes.
 
 The impaired scenarios exist because a pristine synthetic channel can
 hide whole bug classes: the FFT-Hilbert block-edge defect fixed in
@@ -26,7 +28,10 @@ clock mismatch.  Each scenario models one real-world impairment:
                   carrier line and the removal intermodulates across
                   the composite
 
-Marked slow: run explicitly with `pytest -m slow` or as part of CI.
+Marked slow - run explicitly with `pytest -m slow` or as part of CI -
+with one exception: test_the_scenarios_are_not_measured_in_the_dc_notch
+reads the module's own settings and runs no DSP, so it is left
+unmarked and runs with the quick tests.
 """
 
 from __future__ import annotations
