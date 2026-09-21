@@ -776,7 +776,19 @@ class ReceiverWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _set_notice(self, message: str, sort: str = _FAILURE) -> None:
-        """Put *message* in the status bar and keep it there to be read."""
+        """Put *message* in the status bar and keep it there to be read.
+
+        Nothing goes over the line that says the receiver has
+        stopped.  That line is the last thing the window will say -
+        the refresh stops with it - so anything written after it
+        stays written: a sweep that ends after the cable comes out
+        would leave the window saying "scan found 3" about a radio
+        that is not there, and a question answered after it the
+        same.  _show_the_device_has_gone writes that line itself and
+        does not come through here.
+        """
+        if getattr(self.controller, "device_failure", None) is not None:
+            return
         self._notice = (message, time.monotonic() + NOTICE_SECONDS, sort)
         self._health.setText(message)
 

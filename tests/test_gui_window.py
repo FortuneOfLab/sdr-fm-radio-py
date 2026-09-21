@@ -1868,7 +1868,7 @@ def one_place(mhz=(80.0, 81.3)):
     return [a_transmitter(each) for each in mhz]
 
 
-def watch_the_boxes(monkeypatch, answer=None):
+def watch_the_boxes(monkeypatch, answer=None, meanwhile=None):
     """Catch the modal boxes instead of putting one on the screen.
 
     ``exec`` is what is patched, not the window's own asking, so
@@ -1882,6 +1882,12 @@ def watch_the_boxes(monkeypatch, answer=None):
 
     def instead(box):
         shown.append(box)
+        if meanwhile is not None and len(shown) == 1:
+            # What a timer firing inside the modal loop does.  Qt
+            # goes on delivering them while a box is up, so the
+            # window behind it keeps refreshing - and can find out
+            # that the receiver has gone.
+            meanwhile()
         return QMessageBox.Yes if answer is None else answer
 
     monkeypatch.setattr(QMessageBox, "exec", instead)
@@ -2049,6 +2055,66 @@ def test_a_sweep_the_window_no_longer_holds_is_not_asked_about(window,
 
     assert shown == [], "it asked about a sweep it had let go of"
     assert controller.saved == []
+
+
+def test_a_radio_that_goes_while_the_question_is_up_still_says_so(
+        window, monkeypatch, qt_app):
+    """The line about the device is the last one the window writes.
+
+    The refresh stops with it, so a notice put up after it stays up:
+    the window would sit there saying the stations are named from
+    関東 now, about a radio that is not there.
+    """
+    view, controller, _ = a_scan(window, monkeypatch,
+                                 found=[a_find(80.0), a_find(81.3)])
+    controller.catalogue = one_place()
+
+    def the_cable_comes_out():
+        controller.device_failure = "the SDR was unplugged"
+        view.refresh()                  # the timer, inside the modal loop
+
+    watch_the_boxes(monkeypatch, meanwhile=the_cable_comes_out)
+
+    view._scan_button.click()
+    finish(view, qt_app)
+
+    assert "SDR disconnected" in view._health.text(), view._health.text()
+    # Still written: the file is about the next start, and the user
+    # answered the question.
+    assert controller.saved == ["関東"]
+
+
+def test_a_sweep_that_ends_after_the_device_went_does_not_talk_over_it(
+        window, monkeypatch, qt_app):
+    """The same line, and the same reason.  A sweep ends a few
+    hundred milliseconds after the device goes - it stops at the
+    next hop - and it used to report what it found over the top of
+    the explanation the user was reading.
+    """
+    let_it_go = threading.Event()
+    view, controller, _ = a_scan(window, monkeypatch, hold=let_it_go,
+                                 found=[a_find(89.7)])
+
+    view._scan_button.click()
+    qt_app.processEvents()
+    controller.device_failure = "the SDR was unplugged"
+    view.refresh()
+    let_it_go.set()
+    finish(view, qt_app)
+
+    assert "SDR disconnected" in view._health.text(), view._health.text()
+
+
+def test_nothing_is_written_over_the_line_about_the_device(window):
+    """One place decides it, for every notice there is."""
+    view, controller = window(FakeController(snapshot()))
+    controller.device_failure = "the SDR was unplugged"
+    view.refresh()
+    was = view._health.text()
+
+    view._set_notice("something happened")
+
+    assert view._health.text() == was
 
 
 def test_a_file_that_cannot_be_changed_is_said_in_full(window, monkeypatch,

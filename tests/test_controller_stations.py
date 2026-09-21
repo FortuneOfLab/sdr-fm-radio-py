@@ -133,6 +133,63 @@ def test_settling_on_an_area_writes_it_and_names_by_it_now(build_controller,
 
 
 @needs_tomllib
+def test_a_name_worked_out_before_does_not_outlive_the_area(
+        build_controller, no_user_config):
+    """The snapshot does not name through current_station().
+
+    It goes through _station_name_for, which keeps the last answer
+    because walking 983 transmitters is most of what a snapshot
+    costs.  Keyed on the frequency alone, that answer outlived the
+    list it was worked out from - and a sweep puts the receiver back
+    on the frequency it started on, which is exactly the frequency
+    the cache has an answer for.  The window would go on showing
+    TOKYO FM in Hokkaido until the user tuned away.
+
+    The private call is the point: it is the processing thread's
+    path, and the public one is a snapshot built on that thread.
+    """
+    instance = build_controller(no_user_config)
+    at = instance.get_frequency()
+    assert instance._station_name_for(at) == "TOKYO FM"
+
+    instance.remember_where_this_is("\u5317\u6d77\u9053")
+
+    assert instance._station_name_for(at) == "", \
+        "the name outlived the area it was worked out under"
+
+
+@needs_tomllib
+def test_the_name_is_still_only_worked_out_once(build_controller,
+                                                 no_user_config,
+                                                 monkeypatch):
+    """The generation is part of the key, not a way round the cache.
+
+    Naming is ~270 us over the whole catalogue and happens on the
+    processing thread; a cache that misses every block would put
+    that in the audio path 60 times a second.
+    """
+    from fm_radio import controller as module
+
+    instance = build_controller(no_user_config)
+    at = instance.get_frequency()
+    walks = []
+    real = module.nearest
+    monkeypatch.setattr(module, "nearest",
+                        lambda stations, freq: walks.append(freq) or real(
+                            stations, freq))
+
+    for _ in range(5):
+        instance._station_name_for(at)
+    assert len(walks) == 1, "it walked the catalogue %d times" % len(walks)
+
+    instance.remember_where_this_is("\u95a2\u6771")
+    for _ in range(5):
+        instance._station_name_for(at)
+
+    assert len(walks) == 2, "it walked the catalogue %d times" % len(walks)
+
+
+@needs_tomllib
 def test_it_writes_to_the_file_it_was_given(build_controller, monkeypatch,
                                             tmp_path):
     """The receiver was pointed at a file; so is this."""
