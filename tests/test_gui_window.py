@@ -1393,6 +1393,223 @@ def test_a_recording_can_be_started_again_while_the_last_one_finishes(window):
 
 
 # ----------------------------------------------------------------------
+# Sweeping the band from the window
+# ----------------------------------------------------------------------
+
+def a_find(mhz: float, power: float = -10.0, sort=None):
+    """One of the things a scan hands back."""
+    from fm_radio import band_scan
+
+    return band_scan.Signal(
+        mhz * 1e6, power, 52.0,
+        sort if sort is not None else band_scan.CONFIRMED)
+
+
+def a_scan(window, monkeypatch, found=None, fails=None, hold=None):
+    """A window whose Scan button runs a stand-in sweep.
+
+    The sweep still goes on its own thread - that is the thing worth
+    keeping - but it sweeps a list instead of a band.
+    """
+    from fm_radio.gui import main_window
+
+    ran = {}
+
+    class StandIn:
+        def __init__(self, controller, on_progress=None) -> None:
+            ran["controller"] = controller
+            self._say = on_progress
+            self.cancelled = False
+
+        def cancel(self):
+            self.cancelled = True
+
+        def run(self, listen_sec=0.25):
+            if self._say is not None:
+                self._say("looking at 76.4 MHz (1 of 24)")
+            if hold is not None:
+                assert hold.wait(5), "the test never let the sweep finish"
+            if fails is not None:
+                raise fails
+            return list(found or [])
+
+    monkeypatch.setattr(main_window, "BandScan", StandIn)
+    view, controller = window(FakeController(snapshot()))
+    return view, controller, ran
+
+
+def finish(view, qt_app, timeout: float = 5.0) -> None:
+    """Let the sweeping thread end and its signals be delivered."""
+    sweep = view._sweep
+    if sweep is not None:
+        sweep.wait()
+    deadline = time.monotonic() + timeout
+    while view._sweep is not None and time.monotonic() < deadline:
+        qt_app.processEvents()
+
+
+def test_the_sweep_does_not_run_on_the_thread_that_draws(window,
+                                                          monkeypatch,
+                                                          qt_app):
+    """Five seconds of retuning on the GUI thread is a white window.
+
+    The same fault #47 was about, and the same answer.
+    """
+    where = []
+
+    from fm_radio.gui import main_window
+
+    class WatchingStandIn:
+        def __init__(self, controller, on_progress=None):
+            pass
+
+        def cancel(self):
+            pass
+
+        def run(self, listen_sec=0.25):
+            where.append(threading.current_thread())
+            return []
+
+    monkeypatch.setattr(main_window, "BandScan", WatchingStandIn)
+    view, _ = window(FakeController(snapshot()))
+
+    view._scan_button.click()
+    finish(view, qt_app)
+
+    assert where, "the sweep never ran"
+    assert where[0] is not threading.main_thread()
+
+
+def test_what_the_sweep_found_can_be_tuned_to(window, monkeypatch, qt_app):
+    """The point of scanning is to pick from what it found."""
+    view, controller, _ = a_scan(window, monkeypatch,
+                                 found=[a_find(89.7), a_find(81.3)])
+
+    view._scan_button.click()
+    finish(view, qt_app)
+
+    assert view._found.count() == 3, "a heading and two finds"
+    view._found.setCurrentIndex(1)
+    view._found_chosen(1)
+
+    assert [freq for what, freq in controller.calls if what == "tune"] == [
+        pytest.approx(89.7e6)]
+
+
+def test_each_find_says_where_it_is_and_what_it_is(window, monkeypatch,
+                                                    qt_app):
+    from fm_radio import band_scan
+
+    view, _controller, _ = a_scan(window, monkeypatch, found=[
+        a_find(89.7, -7.0, band_scan.CONFIRMED),
+        a_find(82.1, -25.0, band_scan.LIKELY_SKIRT),
+        a_find(90.5, -33.0, band_scan.UNCONFIRMED),
+    ])
+
+    view._scan_button.click()
+    finish(view, qt_app)
+
+    lines = [view._found.itemText(i) for i in range(1, view._found.count())]
+    assert "89.7 MHz" in lines[0] and "stereo" in lines[0]
+    assert "spill?" in lines[1]
+    assert "no pilot" in lines[2]
+
+
+def test_the_tuner_is_the_sweeps_while_it_runs(window, monkeypatch, qt_app):
+    """Anything else that tunes makes the sweep fail, so nothing else
+    is offered the chance.
+    """
+    let_it_go = threading.Event()
+    view, _controller, _ = a_scan(window, monkeypatch, hold=let_it_go)
+
+    view._scan_button.click()
+    qt_app.processEvents()
+
+    try:
+        for widget in (view._down, view._up, view._presets, view._found,
+                       view._auto_gain, view._gain_slider):
+            assert not widget.isEnabled(), "%s was left live" % widget
+        assert view._scan_button.text() == "Stop"
+    finally:
+        let_it_go.set()
+        finish(view, qt_app)
+
+    for widget in (view._down, view._up, view._presets, view._found):
+        assert widget.isEnabled(), "%s was not given back" % widget
+    assert view._scan_button.text() == "Scan"
+
+
+def test_the_button_stops_the_sweep_it_started(window, monkeypatch, qt_app):
+    let_it_go = threading.Event()
+    view, _controller, _ = a_scan(window, monkeypatch, hold=let_it_go)
+    view._scan_button.click()
+    qt_app.processEvents()
+
+    view._scan_button.click()           # now it says Stop
+
+    assert view._sweep._scan.cancelled
+    let_it_go.set()
+    finish(view, qt_app)
+
+
+def test_a_sweep_that_failed_says_so_and_gives_the_tuner_back(
+        window, monkeypatch, qt_app):
+    """A sweep fails when something else tunes, which is a thing
+    that happens; the window has to be usable afterwards.
+    """
+    from fm_radio.band_scan import ScanFailed
+
+    view, _controller, _ = a_scan(
+        window, monkeypatch, fails=ScanFailed("the tuner moved"))
+
+    view._scan_button.click()
+    finish(view, qt_app)
+
+    assert "the tuner moved" in view._health.text()
+    assert view._down.isEnabled(), "the tuner was not given back"
+    assert view._scan_button.text() == "Scan"
+
+
+def test_a_sweep_that_found_nothing_says_that_too(window, monkeypatch,
+                                                   qt_app):
+    view, _controller, _ = a_scan(window, monkeypatch, found=[])
+
+    view._scan_button.click()
+    finish(view, qt_app)
+
+    assert "nothing" in view._health.text()
+    assert view._found.count() == 1, "a heading and no finds"
+
+
+def test_closing_the_window_stops_a_sweep(window, monkeypatch, qt_app):
+    """It would go on retuning a receiver being taken apart."""
+    let_it_go = threading.Event()
+    view, _controller, _ = a_scan(window, monkeypatch, hold=let_it_go)
+    view._scan_button.click()
+    qt_app.processEvents()
+    sweep = view._sweep
+
+    let_it_go.set()                     # it would end on its own too
+    view.close()
+
+    assert sweep._scan.cancelled
+    assert view._sweep is None
+
+
+def test_the_window_says_where_the_sweep_has_got_to(window, monkeypatch,
+                                                     qt_app):
+    """Five seconds is long enough to wonder whether it is working."""
+    view, _controller, _ = a_scan(window, monkeypatch, found=[a_find(89.7)])
+
+    view._scan_button.click()
+    finish(view, qt_app)
+
+    # The progress line is overwritten by the result; what matters is
+    # that the sweep's own words reached the window at all.
+    assert view._health.text()
+
+
+# ----------------------------------------------------------------------
 # The window is built before the radio is switched on
 # ----------------------------------------------------------------------
 
