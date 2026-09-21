@@ -171,19 +171,30 @@ STEREO_PHASE_SIDE_GATE_DB = -18.0   # Minimum demodulated side power relative to
                                     # noiseless-mono residue median = -32 dB, mono at
                                     # CNR 20 = -22 dB (also blocked by the anisotropy
                                     # gate), so -18 leaves ~7 dB of margin both ways.
-                                    # This is the gate that closes on a near-mono
-                                    # programme, whatever the signal quality - which
-                                    # is worth knowing before reading anything into a
-                                    # station that never acquires.  Measured
-                                    # 2026-09-21 with a deliberate 30 / 60 deg
-                                    # rotation to correct and a programme narrowed by
-                                    # steps: down to a side/mono of -20 dB the
-                                    # tracker still takes all of the rotation out; at
-                                    # -25 and -30 dB this gate holds it at the
-                                    # hardware-trim prior instead.  What that costs
-                                    # is how far the prior is from the truth, which
-                                    # on the four reference captures is within +-7
-                                    # deg - 0.06 dB of side level.
+                                    # On a clean signal this is the gate that
+                                    # closes on a near-mono programme - worth knowing
+                                    # before reading anything into a station that
+                                    # never acquires.  Measured 2026-09-21 with a
+                                    # deliberate 30 / 60 deg rotation to correct and
+                                    # the programme narrowed by steps, as the share
+                                    # of blocks each gate passes (nominal side/mono
+                                    # before pre-emphasis; what this gate compares is
+                                    # the second column):
+                                    #   nominal  measured  side gate  noise gate  acq
+                                    #     -10      -9.4      100.0%     100.0%    yes
+                                    #     -20     -18.5       29.9%      99.4%    yes
+                                    #     -25     -23.0        0.0%      94.9%    no
+                                    #     -30 c20 -22.8        0.0%       7.6%    no
+                                    # At -25 this gate is the whole of the reason;
+                                    # only when the signal is weak as well do both
+                                    # shut.  Down to -20 the rotation still comes out
+                                    # in full, though not as quickly: a wide
+                                    # programme converges in 0.1 s and this one in
+                                    # 1.8 s, on 30% of blocks being informative.
+                                    # Below that the tracker holds the hardware-trim
+                                    # prior, which costs how far that prior is from
+                                    # the truth - within +-7 deg on the four
+                                    # reference captures, 0.06 dB of side level.
 STEREO_PHASE_ACQUIRE_BLOCKS = 6     # Consecutive informative blocks (~100 ms) required
                                     # before cold-start acquisition; the initial angle is
                                     # the doubled-angle circular mean over the streak,
@@ -221,15 +232,31 @@ STEREO_PHASE_SIDE_OVER_NOISE_DB = 26.0  # Minimum demodulated side power above t
                                     # -3.6 deg on all three reference captures).
                                     # Re-checked 2026-09-21, the question left open by
                                     # PR #49 (the cleanest of three stations never
-                                    # acquired, so was this set too high).  It is not:
-                                    # silence still stops just under it - CNR
+                                    # acquired, so was this set too high).  It is not.
+                                    # Silence still stops just under it: CNR
                                     # 45/35/25/15 read med 22.6 / max 24.8, a 1.2 dB
-                                    # margin - and on the reference captures opening
-                                    # the gate to 6 dB moves the audio by -58 to -70
-                                    # dB.  The exception is the narrow-programme
-                                    # capture (optical 82.5, side/mono med -14.5 dB),
-                                    # where opening it walks the tracker from -3.4 to
-                                    # -17.6 deg: there the gate is earning its keep.
+                                    # margin.  And genuine but narrow content sits
+                                    # just above it - a side/mono of -18.5 dB reads a
+                                    # median of 28.7 - so there is little room to
+                                    # raise it before it starts refusing programme
+                                    # rather than noise; both halves are pinned by
+                                    # tests now.
+                                    # Opening it to 6 dB on the four reference
+                                    # captures moves the audio by -58.5 / -50.7 /
+                                    # -69.6 / -59.2 dB and the tracked angle by at
+                                    # most 5.4 deg on three of them.  The fourth is
+                                    # the narrow-programme capture (optical 82.5,
+                                    # side/mono med -14.5 dB), where opening it walks
+                                    # the tracker from -3.4 to -17.6 deg.  Which of
+                                    # those two angles is the truth is not settled by
+                                    # that measurement, but the wander is
+                                    # noise-shaped: with the gate open the angle
+                                    # reads -7.2 deg while the programme is in its
+                                    # widest quartile and -13.2 deg while it is in
+                                    # its narrowest, and with the gate shipped it
+                                    # reads -7.1 / -6.7 - the same answer whether or
+                                    # not there is programme to take it from.  The
+                                    # audio is -50.7 dB apart either way.
                                     # A station that never acquires is blocked by
                                     # STEREO_PHASE_SIDE_GATE_DB first (see its
                                     # comment) and says nothing about this one.
