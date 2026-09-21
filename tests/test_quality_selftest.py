@@ -238,16 +238,24 @@ def test_hifi_tx_matches_legacy_floors_at_1k(cnr_db):
     differ by a few dB - so this test asserts BOTH stay far above the
     old 30 dB regime (neither TX is the old bottleneck) and that
     THD+N still agrees between them.
+
+    Off the DC blocker's notch (2026-09-21; the 43-57 dB above was
+    measured in it) the two differ by more than a few dB: legacy
+    70.3/72.3 against hifi 48.9/49.6 at CNR 35, with THD+N -57.2 for
+    both.  The hifi TX is the limiting one at 1 kHz now, which the
+    notch was hiding; the assertion is unchanged because what it
+    says - neither is back at 30 dB - is still what matters here.
     """
     from fm_radio.quality_selftest import evaluate_quality
     np.random.seed(0)
     legacy = evaluate_quality(duration_s=3.0, tone_hz=1000.0, cnr_db=cnr_db,
                               pilot_amp=0.10, freq_dev_hz=75_000.0,
-                              warmup_s=0.8)
+                              warmup_s=0.8, carrier_offset_hz=1237.0)
     np.random.seed(0)
     hifi = evaluate_quality(duration_s=3.0, tone_hz=1000.0, cnr_db=cnr_db,
                             pilot_amp=0.10, freq_dev_hz=75_000.0,
-                            warmup_s=0.8, hifi_tx=True)
+                            warmup_s=0.8, hifi_tx=True,
+                            carrier_offset_hz=1237.0)
     for m in (legacy, hifi):
         assert m.separation_l_to_r_db > 36.0, m
         assert m.separation_r_to_l_db > 36.0, m
