@@ -118,21 +118,22 @@ def _whole(name: str, value, low: int, high: int) -> int:
     """Return *value* as a whole number in range, or refuse it."""
     if isinstance(value, bool) or not isinstance(value, numbers.Real):
         raise TypeError(f"{name} must be a whole number, not {value!r}")
-    if not isinstance(value, numbers.Integral):
-        # Anything real that is not an integer type - float, numpy
-        # float, Fraction - goes through float() first, because
-        # int() on a nan or an infinity raises something else
-        # entirely (ValueError "cannot convert", OverflowError) and
-        # both of those are values to refuse, not to crash on.  An
-        # integer type skips it: float() is what overflows on an int
-        # of a few hundred digits, and the range check below has an
-        # answer for that one.
-        as_float = float(value)
-        if not math.isfinite(as_float) or int(as_float) != as_float:
-            raise ValueError(
-                f"{name} must be a whole number of samples, not {value!r}")
-        value = int(as_float)
-    number = int(value)
+    try:
+        number = int(value)
+    except (ValueError, OverflowError):
+        # int() raises ValueError on a nan and OverflowError on an
+        # infinity.  Both are values to refuse, not to crash on.
+        raise ValueError(
+            f"{name} must be a whole number of samples, "
+            f"not {value!r}") from None
+    if number != value:
+        # Against the ORIGINAL value, never against a float of it:
+        # float(Fraction(2**60 + 1, 2**60)) is exactly 1.0 and the
+        # fraction is not 1, and float() is also what overflows on a
+        # few hundred digits, which int() and the range check below
+        # handle between them.
+        raise ValueError(
+            f"{name} must be a whole number of samples, not {value!r}")
     if not low <= number <= high:
         raise ValueError(
             f"{name} must be between {low} and {high}, not {number}")
@@ -253,11 +254,12 @@ def apply(settings: DspSettings, demod) -> None:
     """Write the nine settings onto a demodulator.
 
     Only public attributes are written.  The one that owns streaming
-    state, ``mono_delay_samples``, needs nothing done to it here:
-    ``_apply_mono_delay`` notices its delay line is the wrong length
-    and starts a new one, which is the same thing this could do and is
-    done at the point the state is used rather than from another
-    thread.
+    state, ``mono_delay_samples``, is a property on the demodulator
+    whose setter starts a new delay line when the value changes - so
+    that happens here, on this thread, at this moment, and not when
+    the line is next read (the stereo path alone reads it, so a
+    delay changed during mono operation would otherwise keep its
+    old contents).
 
     Call it between blocks.  Written attribute by attribute, it is not
     atomic, and a demodulator that read half of it would be running a

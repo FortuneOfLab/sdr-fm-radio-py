@@ -17,6 +17,8 @@ from __future__ import annotations
 import math
 import threading
 from dataclasses import replace
+from decimal import Decimal
+from fractions import Fraction
 
 import numpy as np
 import pytest
@@ -206,14 +208,15 @@ def test_apply_then_capture_is_what_was_applied():
 
 
 def test_a_new_mono_delay_takes_effect_in_the_delay_line():
-    """apply() leaves the delay line to the demodulator, so check it.
+    """The delay reaches the line, and the line is ready at once.
 
-    Nothing resizes ``_mono_delay_state`` when the setting changes;
-    the claim is that the delay line notices for itself at the point
-    it is used.
+    ``mono_delay_samples`` is a property whose setter starts a new
+    delay line, so the line is the right length as soon as the
+    settings are applied - before anything reads it.
     """
     demod = FMDemodulatorLight(stereo=True)
     apply(replace(capture(demod), mono_delay_samples=4), demod)
+    assert demod._mono_delay_state.size == 4
     delayed = demod._apply_mono_delay(np.arange(1, 9, dtype=np.float32))
     assert list(delayed) == [0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 4.0]
 
@@ -278,16 +281,26 @@ def test_a_checked_value_is_the_value_the_dsp_gets():
 @pytest.mark.parametrize("value, trouble", [
     (np.int64(4), None),
     (np.float32(4.0), None),
+    (np.float16(4.0), None),
+    (np.longdouble(4.0), None),
+    (Fraction(4, 1), None),
     (np.float32(2.5), ValueError),
     (np.float32(np.inf), ValueError),
     (np.float64(np.nan), ValueError),
+    # Not 1, however much float() insists that it is.
+    (Fraction(2 ** 60 + 1, 2 ** 60), ValueError),
+    # Whole, and far outside the range: the range must answer it,
+    # not an overflow on the way there.
+    (Fraction(10 ** 400, 1), ValueError),
     (np.bool_(True), TypeError),
+    (Decimal(4), TypeError),
 ])
-def test_a_numpy_value_is_taken_or_refused_but_never_crashes(value, trouble):
+def test_a_real_number_is_taken_or_refused_but_never_crashes(value, trouble):
     """Whatever a caller hands in comes back as TypeError or ValueError.
 
-    int() on a numpy infinity raises OverflowError, which is neither,
-    and update_dsp_settings promises callers the other two.
+    int() on an infinity raises OverflowError and float() on a large
+    enough Fraction raises it too; update_dsp_settings promises
+    callers the other two.
     """
     if trouble is None:
         assert replace(a_settings(),
@@ -516,6 +529,44 @@ def nr_ratio(off_seconds: float, keep_learning: bool) -> float:
     n = min(fed.size, got.size)
     return float(np.sqrt(np.mean(got[:n] ** 2))
                  / np.sqrt(np.mean(fed[:n] ** 2)))
+
+
+def test_a_switched_off_noise_reducer_leaves_the_audio_alone():
+    """The gain is computed either way; off means it is not applied.
+
+    The other tests here run the reducer at unity (alpha_floor 1.0)
+    or throw the switched-off output away, so none of them would
+    notice an NR that went on suppressing while it said it was off.
+    This one watches the same stream through both states with the
+    reducer at its normal settings.
+    """
+    demod = FMDemodulatorLight(stereo=True)
+    rng = np.random.default_rng(7)
+    rate, block = 48000, 768
+
+    def ratio(seconds, amplitude=0.05):
+        fed, got = [], []
+        for _ in range(int(seconds * rate / block)):
+            side = (amplitude * rng.standard_normal(block)).astype(np.float32)
+            fed.append(side)
+            got.append(side_through_the_tail(demod, side))
+        a, b = np.concatenate(fed), np.concatenate(got)
+        n = min(a.size, b.size)
+        return float(np.sqrt(np.mean(b[:n] ** 2))
+                     / np.sqrt(np.mean(a[:n] ** 2)))
+
+    ratio(3.0)                                   # learn a floor
+    suppressing = ratio(0.5)
+    assert suppressing < 0.9, "the reducer was not suppressing to begin with"
+
+    apply(replace(capture(demod), side_nr_enabled=False), demod)
+    ratio(0.05)                                  # one block to flush
+    assert abs(ratio(0.5) - 1.0) < 0.02, (
+        "a switched-off noise reducer is still changing the audio")
+
+    apply(replace(capture(demod), side_nr_enabled=True), demod)
+    ratio(0.05)
+    assert ratio(0.5) < 0.9, "it did not start suppressing again"
 
 
 def test_the_noise_reducer_keeps_its_model_current_while_it_is_off():
