@@ -371,10 +371,12 @@ def test_noise_alone_stays_under_the_side_over_noise_gate():
     test_a_quiet_passage_is_what_the_noise_gate_is_for.
 
     Re-measured 2026-09-21 through the FIR path: silence reads med
-    22.6 / max 24.4 at CNR 45/35/25/15, and the same at a carrier
-    offset of 0, 60 or 1237 Hz - unmodulated noise has no discrete
-    line to lose in the DC notch, which is why this one measurement
-    was not affected by it.
+    22.7 / max 24.2 at CNR 45/35/25/15, and measures the same at a
+    carrier offset of 0, 60 or 1237 Hz.  This fixture is silent
+    audio, not a silent transmitter - the pilot and the carrier are
+    both there - so that is an observation and not a prediction;
+    what it means is that this one measurement, unlike every other
+    in this file, was not reading the DC notch.
     """
     from fm_radio.constants import (
         AUDIO_OUTPUT_RATE, COMPOSITE_RATE, SDR_SAMPLE_RATE, SDR_BLOCK_SIZE,

@@ -237,9 +237,9 @@ STEREO_PHASE_SIDE_OVER_NOISE_DB = 26.0  # Minimum demodulated side power above t
                                     # PR #49 (the cleanest of three stations never
                                     # acquired, so was this set too high).  It is not.
                                     # Silence still stops just under it: CNR
-                                    # 45/35/25/15 read med 22.6 / max 24.8, a 1.2 dB
-                                    # margin, and the same at a carrier offset of
-                                    # 0, 60 or 1237 Hz.  Above it there is about as
+                                    # 45/35/25/15 read med 22.7 / max 24.2, a 1.8 dB
+                                    # margin, and measured the same at a carrier
+                                    # offset of 0, 60 or 1237 Hz.  Above it there is about as
                                     # little room: a quiet passage of stereo
                                     # programme - 32 dB below full deviation, CNR
                                     # 35, side/mono -13.9 dB so the other gate is
@@ -285,10 +285,11 @@ STEREO_PHASE_SIDE_OVER_NOISE_DB = 26.0  # Minimum demodulated side power above t
                                     # gate, only this one, or both: optical 82.5
                                     # 19 / 33 / 48%, CATV 83.7 10 / 71 / 18%, optical
                                     # 80.0 28 / 14 / 58%, antenna 91.6 0 / 100 / 0%.
-                                    # Cold acquisition is decided by the side/mono
-                                    # gate (see its comment - the noise estimate has
-                                    # not come up yet), but block by block, on real
-                                    # programme, this one turns away as many or more.
+                                    # On a clean, loud signal with a narrow
+                                    # programme this one stays wide open and the
+                                    # side/mono gate decides (see its comment); on
+                                    # real programme, block by block, this one turns
+                                    # away as many or more.
 STEREO_PHASE_NOISE_CONF_RAMP_DB = 6.0  # Confidence ramp above the side-over-noise
                                     # gate: an update's weight scales linearly from 0
                                     # at the gate to 1 at gate + this, multiplied with
