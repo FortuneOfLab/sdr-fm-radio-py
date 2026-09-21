@@ -582,13 +582,13 @@ class SideNoiseReducer:
         within their numerical error (measured 1.5e-08 peak on a
         signal of amplitude 0.05) rather than bit for bit, which is
         what ``bypass`` gives by skipping the FFT.  Used by a
-        SWITCHED-OFF side
-        NR, where the model has to stay current or switching it back
-        on gives a floor learned before whatever happened while it
-        was off: measured after 5 s off across a 20 dB change in the
-        side noise, the first 0.5 s back on passed 0.954 of the
-        input against 0.697 for an NR that stayed on, and took about
-        5 s to come back (0.953, 0.892, 0.832 at 1, 2, 3 s).  This
+        SWITCHED-OFF side NR, where the model has to stay current or
+        switching it back on gives a floor learned before whatever
+        happened while it was off: measured after 5 s off across a
+        20 dB change in the side noise, the first 0.5 s back on
+        passed 0.954 of the input against 0.697 for an NR that
+        stayed on, and took about 5 s to come back (0.953, 0.892,
+        0.832 at 1, 2, 3 s).  This
         is NOT bypass: bypass skips the FFT and freezes the model,
         and is for the mono path, where the side is ~ 0 and learning
         from it would destroy the floor.
