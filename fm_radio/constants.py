@@ -171,6 +171,19 @@ STEREO_PHASE_SIDE_GATE_DB = -18.0   # Minimum demodulated side power relative to
                                     # noiseless-mono residue median = -32 dB, mono at
                                     # CNR 20 = -22 dB (also blocked by the anisotropy
                                     # gate), so -18 leaves ~7 dB of margin both ways.
+                                    # This is the gate that closes on a near-mono
+                                    # programme, whatever the signal quality - which
+                                    # is worth knowing before reading anything into a
+                                    # station that never acquires.  Measured
+                                    # 2026-09-21 with a deliberate 30 / 60 deg
+                                    # rotation to correct and a programme narrowed by
+                                    # steps: down to a side/mono of -20 dB the
+                                    # tracker still takes all of the rotation out; at
+                                    # -25 and -30 dB this gate holds it at the
+                                    # hardware-trim prior instead.  What that costs
+                                    # is how far the prior is from the truth, which
+                                    # on the four reference captures is within +-7
+                                    # deg - 0.06 dB of side level.
 STEREO_PHASE_ACQUIRE_BLOCKS = 6     # Consecutive informative blocks (~100 ms) required
                                     # before cold-start acquisition; the initial angle is
                                     # the doubled-angle circular mean over the streak,
@@ -206,6 +219,20 @@ STEREO_PHASE_SIDE_OVER_NOISE_DB = 26.0  # Minimum demodulated side power above t
                                     # back to the hardware-trim prior of 0, which the
                                     # real-capture check confirms (tracker med -1.1 to
                                     # -3.6 deg on all three reference captures).
+                                    # Re-checked 2026-09-21, the question left open by
+                                    # PR #49 (the cleanest of three stations never
+                                    # acquired, so was this set too high).  It is not:
+                                    # silence still stops just under it - CNR
+                                    # 45/35/25/15 read med 22.6 / max 24.8, a 1.2 dB
+                                    # margin - and on the reference captures opening
+                                    # the gate to 6 dB moves the audio by -58 to -70
+                                    # dB.  The exception is the narrow-programme
+                                    # capture (optical 82.5, side/mono med -14.5 dB),
+                                    # where opening it walks the tracker from -3.4 to
+                                    # -17.6 deg: there the gate is earning its keep.
+                                    # A station that never acquires is blocked by
+                                    # STEREO_PHASE_SIDE_GATE_DB first (see its
+                                    # comment) and says nothing about this one.
 STEREO_PHASE_NOISE_CONF_RAMP_DB = 6.0  # Confidence ramp above the side-over-noise
                                     # gate: an update's weight scales linearly from 0
                                     # at the gate to 1 at gate + this, multiplied with

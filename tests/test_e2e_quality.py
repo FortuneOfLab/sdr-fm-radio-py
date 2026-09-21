@@ -247,6 +247,174 @@ def test_phase_tracker_never_acquires_on_mono_broadcast():
         assert d.stereo_phase_err_ema == 0.0, cnr
 
 
+def _side_and_mono(duration_s, width_db, fs):
+    """A programme whose side/mono power ratio is *width_db*.
+
+    L = m + d and R = m - d: a common tone and a difference tone,
+    the second scaled to set how wide the programme is.  Two tones
+    rather than one, so that what comes back in the side band can be
+    told from what leaked out of the mono band.
+    """
+    n = int(duration_s * fs)
+    t = np.arange(n) / fs
+    mono = np.sin(2 * np.pi * 997.0 * t)
+    diff = (10.0 ** (width_db / 20.0)) * np.sin(2 * np.pi * 1499.0 * t)
+    left, right = 0.5 * (mono + diff), 0.5 * (mono - diff)
+    peak = max(np.abs(left).max(), np.abs(right).max())
+    return ((0.7 * left / peak).astype(np.float32),
+            (0.7 * right / peak).astype(np.float32))
+
+
+def _run_gates(iq, block_size, side_over_noise_db=None, side_gate_db=None):
+    """Demodulate, optionally with one of the gates opened right up."""
+    from fm_radio import demodulator as module
+    from fm_radio.demodulator import FMDemodulator
+
+    was = (module.STEREO_PHASE_SIDE_OVER_NOISE_DB,
+           module.STEREO_PHASE_SIDE_GATE_DB)
+    if side_over_noise_db is not None:
+        module.STEREO_PHASE_SIDE_OVER_NOISE_DB = float(side_over_noise_db)
+    if side_gate_db is not None:
+        module.STEREO_PHASE_SIDE_GATE_DB = float(side_gate_db)
+    try:
+        d = FMDemodulator(stereo=True)
+        d.force_blend_factor = 1.0      # the tracker is what is on trial
+        readings, lefts, rights = [], [], []
+        for i in range(0, iq.size, block_size):
+            c = iq[i:i + block_size]
+            if c.size < 8:
+                break
+            left, right = d.demodulate(d.process_iq_samples(c))
+            readings.append(d.stereo_phase_side_over_noise_db)
+            if left.size:
+                lefts.append(left)
+                rights.append(right)
+        return {
+            "readings": np.asarray(readings),
+            "acquired": bool(d._phase_acquired),
+            "angle_deg": float(np.rad2deg(d.stereo_phase_err_ema)),
+            "left": np.concatenate(lefts) if lefts else np.zeros(0),
+            "right": np.concatenate(rights) if rights else np.zeros(0),
+        }
+    finally:
+        (module.STEREO_PHASE_SIDE_OVER_NOISE_DB,
+         module.STEREO_PHASE_SIDE_GATE_DB) = was
+
+
+def _tone_db(x, hz, fs, skip_s=0.8):
+    """Coherent level of *hz* in x, in dB, past the settling head."""
+    x = x[int(skip_s * fs):]
+    n = x.size - (x.size % fs)
+    assert n >= fs, "not enough audio to measure"
+    t = np.arange(n) / fs
+    amp = 2.0 * np.abs(np.mean(x[:n].astype(np.float64)
+                               * np.exp(-2j * np.pi * hz * t)))
+    return 20.0 * np.log10(amp + 1e-30)
+
+
+@pytest.mark.slow
+def test_noise_alone_stays_just_under_the_side_over_noise_gate():
+    """The gate is a margin over measured noise, and a narrow one.
+
+    The discriminator's noise rises as f^2, so the demodulated side
+    band carries more noise than the mono band, and that noise is
+    anisotropic - a stable pseudo-axis the tracker will lock to
+    during silence if it is let.  STEREO_PHASE_SIDE_OVER_NOISE_DB is
+    set from measured noise, so a change to the filters that moves
+    the noise floor has to move it too.
+
+    Both bounds are the calibration.  Below the noise the tracker
+    wanders during silence; far above it the gate starts refusing
+    genuine content - the narrow-programme reference capture
+    (optical 82.5 MHz) reads a median of 24.6 dB, which is already
+    inside this margin.  Re-measured 2026-09-21 through the FIR
+    path: silence at CNR 45/35/25/15 reads med 22.6, max 24.8.
+    """
+    from fm_radio.constants import (
+        AUDIO_OUTPUT_RATE, COMPOSITE_RATE, SDR_SAMPLE_RATE, SDR_BLOCK_SIZE,
+        STEREO_PHASE_SIDE_OVER_NOISE_DB,
+    )
+    from fm_radio.quality_selftest import _build_mpx, _fm_modulate_iq
+
+    fs = AUDIO_OUTPUT_RATE
+    quiet = np.zeros(int(2.0 * fs), dtype=np.float32)
+    mpx = _build_mpx(quiet, quiet, fs, int(COMPOSITE_RATE), 0.10, True,
+                     50e-6, 0.0)
+    worst = -np.inf
+    for cnr in (45.0, 35.0, 25.0, 15.0):
+        np.random.seed(0)
+        iq = _fm_modulate_iq(mpx, int(COMPOSITE_RATE), int(SDR_SAMPLE_RATE),
+                             75_000.0, cnr)
+        out = _run_gates(iq, SDR_BLOCK_SIZE)
+        assert not out["acquired"], cnr
+        worst = max(worst, float(out["readings"].max()))
+
+    margin = STEREO_PHASE_SIDE_OVER_NOISE_DB - worst
+    assert margin > 0.0, "silence reaches the gate (worst %.1f dB)" % worst
+    assert margin < 5.0, (
+        "the gate is %.1f dB above the noise it is set from; it will be "
+        "refusing genuine content" % margin)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("width_db,expect_acquire", [(-10.0, True),
+                                                      (-30.0, False)])
+def test_which_gate_closes_on_a_near_mono_programme(width_db,
+                                                     expect_acquire):
+    """It is the side/mono gate, not the side-over-noise one.
+
+    A near-mono programme on a clean signal was read as evidence
+    that the 26 dB gate is set too high (PR #49: the cleanest of
+    three stations never acquired).  It is not that gate: opening
+    it right up changes nothing here, because what a narrow
+    programme fails is STEREO_PHASE_SIDE_GATE_DB - the side band is
+    30 dB below the mono one, and there is next to nothing in it to
+    take an angle from.
+
+    Measured 2026-09-21 with a deliberate 30 deg rotation to
+    correct: down to a side/mono of -20 dB the shipped gates
+    recover all of it, and at -30 dB they hold the tracker at the
+    hardware-trim prior instead.  What that costs is bounded by how
+    far the prior is from the truth - within +-7 deg on all four
+    reference captures, which is 0.06 dB of side level.
+    """
+    from fm_radio.constants import (
+        AUDIO_OUTPUT_RATE, COMPOSITE_RATE, SDR_SAMPLE_RATE, SDR_BLOCK_SIZE,
+    )
+    from fm_radio.quality_selftest import _build_mpx, _fm_modulate_iq
+
+    fs = AUDIO_OUTPUT_RATE
+    left, right = _side_and_mono(2.5, width_db, fs)
+    mpx = _build_mpx(left, right, fs, int(COMPOSITE_RATE), 0.10, True,
+                     50e-6, 30.0)
+    np.random.seed(0)
+    iq = _fm_modulate_iq(mpx, int(COMPOSITE_RATE), int(SDR_SAMPLE_RATE),
+                         75_000.0, 35.0)
+
+    shipped = _run_gates(iq, SDR_BLOCK_SIZE)
+    assert shipped["acquired"] is expect_acquire, shipped["angle_deg"]
+
+    # The same run with the side-over-noise gate out of the way: it
+    # is not the one deciding this, either way round.
+    opened = _run_gates(iq, SDR_BLOCK_SIZE, side_over_noise_db=6.0)
+    assert opened["acquired"] is expect_acquire, (
+        "the side-over-noise gate decided it after all")
+
+    if expect_acquire:
+        # And what it acquired is worth having: the side tone comes
+        # back at the level it has with every gate out of the way.
+        both = _run_gates(iq, SDR_BLOCK_SIZE, side_over_noise_db=6.0,
+                          side_gate_db=-40.0)
+        got = _tone_db(0.5 * (shipped["left"] - shipped["right"]), 1499.0, fs)
+        best = _tone_db(0.5 * (both["left"] - both["right"]), 1499.0, fs)
+        assert got > best - 0.3, "%.2f dB of the side band went" % (best - got)
+    else:
+        assert shipped["angle_deg"] == 0.0, "it took an angle from nothing"
+        # Opening the side gate instead is what lets it acquire.
+        instead = _run_gates(iq, SDR_BLOCK_SIZE, side_gate_db=-40.0)
+        assert instead["acquired"], "the side/mono gate was not the one"
+
+
 @pytest.mark.slow
 def test_phase_tracker_acquires_correct_branch_at_boundary():
     """Acquisition at a true rotation of -88 deg must not swap L/R.
