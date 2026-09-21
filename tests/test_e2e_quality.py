@@ -1,12 +1,14 @@
 """End-to-end synthetic quality gates, clean and impaired.
 
 Runs the full MPX -> FM IQ -> demodulator chain and asserts conservative
-floors for the objective metrics.  The floors sit well below the
-measured values (clean run at CNR=35: Sep ~43/57 dB, THD+N ~-37 dB,
-SNR ~35 dB with pre-emphasis on) so they are robust across
-platforms and RNG noise draws while still catching structural
-regressions.  See the FLOORS comment below for the measurement
-history across tuning changes.
+floors for the objective metrics.  The floors sit below the measured
+values (clean run at CNR=35: Sep 70.3/72.3 dB, THD+N -57.2 dB, SNR
+30.4 dB with pre-emphasis on) so they are robust across platforms and
+RNG noise draws while still catching structural regressions: most sit
+12-20 dB under, and the two thinnest - the THD floors for
+tuning-30kHz and dc-notch - about 8 dB.  See the FLOORS comment below
+for the per-scenario measurements and the history across tuning
+changes.
 
 The impaired scenarios exist because a pristine synthetic channel can
 hide whole bug classes: the FFT-Hilbert block-edge defect fixed in
@@ -83,10 +85,13 @@ SCENARIOS = {
 #   multipath        37.3    37.2   -55.9    31.1
 #   dc-notch         50.2    57.3   -40.3    31.1
 #
-# The floors sit 12-20 dB under those, which is where they were
-# before relative to what was then being measured, and they now
-# discriminate far harder: with the phase corrector disabled the
-# clean scenario measures 5.0 dB of separation rather than 70.
+# The separation floors sit 12-20 dB under those, which is where
+# they were before relative to what was then being measured, and
+# they now discriminate far harder: with the phase corrector
+# disabled the clean scenario measures 5.0 dB of separation rather
+# than 70.  The THD floors have less room where the scenario's own
+# THD is worse - 8.7 dB for tuning-30kHz and 8.3 for dc-notch,
+# against 11-12 for the rest.
 # History of the clean row, all at 0 Hz and so all of the notch:
 # 2026-07 (windowed-median metrics, neutral HF ceilings and blend
 # stability, analog-exact pre-emphasis) Sep ~43/57, THD -36.9, SNR
@@ -740,30 +745,32 @@ def test_phase_tracker_follows_drift_beyond_90_deg():
     assert m.thdn_left_db < -20.0, m
 
 
-@pytest.mark.slow
+# Not slow any more, and not marked so: it stopped measuring
+# anything when it stopped asserting the size of the pathology.
 def test_the_scenarios_are_not_measured_in_the_dc_notch():
-    """The default offset is the whole point of the dc-notch row.
+    """Every floor here but the dc-notch row was set off the notch.
 
-    Every floor in this file was set from a measurement taken off
-    the notch, and a default that drifted back to zero would take
-    them all with it - quietly, because the floors sit far enough
-    below that the notch measurement still clears most of them.
-    This compares the two directly instead of trusting an absolute
-    number: measured 70.3 dB against 50.2, and the gap is 20 dB
-    rather than the 10 asserted here because platforms differ and
-    the point is the size of the effect, not its value.
+    A default that drifted back to zero would take them all with it,
+    and quietly: the floors sit far enough below the measurements
+    that a notched run still clears several of them.  So the
+    arrangement itself is asserted rather than measured - the
+    default is outside the notch, and the one scenario that is
+    inside it says so on purpose.
+
+    Asserting the arrangement and not the gap between the two is
+    deliberate.  Measured, that gap is 20 dB of separation and 17 of
+    THD, but it is the size of a defect in the DC blocker: fixing
+    that would shrink it, and a test that demanded it stay would
+    fail on the improvement.  What the notch costs is watched by the
+    dc-notch row's own floors, where it belongs.
     """
-    np.random.seed(0)
-    real = evaluate_quality(**{**BASE_KWARGS, **SCENARIOS["clean"]})
-    np.random.seed(0)
-    notched = evaluate_quality(**{**BASE_KWARGS, **SCENARIOS["dc-notch"]})
+    from fm_radio.constants import DC_BLOCK_CUTOFF_HZ
 
     assert BASE_KWARGS["carrier_offset_hz"] == A_REAL_OFFSET_HZ
-    assert real.separation_l_to_r_db > notched.separation_l_to_r_db + 10.0, (
-        "the clean scenario measures like the notched one (%.1f vs %.1f dB)"
-        % (real.separation_l_to_r_db, notched.separation_l_to_r_db))
-    assert real.thdn_left_db < notched.thdn_left_db - 10.0, (
-        "%.1f vs %.1f dB" % (real.thdn_left_db, notched.thdn_left_db))
+    assert abs(A_REAL_OFFSET_HZ) > 3.0 * DC_BLOCK_CUTOFF_HZ, (
+        "the default offset is inside the notch transition")
+    assert SCENARIOS["dc-notch"]["carrier_offset_hz"] == 0.0, (
+        "the scenario that is supposed to sit in the notch does not")
 
 
 @pytest.mark.slow
