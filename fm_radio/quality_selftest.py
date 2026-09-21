@@ -635,6 +635,80 @@ def _run_demod_from_composite(
     )
 
 
+#: Samples dropped from each end after a fractional shift.  The
+#: shift is a phase ramp, which is exact for a band-limited
+#: sequence and circular: whatever leaves one end arrives at the
+#: other.  On a signal whose ends match that is nothing, and on one
+#: whose ends do not it is confined to them - measured on a
+#: one-second burst padded to three, the metric reads 31.9 dB
+#: without this guard and 56.9 with it, while a steady tone and a
+#: full-scale ramp read 109.0 and 103.7 either way.
+#:
+#: A 65-tap Kaiser-windowed sinc was tried first, on the theory
+#: that its error is local by construction and needs no guard.  It
+#: measured worse on every signal tried - 102.2 against 109.0 on
+#: the tone, 46.1 against 56.9 on the burst - so the theory did not
+#: survive the measurement and the phase ramp stayed.
+_SHIFT_GUARD = 64
+
+
+def _fractional_delay(x: np.ndarray, samples: float) -> np.ndarray:
+    """Delay *x* by a fractional number of samples, circularly."""
+    n = x.size
+    freqs = np.fft.rfftfreq(n)
+    return np.fft.irfft(
+        np.fft.rfft(x) * np.exp(-2j * np.pi * freqs * float(samples)), n)
+
+
+def _sub_sample_lag(ref: np.ndarray, x: np.ndarray, rounds: int = 3) -> float:
+    """How much later than *ref* the signal *x* is, in samples.
+
+    Newton on the least-squares error: delaying by d subtracts
+    d * dref/dn to first order, so each round solves for the step
+    that kills the correlation between the residual and the
+    derivative, and re-delays from the original to keep the
+    linearisation honest.  On a clean tone one round lands within
+    7e-7 to 4.2e-3 samples depending on how far it has to travel,
+    two rounds within 4e-10 and three within 1e-16; with noise the
+    answer is set by the noise instead - 1e-3 samples at -20 dB -
+    which is still far below what that noise itself measures.
+
+    The gain is fitted at every round and divided back out.  The
+    two are not independent: with x about a times the reference,
+    the uncorrected step comes out a times too long, and on this
+    chain (a = 0.8) it converged to -0.18 samples where the answer
+    is -0.23 - leaving a quarter of the lag in, which at 4 kHz is
+    12 dB of the metric.
+
+    The derivative is taken spectrally, which is exact for a
+    band-limited sequence and is only ever used to point at the
+    answer - the shift itself goes through the FIR above.
+    """
+    n = min(ref.size, x.size)
+    if n < 4 * _SHIFT_GUARD:
+        return 0.0
+    ref, x = ref[:n], x[:n]
+    freqs = np.fft.rfftfreq(n)
+    spectrum = np.fft.rfft(ref)
+    total = 0.0
+    moved = ref
+    for _ in range(rounds):
+        slope = np.fft.irfft(np.fft.rfft(moved) * (2j * np.pi * freqs), n)
+        energy = float(np.dot(slope, slope))
+        held = float(np.dot(moved, moved))
+        if energy <= 0.0 or held <= 0.0:
+            break
+        gain = float(np.dot(x, moved) / held)
+        if abs(gain) < 1e-6:
+            break
+        total += float(np.dot(x - gain * moved, -slope) / (gain * energy))
+        if not np.isfinite(total) or abs(total) > 1.0:
+            return 0.0            # not a sub-sample lag; leave it alone
+        moved = np.fft.irfft(
+            spectrum * np.exp(-2j * np.pi * freqs * total), n)
+    return total
+
+
 def _align_and_fit(ref: np.ndarray, x: np.ndarray, max_lag: int) -> tuple[np.ndarray, np.ndarray]:
     ref = np.asarray(ref, dtype=np.float64)
     x = np.asarray(x, dtype=np.float64)
@@ -661,6 +735,25 @@ def _align_and_fit(ref: np.ndarray, x: np.ndarray, max_lag: int) -> tuple[np.nda
     x_a = x_a[:m]
     if m == 0:
         return np.zeros(0), np.zeros(0)
+
+    # The lag that is left after the integer one, which is most of
+    # what the SNR metric used to be reporting.  A delay of d
+    # samples leaves a residual of 2*pi*f*d/fs against the
+    # reference, so it costs 6 dB of "SNR" per octave and nothing
+    # else does: measured on the clean scenario, 42.2 dB at 250 Hz
+    # falling to 18.6 at 4 kHz, all of it one 0.23-sample lag
+    # (4.8 us - the chain's resamplers and the de-emphasis, and
+    # inaudible).  Taking it out is the same idea as taking out the
+    # integer lag and the gain: what is left is then the noise and
+    # the distortion, which is what the metric says it is.
+    lag = _sub_sample_lag(ref_a, x_a)
+    if lag:
+        ref_a = _fractional_delay(ref_a, lag)
+        # The ends, where the shift wrapped: not a measurement.
+        # (A guard of zero means keep them, and [0:-0] is empty.)
+        if _SHIFT_GUARD and ref_a.size > 3 * _SHIFT_GUARD:
+            ref_a = ref_a[_SHIFT_GUARD:-_SHIFT_GUARD]
+            x_a = x_a[_SHIFT_GUARD:-_SHIFT_GUARD]
 
     a = float(np.dot(x_a, ref_a) / (np.dot(ref_a, ref_a) + EPS))
     b = float(np.mean(x_a - a * ref_a))

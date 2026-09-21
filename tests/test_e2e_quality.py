@@ -3,16 +3,13 @@
 Runs the full MPX -> FM IQ -> demodulator chain and asserts conservative
 floors for the objective metrics.  The floors sit below the measured
 values (clean run at CNR=35: Sep 70.3/72.3 dB, THD+N -57.2 dB, SNR
-30.4 dB with pre-emphasis on) so they are robust across platforms and
+57.2 dB with pre-emphasis on) so they are robust across platforms and
 RNG noise draws while still catching structural regressions.  How far
 below depends on the metric, taking the worse channel of each pair as
-the floors do: separation by 12-20 dB, THD by 8-12, and SNR by 5-7 -
-the thinnest of all being the 4.9 dB on dc-notch's right channel.
-The SNR floor is the one this PR did not move; what limits the SNR
-measurement is not the CNR (taking the noise away leaves clean at
-30.373/30.377 dB against 30.369/30.363 with it) and has not been
-looked into.  See the FLOORS comment below for the per-scenario
-measurements and the history across tuning changes.
+the floors do: separation by 12-20 dB, THD by 8-12, and SNR by 11-12 -
+the thinnest of all being the 8.3 dB on dc-notch's THD.  See the
+FLOORS comment below for the per-scenario measurements and the
+history across tuning changes.
 
 The impaired scenarios exist because a pristine synthetic channel can
 hide whole bug classes: the FFT-Hilbert block-edge defect fixed in
@@ -86,31 +83,36 @@ SCENARIOS = {
 # recorded here before that date was taken there):
 #
 #   scenario       sepL>R  sepR>L    thdL    thdR    snrL    snrR
-#   clean            70.3    72.3   -57.2   -57.2    30.4    30.4
-#   clock-200ppm     70.5    73.3   -57.2   -57.2    30.4    30.4
-#   tuning-30kHz     56.2    63.5   -38.7   -39.4    35.3    31.2
-#   multipath        37.3    37.2   -55.9   -55.9    31.1    31.1
-#   dc-notch         50.2    57.3   -40.3   -40.9    31.1    28.9
+#   clean            70.3    72.3   -57.2   -57.2    57.2    57.2
+#   clock-200ppm     70.5    73.3   -57.2   -57.2    57.3    57.3
+#   tuning-30kHz     56.2    63.5   -38.7   -39.4    41.8    42.5
+#   multipath        37.3    37.2   -55.9   -55.9    55.9    56.0
+#   dc-notch         50.2    57.3   -40.3   -40.9    40.0    40.6
+#
+# The SNR column is from 2026-09-22, when the metric stopped
+# reporting a sub-sample alignment error as noise; before that it
+# read 30.4 on the clean row and the same with the channel noise
+# switched off entirely.  It now tracks the channel: CNR 40/30/20/10
+# measure 62.0/52.2/42.2/32.2, and SNR comes out as -THD+N on every
+# scenario above, both being the same residual seen twice.
 #
 # Both channels, because each floor is asserted against both.  The
 # margin left on the worse one, per scenario and metric:
 #
 #   scenario         sep    thd    snr
-#   clean           20.3   12.2    6.4
-#   clock-200ppm    20.5   12.2    6.4
-#   tuning-30kHz    16.2    8.7    7.2
-#   multipath       12.2   10.9    7.1
-#   dc-notch        15.2    8.3    4.9
+#   clean           20.3   12.2   12.2
+#   clock-200ppm    20.5   12.2   12.2
+#   tuning-30kHz    16.2    8.7   11.8
+#   multipath       12.2   10.9   10.9
+#   dc-notch        15.2    8.3   12.0
 #
 # The separation floors sit 12-20 dB under those, which is where
 # they were before relative to what was then being measured, and
 # they now discriminate far harder: with the phase corrector
 # disabled the clean scenario measures 5.0 dB of separation rather
-# than 70.  The SNR floor of 24 dB is the one this PR did not move
-# and the one with least room: 4.9 dB on dc-notch's right channel.
-# Whatever sets that measurement, it is not the channel noise -
-# clean measures 30.369/30.363 dB at CNR 35 and 30.373/30.377 with
-# no noise at all - and nobody has yet looked into what does.
+# than 70.  The SNR floors were 24 dB for every scenario while the
+# metric could not see the channel; they are set the same way as
+# the rest now, about 12 dB under what is measured.
 # History of the clean row, all at 0 Hz and so all of the notch:
 # 2026-07 (windowed-median metrics, neutral HF ceilings and blend
 # stability, analog-exact pre-emphasis) Sep ~43/57, THD -36.9, SNR
@@ -122,11 +124,11 @@ SCENARIOS = {
 # 30.9-34.2.  THD is duration-stable to ~0.5 dB (it swung -18..-32
 # with the whole-signal single-FFT metric).
 FLOORS = {
-    "clean": dict(sep=50.0, thd=-45.0, snr=24.0),
-    "clock-200ppm": dict(sep=50.0, thd=-45.0, snr=24.0),
-    "tuning-30kHz": dict(sep=40.0, thd=-30.0, snr=24.0),
-    "multipath": dict(sep=25.0, thd=-45.0, snr=24.0),
-    "dc-notch": dict(sep=35.0, thd=-32.0, snr=24.0),
+    "clean": dict(sep=50.0, thd=-45.0, snr=45.0),
+    "clock-200ppm": dict(sep=50.0, thd=-45.0, snr=45.0),
+    "tuning-30kHz": dict(sep=40.0, thd=-30.0, snr=30.0),
+    "multipath": dict(sep=25.0, thd=-45.0, snr=45.0),
+    "dc-notch": dict(sep=35.0, thd=-32.0, snr=28.0),
 }
 
 
