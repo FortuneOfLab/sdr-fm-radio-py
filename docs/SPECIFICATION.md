@@ -396,7 +396,9 @@ stereo・mono 両経路で共有され（`_apply_side_nr`。モノでは side=(L
 ヘテロダイン/PLL、ノイズ帯 BPF、blend/トラッカーの取得状態）を初期同調と
 同じ再取得semanticsでクリアし、復帰 block 0 から stale side なし（最悪
 条件 blend 強制 1 で実測 4e-4、適応 blend では ~5e-5）。モノ動作中の NR は
-`adapt=False`（時間機構のみ前進する厳密パススルー）で駆動され、
+`adapt=False`（時間機構のみ前進するユニティゲインのパススルー。
+窓掛けと OLA は動くので、bit 一致ではなく float32 の誤差の範囲で入力を
+保存する。実測 2.98e-08 peak / 2.3e-07 相対、振幅 0.05）で駆動され、
 スペクトル適応状態（noise floor / power_smooth / DD state）は凍結される —
 人工的な side≈0 に最小統計を適応させると床が数秒で崩壊し
 （実測: モノ 4 秒で −144 dB）、復帰後 30–50 秒 NR が実質無効になるため。

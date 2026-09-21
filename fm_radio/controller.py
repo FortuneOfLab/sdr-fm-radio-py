@@ -717,18 +717,28 @@ class FMReceiverController:
         standard mode and 66 ms apart in light mode.
 
         That is a contract about the PARAMETERS, not about the
-        sound.  A stage that carries state across blocks can have a
-        transition to make: the side-channel noise reducer holds
-        three hops of audio it has already processed, so if the
-        radio is playing and the new settings change what that stage
-        does, the first output block after the change can be a
-        mixture of the two - the measured on-to-off switch passed
-        0.852 of the input, between 0.70 suppressed and 1.0
-        untouched - and at the current block size the block after it
-        is entirely under the new settings.  Nothing is mixed when
-        there is nothing in the tail to mix: a setting changed
-        before the radio starts, one that changes nothing the stage
-        does, or a stretch of silence.
+        sound.  A stage that carries state across blocks has a
+        transition to make whenever the change alters what it does
+        OR WHAT REACHES IT: the side-channel noise reducer holds
+        three hops of audio it has already processed, so the first
+        output block after the change can carry both - those hops
+        under the old settings and the rest of the block under the
+        new.  Measured on switching the reducer itself off, that
+        block passed 0.852 of the input, between 0.70 suppressed
+        and 1.0 untouched; at the current block size the block
+        after it is entirely under the new settings.  A change
+        upstream of the reducer - the subcarrier phase, a forced
+        blend - reaches the same tail without touching the
+        reducer's own settings, and settles more slowly because the
+        stages in between hold state too: switching the forced
+        blend, the first two output blocks differed from a run that
+        had the new value all along by 0.077 and 0.069 peak, the
+        third by 1.7e-04, the fourth not at all.
+
+        The mixing stops only when the stage is holding nothing to
+        mix: before the radio starts, or after enough silence to
+        have pushed the last of the programme out of it - a block
+        of silence that FOLLOWS the programme still carries it.
 
         While no blocks are arriving - the device has gone, or the
         receiver was never started - nothing is applied, and the next

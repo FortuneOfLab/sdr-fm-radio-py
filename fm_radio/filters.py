@@ -559,13 +559,18 @@ class SideNoiseReducer:
         frame after a switch (measured 1014/1024 silence samples)
         initialised an untrained floor at -93 dB.
 
-        ``bypass`` - process as an EXACT unity-gain OLA passthrough
-        (no FFT, and the fast gain state ``power_smooth`` /
-        ``prev_gain`` / ``prev_gamma`` stays bit-frozen too).  Used
-        by the MONO path only, where side ~ 0 and there is nothing
-        to suppress; the temporal machinery (input buffer, OLA,
-        emission schedule) still advances, so latency and mid
-        alignment stay exact and held content flushes smoothly.
+        ``bypass`` - process as a unity-gain OLA passthrough (no
+        FFT, and the fast gain state ``power_smooth`` /
+        ``prev_gain`` / ``prev_gamma`` stays bit-frozen too).  The
+        windowing, the overlap-add and the COLA normalisation still
+        run in float32, so the input comes back to within their
+        error and not bit for bit: measured 2.98e-08 peak, 2.3e-07
+        relative, on a signal of amplitude 0.05, with 12204 of
+        28928 samples not identical.  Used by the MONO path only,
+        where side ~ 0 and there is nothing to suppress; the
+        temporal machinery (input buffer, OLA, emission schedule)
+        still advances, so latency and mid alignment stay exact and
+        held content flushes smoothly.
 
         The stereo low-blend gate passes adapt=False WITHOUT bypass
         (freeze mode): the learned floor is protected, but the gain
@@ -577,11 +582,13 @@ class SideNoiseReducer:
         model to apply.
         ``apply_gain`` - is the computed gain put on the output?
         False runs everything (learning, the tracker, the DD state)
-        and emits the frame at unity gain: the FFT round trip and
-        the overlap-add still happen, so the input is preserved to
-        within their numerical error (measured 1.5e-08 peak on a
-        signal of amplitude 0.05) rather than bit for bit, which is
-        what ``bypass`` gives by skipping the FFT.  Used by a
+        and emits the frame at unity gain.  Like ``bypass`` it
+        returns the input to within float32 error rather than bit
+        for bit - 1.5e-08 peak against bypass's 2.98e-08 on a
+        signal of amplitude 0.05, the same order, the FFT round
+        trip adding nothing that stands out against the
+        overlap-add.  What it does that bypass does not is keep the
+        model current, and what it costs is the FFT.  Used by a
         SWITCHED-OFF side NR, where the model has to stay current or
         switching it back on gives a floor learned before whatever
         happened while it was off: measured after 5 s off across a
@@ -629,8 +636,11 @@ class SideNoiseReducer:
                 # Silence freezes the fast power/DD state as well as the
                 # floor. Otherwise decayed power_smooth would poison the
                 # floor on the first non-silent frame. OLA still advances.
-                # Exact unity OLA: irfft(rfft(w)) * window == w * window,
-                # so the FFT round-trip is skipped entirely.  Taken by
+                # Unity OLA: at a gain of 1 the round trip is a
+                # no-op (irfft(rfft(w)) * window == w * window), so
+                # it is skipped entirely.  The windowing and the
+                # overlap-add still run, so this is a passthrough
+                # to within their float32 error, not bit for bit.  Taken by
                 # the mono path (side ~ 0: nothing to suppress, gain
                 # state stays bit-frozen) and by an UNTRAINED reducer
                 # whose frame may not initialise the model (mixed

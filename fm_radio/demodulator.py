@@ -1304,7 +1304,9 @@ class BaseFMDemodulator(FMDemodulatorInterface):
 
         The mono path passes ``adapt=False``: the NR's temporal
         machinery (input buffer, STFT/OLA, emission schedule) keeps
-        advancing as an exact passthrough, but its spectral model
+        advancing as a unity-gain passthrough (to within the
+        overlap-add's float32 error; see SideNoiseReducer.process),
+        but its spectral model
         (noise floor, smoothed power, DD state) is FROZEN - adapting
         minimum statistics to the artificial side ~ 0 would collapse
         the floor within seconds and leave the NR pinned at unity
