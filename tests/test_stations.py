@@ -490,6 +490,92 @@ def test_an_empty_file_is_written_to(tmp_path):
     assert st.home_area(path) == "関東"
 
 
+@needs_tomllib
+def test_a_comment_on_the_area_line_is_kept(tmp_path):
+    """Replacing the line takes it away, and the check afterwards
+    does not notice: what is left still parses.
+    """
+    path = tmp_path / "stations.toml"
+    path.write_text('area = "北海道"  # 旅行中だけ変更\n',
+                    encoding="utf-8")
+
+    st.remember_area("関東", path)
+
+    now = path.read_text(encoding="utf-8")
+    assert "# 旅行中だけ変更" in now, "the note went"
+    assert st.home_area(path) == "関東"
+
+
+@needs_tomllib
+def test_the_spacing_on_the_area_line_is_kept(tmp_path):
+    """It is how they chose to write it."""
+    path = tmp_path / "stations.toml"
+    path.write_text('area   =   "北海道"\n', encoding="utf-8")
+
+    st.remember_area("関東", path)
+
+    assert path.read_text(encoding="utf-8") == 'area   =   "関東"\n'
+
+
+@needs_tomllib
+def test_the_line_endings_the_file_uses_are_kept(tmp_path):
+    """Reading in the usual way turns every CRLF into a LF, and
+    writing that back rewrites every line in the file.
+    """
+    path = tmp_path / "stations.toml"
+    had = 'area = "北海道"\r\n\r\n[[station]]\r\nname = "x"\r\nfreq_mhz = 80.0\r\n'
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        handle.write(had)
+
+    st.remember_area("関東", path)
+
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        now = handle.read()
+    assert now.count("\r\n") == had.count("\r\n"), "the endings changed"
+    assert "\n\n" not in now.replace("\r\n", "\r"), "a lone LF crept in"
+    assert st.home_area(path) == "関東"
+
+
+@needs_tomllib
+def test_a_new_line_uses_the_endings_the_file_already_has(tmp_path):
+    path = tmp_path / "stations.toml"
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        handle.write('[[station]]\r\nname = "x"\r\nfreq_mhz = 80.0\r\n')
+
+    st.remember_area("関東", path)
+
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        now = handle.read()
+    assert now.startswith('area = "関東"\r\n'), now[:40]
+    assert "\n" not in now.replace("\r\n", ""), "a lone LF crept in"
+
+
+@needs_tomllib
+def test_an_area_written_in_a_way_this_cannot_change_is_left_alone(tmp_path):
+    """A value it cannot take apart is a line to leave alone."""
+    path = tmp_path / "stations.toml"
+    had = 'area = """北海道"""\n'
+    path.write_text(had, encoding="utf-8")
+
+    with pytest.raises(st.WillNotEdit):
+        st.remember_area("関東", path)
+
+    assert path.read_text(encoding="utf-8") == had
+
+
+def test_a_file_that_is_not_utf_8_is_left_alone(tmp_path):
+    """Saved as CP932 by an editor on this machine, most likely."""
+    path = tmp_path / "stations.toml"
+    had = 'area = "北海道"\n'.encode("cp932")
+    path.write_bytes(had)
+
+    with pytest.raises(st.WillNotEdit) as complaint:
+        st.remember_area("関東", path)
+
+    assert path.read_bytes() == had
+    assert "UTF-8" in str(complaint.value)
+
+
 def test_nothing_is_left_beside_the_file(tmp_path):
     """It is written beside and moved into place; the spare goes."""
     path = tmp_path / "stations.toml"

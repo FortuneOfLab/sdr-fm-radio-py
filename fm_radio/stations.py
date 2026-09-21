@@ -231,6 +231,18 @@ def user_config_path() -> Path:
 _AREA_LINE = re.compile(r"""^\s*(?:area|"area"|'area')\s*=""")
 _TABLE_LINE = re.compile(r"^\s*\[")
 
+#: The same line taken apart, so that the value can be changed and
+#: nothing else on it.  What the user wrote around the value is
+#: theirs - the spacing, and a comment saying why - and replacing
+#: the line would take it away without the verification noticing,
+#: because what is left still parses.  A value this cannot take
+#: apart, a multi-line string or one with escapes in it, is a line
+#: to leave alone.
+_AREA_VALUE = re.compile(
+    r"""^(?P<before>\s*(?:area|"area"|'area')\s*=\s*)"""
+    r"""(?P<value>"[^"\\\n]*"|'[^'\n]*')"""
+    r"""(?P<after>[^\S\r\n]*(?:\#[^\r\n]*)?\r?\n?)$""")
+
 
 class WillNotEdit(Exception):
     """The station file could not be changed safely, so it was not."""
@@ -249,6 +261,11 @@ def remember_area(area: str, user_path: Path | str | None = None) -> Path:
     ``area`` inside a ``[[station]]`` is that station's own field -
     which is exactly the trap the README warns about - and this
     would make it worse by editing it.
+
+    On the line itself only the value changes.  The spacing the
+    user chose and a comment saying why are theirs, and replacing
+    the line would take them away without the check below noticing
+    - what is left still parses.
 
     Lines are not TOML, though, so the file is parsed as well as
     read.  What the parser says is there has to agree with what the
@@ -281,9 +298,18 @@ def remember_area(area: str, user_path: Path | str | None = None) -> Path:
                          % (area, ", ".join(AREAS)))
     path = Path(user_path) if user_path is not None else user_config_path()
     try:
-        raw = path.read_text(encoding="utf-8")
+        # newline="" so that the line endings come back as they are
+        # written.  Reading in the usual way turns every CRLF into a
+        # LF, and writing the result back would rewrite every line
+        # in the file to say that one setting.
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            raw = handle.read()
     except FileNotFoundError:
         raw = ""
+    except UnicodeError as exc:
+        raise WillNotEdit(
+            "%s is not UTF-8 (%s); save it as UTF-8 and add at the top: "
+            'area = "%s"' % (path, exc, area)) from exc
     # A byte order mark belongs at the start of the file and nowhere
     # else; inserting a line above it would leave it in the middle.
     mark = "\ufeff" if raw.startswith("\ufeff") else ""
@@ -305,13 +331,24 @@ def remember_area(area: str, user_path: Path | str | None = None) -> Path:
             "the top: area = \"%s\"" % (path, area))
 
     lines = body.splitlines(keepends=True)
-    say = 'area = "%s"\n' % area
     if at is None:
         # At the top, where it has to be, and with a blank line after
-        # it if there is anything for it to run into.
-        lines.insert(0, say if not lines else say + "\n")
+        # it if there is anything for it to run into.  In the line
+        # ending the file already uses.
+        ending = "\r\n" if "\r\n" in body else "\n"
+        say = 'area = "%s"%s' % (area, ending)
+        lines.insert(0, say if not lines else say + ending)
     else:
-        lines[at] = say
+        taken_apart = _AREA_VALUE.match(lines[at])
+        if taken_apart is None:
+            raise WillNotEdit(
+                "the area in %s is written in a way this cannot change "
+                'without rewriting the line; change it by hand to: '
+                'area = "%s"' % (path, area))
+        # Only the value.  Whatever the user put around it - the
+        # spacing they chose, a comment saying why - stays.
+        lines[at] = "%s\"%s\"%s" % (taken_apart.group("before"), area,
+                                     taken_apart.group("after"))
     now = mark + "".join(lines)
 
     if _reads_back_as(now, area) is False:
@@ -326,7 +363,8 @@ def remember_area(area: str, user_path: Path | str | None = None) -> Path:
     # is one the receiver will refuse to read at all, and the user
     # typed most of what is in it.
     spare = path.with_name(path.name + ".new")
-    spare.write_text(now, encoding="utf-8")
+    with spare.open("w", encoding="utf-8", newline="") as handle:
+        handle.write(now)
     os.replace(spare, path)
     logger.info("Wrote area %s to %s", area, path)
     return path
