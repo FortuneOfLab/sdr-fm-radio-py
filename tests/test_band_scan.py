@@ -270,18 +270,104 @@ def test_a_site_is_scored_and_not_an_area():
                          catalogue) == "関東"
 
 
+def test_the_same_site_name_in_two_places_is_two_places():
+    """A site name is not unique in Japan either.
+
+    The bundled catalogue has 小国 at 89.8 MHz in 東北 and at
+    80.4 MHz in 九州・沖縄 - different transmitters, same name.
+    Counting them as one would let two unrelated signals vote for
+    it together and carry an area on their own.
+    """
+    catalogue = [
+        a_transmitter(89.8, "小国", "東北"),
+        a_transmitter(80.4, "小国", "九州・沖縄"),
+    ]
+
+    assert where_this_is([loud(89.8), loud(80.4)], catalogue) is None
+
+
+def test_a_transmitter_on_the_next_channel_is_not_this_one():
+    """Both sit on the 0.1 MHz grid, so this is about which channel.
+
+    Matching a whole station's width instead would reach the
+    channels either side: a transmitter that has 80.1 and 81.4
+    would be evidence for hearing 80.0 and 81.3.
+    """
+    catalogue = [
+        a_transmitter(80.0, "東京", "関東"),
+        a_transmitter(81.3, "東京", "関東"),
+        a_transmitter(80.1, "遠く", "北海道"),
+        a_transmitter(81.4, "遠く", "北海道"),
+    ]
+
+    assert where_this_is([loud(80.0), loud(81.3)], catalogue) == "関東"
+
+
+def test_an_entry_with_no_site_is_not_a_place():
+    """The user's own entries carry whatever they typed, and this
+    is supposed to answer with one of the areas.
+    """
+    from fm_radio.stations import Station
+
+    catalogue = [
+        Station(name="mine", freq_mhz=80.0, site="", area="関東"),
+        Station(name="mine", freq_mhz=81.3, site="", area="関東"),
+    ]
+
+    assert where_this_is([loud(80.0), loud(81.3)], catalogue) is None
+
+
+def test_an_area_that_is_not_one_is_not_an_answer():
+    """where_this_is answers with an area or with nothing, and
+    remember_area would refuse anything else anyway.
+    """
+    from fm_radio.stations import Station
+
+    catalogue = [
+        Station(name="mine", freq_mhz=80.0, site="home", area="Home"),
+        Station(name="mine", freq_mhz=81.3, site="home", area="Home"),
+    ]
+
+    assert where_this_is([loud(80.0), loud(81.3)], catalogue) is None
+
+
 def test_nothing_heard_says_nothing():
     assert where_this_is([], [a_transmitter(80.0, "東京", "関東")]) is None
 
 
-def test_a_quiet_find_is_not_evidence_of_where_this_is():
-    """The quiet end of a sweep is skirts and distant stations."""
-    catalogue = [a_transmitter(80.0, "東京", "関東"),
-                 a_transmitter(81.3, "東京", "関東")]
-    far_off = [Signal(80.0e6, -45.0, 40.0, CONFIRMED),
-               Signal(81.3e6, -46.0, 40.0, CONFIRMED)]
+def test_a_find_far_below_the_loudest_is_not_evidence():
+    """The quiet end of a sweep is skirts and distant stations.
 
-    assert where_this_is(far_off, catalogue) is None
+    Measured against the loudest of them rather than in dBFS.  The
+    gain is held for a sweep so its hops compare with each other,
+    but it is whatever the AGC had settled on - an absolute figure
+    would find no evidence at all after tuning to a strong station.
+    """
+    catalogue = [a_transmitter(80.0, "東京", "関東"),
+                 a_transmitter(81.3, "東京", "関東"),
+                 a_transmitter(88.1, "札幌", "北海道"),
+                 a_transmitter(89.1, "札幌", "北海道"),
+                 a_transmitter(90.1, "札幌", "北海道")]
+    sweep = [loud(80.0), loud(81.3),
+             Signal(88.1e6, -50.0, 40.0, CONFIRMED),
+             Signal(89.1e6, -51.0, 40.0, CONFIRMED),
+             Signal(90.1e6, -52.0, 40.0, CONFIRMED)]
+
+    assert where_this_is(sweep, catalogue) == "関東", (
+        "the far-off ones outvoted the ones actually being heard")
+
+
+def test_the_same_sweep_at_any_gain_says_the_same_place():
+    """Which is why it is measured against the loudest."""
+    catalogue = [a_transmitter(80.0, "東京", "関東"),
+                 a_transmitter(81.3, "東京", "関東"),
+                 a_transmitter(82.5, "東京", "関東")]
+    sweep = [loud(80.0, -5.0), loud(81.3, -9.0), loud(82.5, -12.0)]
+    quieter = [Signal(s.freq_hz, s.power_dbfs - 40.0,
+                      s.pilot_over_noise_db, s.sort) for s in sweep]
+
+    assert where_this_is(sweep, catalogue) == "関東"
+    assert where_this_is(quieter, catalogue) == "関東"
 
 
 @pytest.mark.parametrize("sort", [UNCONFIRMED, LIKELY_SKIRT])

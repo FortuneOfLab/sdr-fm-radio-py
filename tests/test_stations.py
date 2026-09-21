@@ -402,6 +402,94 @@ def test_an_area_the_loader_would_refuse_is_not_written(tmp_path,
     assert not path.exists()
 
 
+@needs_tomllib
+def test_a_quoted_key_is_the_same_setting_and_is_replaced(tmp_path):
+    """Writing a second one would be two of the same key, and
+    tomllib refuses a file with that in it - all of it, not just
+    the line.  A working file would stop working.
+    """
+    path = tmp_path / "stations.toml"
+    path.write_text('"area" = "北海道"\n', encoding="utf-8")
+
+    st.remember_area("関東", path)
+
+    assert st.home_area(path) == "関東"
+    assert path.read_text(encoding="utf-8").count("area") == 1
+
+
+@needs_tomllib
+def test_a_file_with_a_byte_order_mark_is_left_alone(tmp_path):
+    """tomllib will not read one whatever is done to it.
+
+    A mark belongs at the start of a file and nowhere else, so a
+    line cannot go above it; and leaving it where it is writes into
+    a file the receiver still cannot read.  Neither is worth doing,
+    and the user is told what to type.
+    """
+    path = tmp_path / "stations.toml"
+    had = '\ufeff[[station]]\nname = "x"\nfreq_mhz = 80.0\n'
+    path.write_text(had, encoding="utf-8")
+
+    with pytest.raises(st.WillNotEdit) as complaint:
+        st.remember_area("関東", path)
+
+    assert path.read_text(encoding="utf-8") == had
+    assert 'area = "関東"' in str(complaint.value)
+
+
+@needs_tomllib
+def test_an_area_inside_a_long_string_is_not_the_setting(tmp_path):
+    """It is somebody's text, and editing it would change what they
+    wrote and still not set the area.
+    """
+    path = tmp_path / "stations.toml"
+    had = 'note = """\narea = "北海道"\n"""\n'
+    path.write_text(had, encoding="utf-8")
+
+    with pytest.raises(st.WillNotEdit):
+        st.remember_area("関東", path)
+
+    assert path.read_text(encoding="utf-8") == had
+
+
+@needs_tomllib
+def test_a_file_that_does_not_parse_is_left_alone(tmp_path):
+    """Editing blind could only make it worse, and the receiver
+    already tells the user it cannot read it.
+    """
+    path = tmp_path / "stations.toml"
+    had = "[[station\nname = 'unclosed'\n"
+    path.write_text(had, encoding="utf-8")
+
+    with pytest.raises(st.WillNotEdit):
+        st.remember_area("関東", path)
+
+    assert path.read_text(encoding="utf-8") == had
+
+
+@needs_tomllib
+def test_what_it_refuses_to_do_it_says_how_to_do(tmp_path):
+    """The user is going to have to type it themselves."""
+    path = tmp_path / "stations.toml"
+    path.write_text("[[station\n", encoding="utf-8")
+
+    with pytest.raises(st.WillNotEdit) as complaint:
+        st.remember_area("関東", path)
+
+    assert 'area = "関東"' in str(complaint.value)
+
+
+@needs_tomllib
+def test_an_empty_file_is_written_to(tmp_path):
+    """Nothing to lose and nothing to misread."""
+    path = tmp_path / "stations.toml"
+    path.write_text("", encoding="utf-8")
+
+    st.remember_area("関東", path)
+
+    assert st.home_area(path) == "関東"
+
+
 def test_nothing_is_left_beside_the_file(tmp_path):
     """It is written beside and moved into place; the spare goes."""
     path = tmp_path / "stations.toml"
