@@ -415,9 +415,11 @@ def transparent_nr(demod):
     """Make the noise reducer pass the side channel through unchanged.
 
     alpha_floor 1.0 floors the Wiener gain at unity, beta 0 asks for
-    no over-subtraction, so the whole tail becomes an identity that
-    holds frame - hop samples.  Anything the output then differs from
-    the input by is the tail mishandling the stream, not denoising.
+    no over-subtraction, so the whole tail becomes an identity - to
+    within the FFT round trip, which is parts in 10^7 here - that
+    holds frame - hop samples.  Anything bigger than that between
+    the output and the input is the tail mishandling the stream, not
+    denoising.
     """
     apply(replace(capture(demod), side_nr_alpha_floor=1.0,
                   side_nr_beta=0.0), demod)
@@ -541,9 +543,10 @@ def test_a_switched_off_noise_reducer_leaves_the_audio_alone():
     This one watches the same stream through both states with the
     reducer at its normal settings, block by block, and compares
     each output block with the input block it answers rather than
-    with an average: a switched-off reducer is an EXACT passthrough
-    (measured 1.5e-08 on a signal of amplitude 0.05), so there is
-    nothing to average over.
+    with an average: a switched-off reducer passes the input through
+    its unity-gain FFT and overlap-add, which preserves it to within
+    their numerical error (measured 1.5e-08 peak on a signal of
+    amplitude 0.05), so there is nothing to average over.
     """
     demod = FMDemodulatorLight(stereo=True)
     rng = np.random.default_rng(7)
@@ -577,10 +580,11 @@ def test_a_switched_off_noise_reducer_leaves_the_audio_alone():
 
     # Block by block across the switch.  The first block out is a
     # mixture - it carries three hops the reducer had already
-    # processed - and every block after it is the input, sample for
-    # sample.  A switch that took two or three blocks to arrive
-    # would leave one of these first two reading like the old state,
-    # which an average over the next half second would hide.
+    # processed - and every block after it is the input again, to
+    # within the round trip.  A switch that took two or three blocks
+    # to arrive would leave one of these first two reading like the
+    # old state, which an average over the next half second would
+    # hide.
     apply(replace(capture(demod), side_nr_enabled=False), demod)
     first, first_changed = run(1)
     assert first > suppressing + 0.05, (

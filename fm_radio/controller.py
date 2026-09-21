@@ -717,13 +717,18 @@ class FMReceiverController:
         standard mode and 66 ms apart in light mode.
 
         That is a contract about the PARAMETERS, not about the
-        sound.  A stage that carries state across blocks still has a
+        sound.  A stage that carries state across blocks can have a
         transition to make: the side-channel noise reducer holds
-        three hops of audio it has already processed, so the first
-        output block after it is switched is a mixture of the two
-        settings - measured 0.852 of the input passed, between 0.70
-        suppressed and 1.0 untouched - and the block after that is
-        entirely under the new settings.
+        three hops of audio it has already processed, so if the
+        radio is playing and the new settings change what that stage
+        does, the first output block after the change can be a
+        mixture of the two - the measured on-to-off switch passed
+        0.852 of the input, between 0.70 suppressed and 1.0
+        untouched - and at the current block size the block after it
+        is entirely under the new settings.  Nothing is mixed when
+        there is nothing in the tail to mix: a setting changed
+        before the radio starts, one that changes nothing the stage
+        does, or a stretch of silence.
 
         While no blocks are arriving - the device has gone, or the
         receiver was never started - nothing is applied, and the next

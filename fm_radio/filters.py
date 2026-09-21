@@ -577,7 +577,12 @@ class SideNoiseReducer:
         model to apply.
         ``apply_gain`` - is the computed gain put on the output?
         False runs everything (learning, the tracker, the DD state)
-        and emits the frame unchanged.  Used by a SWITCHED-OFF side
+        and emits the frame at unity gain: the FFT round trip and
+        the overlap-add still happen, so the input is preserved to
+        within their numerical error (measured 1.5e-08 peak on a
+        signal of amplitude 0.05) rather than bit for bit, which is
+        what ``bypass`` gives by skipping the FFT.  Used by a
+        SWITCHED-OFF side
         NR, where the model has to stay current or switching it back
         on gives a floor learned before whatever happened while it
         was off: measured after 5 s off across a 20 dB change in the
