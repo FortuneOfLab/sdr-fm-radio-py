@@ -340,6 +340,14 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         #: the one that closes on a near-mono programme, so it is the
         #: one to look at when a clean station will not acquire.
         self.stereo_phase_side_over_mono_db: float = 0.0
+        #: This block's own principal-axis estimate, in degrees, and
+        #: whether the gates let it near the tracker.  The tracked
+        #: angle is an EMA that holds and leaks while they are shut,
+        #: so it is no evidence about what a quiet stretch contained
+        #: and this is: nan when there was no covariance to take an
+        #: axis from.
+        self.stereo_phase_axis_deg: float = float("nan")
+        self.stereo_phase_informative: bool = False
         # The last block's IQ, restricted to the channel; see
         # channel_iq.  None until a block has been through.
         self._channel_iq: np.ndarray | None = None
@@ -624,6 +632,8 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         self.stereo_phase_aniso = 0.0
         self.stereo_phase_side_over_noise_db = 0.0
         self.stereo_phase_side_over_mono_db = 0.0
+        self.stereo_phase_axis_deg = float("nan")
+        self.stereo_phase_informative = False
         self._phase_acquired = False
         self._phase_acq_acc = 0j
         self._phase_acq_count = 0
@@ -966,8 +976,15 @@ class BaseFMDemodulator(FMDemodulatorInterface):
                 and denom > noise_ref
                 and aniso >= STEREO_PHASE_ANISO_GATE
             )
+            # Taken on every block, not only the ones that are used:
+            # one atan2, and the only measurement there is of what a
+            # block that the gates turned away actually contained.
+            beta_pa = 0.5 * np.arctan2(2.0 * cov_iq, var_i - var_q + 1e-12)
+            self.stereo_phase_axis_deg = (
+                float(np.degrees(beta_pa)) if denom > 1e-18
+                else float("nan"))
+            self.stereo_phase_informative = bool(informative)
             if informative:
-                beta_pa = 0.5 * np.arctan2(2.0 * cov_iq, var_i - var_q + 1e-12)
                 if not self._phase_acquired:
                     # Acquisition: require STEREO_PHASE_ACQUIRE_BLOCKS
                     # CONSECUTIVE informative blocks (rejects start-up
@@ -1097,6 +1114,8 @@ class BaseFMDemodulator(FMDemodulatorInterface):
             self.stereo_phase_aniso = 0.0
             self.stereo_phase_side_over_noise_db = 0.0
             self.stereo_phase_side_over_mono_db = 0.0
+            self.stereo_phase_axis_deg = float("nan")
+            self.stereo_phase_informative = False
             cph = 1.0
             sph = 0.0
         lr_base_full = lr_base_full_i * cph + lr_base_full_q * sph
@@ -1383,6 +1402,8 @@ class BaseFMDemodulator(FMDemodulatorInterface):
         self.stereo_phase_aniso = 0.0
         self.stereo_phase_side_over_noise_db = 0.0
         self.stereo_phase_side_over_mono_db = 0.0
+        self.stereo_phase_axis_deg = float("nan")
+        self.stereo_phase_informative = False
         # Of the station just left.  A reset is a retune, and whoever
         # asks next how steady the channel is must not be told about
         # the one before.
