@@ -184,13 +184,16 @@ STEREO_PHASE_SIDE_GATE_DB = -18.0   # Minimum demodulated side power relative to
                                     # of -20 dB not, the other gate passing every
                                     # block either way.  Below it the tracker holds
                                     # the hardware-trim prior, which costs how far
-                                    # that prior is from the truth: within +-7 deg
-                                    # on all four reference captures, 0.06 dB of
-                                    # side level.  That is the clean, loud corner
-                                    # only - block by block on real programme the
-                                    # two gates share the work.  The tables are in
-                                    # SPECIFICATION 3.9's tracker section and the
-                                    # reproducible numbers in test_e2e_quality.
+                                    # that prior is from the truth - and the closest
+                                    # thing to the truth these captures give is the
+                                    # axis their content-bearing blocks measure,
+                                    # which is within +-7 deg of the prior on all
+                                    # four: 0.06 dB of side level.  That is the
+                                    # clean, loud corner only - block by block on
+                                    # real programme the two gates share the work.
+                                    # The tables are in SPECIFICATION 3.3, under
+                                    # stereo demodulation, and the reproducible
+                                    # numbers in test_e2e_quality.
 STEREO_PHASE_ACQUIRE_BLOCKS = 6     # Consecutive informative blocks (~100 ms) required
                                     # before cold-start acquisition; the initial angle is
                                     # the doubled-angle circular mean over the streak,
@@ -246,12 +249,13 @@ STEREO_PHASE_SIDE_OVER_NOISE_DB = 26.0  # Minimum demodulated side power above t
                                     # (see its comment).
                                     # Both sides are pinned by tests.  The
                                     # reproducible numbers live in test_e2e_quality
-                                    # and the tables in SPECIFICATION 3.9's tracker
-                                    # section: which gate turns which block away on
-                                    # the reference captures, the axis the refused
-                                    # blocks measure for themselves (-17.0 deg at a
-                                    # concentration of 0.65 on optical 82.5, against
-                                    # -7.0 at 1.00 for the ones let through), and
+                                    # and the tables in SPECIFICATION 3.3, under
+                                    # stereo demodulation: which gate turns which
+                                    # block away on the reference captures, the
+                                    # axis the refused blocks measure for
+                                    # themselves (-17.0 deg at a concentration of
+                                    # 0.65 on optical 82.5, against -7.0 at 1.00
+                                    # for the ones let through), and
                                     # what opening this gate does to the audio
                                     # (-50.7 to -69.6 dB on the four captures).
 STEREO_PHASE_NOISE_CONF_RAMP_DB = 6.0  # Confidence ramp above the side-over-noise
