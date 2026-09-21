@@ -52,6 +52,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
+from fm_radio.band_scan import BandScan, CONFIRMED, LIKELY_SKIRT
 from fm_radio.exceptions import SDRDeviceError
 from fm_radio.gui.band_view import BandView
 from fm_radio.multipath import NOISE_AM_DEPTH
@@ -104,6 +105,10 @@ AM_DEPTH_FULL_SCALE = NOISE_AM_DEPTH
 _BLEND_WORDS = ("--", "MONO", "STEREO") + tuple(
     "%.2f" % (hundredths / 100.0) for hundredths in range(100))
 
+#: Room for the longest thing the scan list says, so that a sweep
+#: that finds a lot does not push the tuner's own controls about.
+_FOUND_WIDTH = 230
+
 #: Gain slider resolution: the widget is integral, the tuner is in dB.
 _GAIN_SCALE = 10.0
 _GAIN_MAX_DB = 49.6
@@ -143,6 +148,21 @@ def _blend_percent(blend: float, stereo: bool) -> int:
     return int(round(min(100.0, max(0.0, float(blend) * 100.0))))
 
 
+def _what_was_found(signal) -> str:
+    """One line for a thing the scan found.
+
+    The frequency, how loud, and what the scan made of it.  A pilot
+    is the only evidence a sweep has that a peak is a broadcast, and
+    it is not proof that the peak is a station of its own - a strong
+    station's skirt carries its pilot - so the word is the scan's
+    own reading rather than a verdict.
+    """
+    said = {CONFIRMED: "stereo", LIKELY_SKIRT: "spill?"}.get(
+        signal.sort, "no pilot")
+    return "%.1f MHz  %+.0f dB  %s" % (
+        signal.freq_mhz, signal.power_dbfs, said)
+
+
 def _reading(value: "float | None", pattern: str) -> str:
     """A number for the window, or the mark for one there is not."""
     return NOTHING_MEASURED if value is None else pattern % value
@@ -175,6 +195,12 @@ def _level_percent(dbfs: float) -> int:
 #: next refresh if it is still true, so anything may take its place.
 _FAILURE = "failure"
 _PROGRESS = "progress"
+#: A band scan saying where it has got to.  Its own sort because
+#: _show_the_device_worker clears _PROGRESS whenever the window has
+#: no tune of its own outstanding - which is every refresh during a
+#: scan, since the scan's tunes are not the window's.  The line
+#: lasted under 50 ms.
+_SCANNING = "scanning"
 
 
 def _still_going(request):
@@ -186,6 +212,55 @@ def _still_going(request):
     return request if request is not None and not request.finished else None
 
 
+class Sweep(QObject):
+    """Runs a band scan off the GUI thread and reports back on it.
+
+    A sweep is five seconds of retuning, so it cannot happen on the
+    thread that draws: the window would be a white rectangle for the
+    whole of it, which is the fault #47 was about.  It happens on a
+    thread of its own and says what it is doing through signals,
+    which Qt delivers on the GUI thread.
+
+    It owns the tuner while it runs.  Anything else that tunes makes
+    the sweep fail - it notices now, and says so rather than
+    reporting a station at the wrong frequency - so the window puts
+    its own tuning controls out of reach until it is finished.
+    """
+
+    #: A line about what the sweep is doing now.
+    progress = Signal(str)
+    #: The sweep has ended: (signals found, why it stopped or "").
+    finished = Signal(object, str)
+
+    def __init__(self, parent: QObject, controller) -> None:
+        super().__init__(parent)
+        self._scan = BandScan(controller, on_progress=self.progress.emit)
+        self._thread = threading.Thread(
+            target=self._run, name="BandScan", daemon=True)
+
+    def go(self) -> None:
+        self._thread.start()
+
+    def cancel(self) -> None:
+        """Ask it to stop at the next hop."""
+        self._scan.cancel()
+
+    def wait(self) -> None:
+        """Block until the sweep has finished, one way or the other."""
+        if self._thread.ident is not None:
+            self._thread.join()
+
+    def _run(self) -> None:
+        """The sweeping thread: sweep, and say how it went either way."""
+        try:
+            found = self._scan.run()
+        except Exception as e:
+            logger.error("The band scan stopped: %s", e, exc_info=True)
+            self.finished.emit([], str(e))
+        else:
+            self.finished.emit(found, "")
+
+
 class ReceiverWindow(QMainWindow):
     """Status and control for a running receiver."""
 
@@ -195,6 +270,10 @@ class ReceiverWindow(QMainWindow):
         self.setWindowTitle("SDR FM Receiver")
         # (message, expiry, sort); see NOTICE_SECONDS and _set_notice.
         self._notice: tuple[str, float, str] | None = None
+        #: The band scan now running, or None.
+        self._sweep: "Sweep | None" = None
+        #: True between asking a sweep to stop and its saying it has.
+        self._stopping: bool = False
 
         central = QWidget(self)
         layout = QVBoxLayout(central)
@@ -290,6 +369,25 @@ class ReceiverWindow(QMainWindow):
         self._presets.setToolTip("Preset stations")
         self._presets.activated.connect(self._preset_chosen)
         row.addWidget(self._presets)
+
+        # What is really on the band, as against what the catalogue
+        # says should be.  Empty until a sweep has run, and kept
+        # afterwards: the point of scanning is to pick from it.
+        self._found = QComboBox(box)
+        self._found.setToolTip("What the last scan found")
+        self._found.setMinimumWidth(_FOUND_WIDTH)
+        self._found.activated.connect(self._found_chosen)
+        self._show_what_was_found([])
+        row.addWidget(self._found)
+
+        self._scan_button = QPushButton("Scan", box)
+        self._scan_button.setToolTip(
+            "Sweep 76-95 MHz for whatever is transmitting. "
+            "Takes a few seconds, and the radio goes with it. "
+            "A recording that is running will be ended: the first "
+            "hop is a tune, and a tune closes the file.")
+        self._scan_button.clicked.connect(self._scan_or_stop)
+        row.addWidget(self._scan_button)
         return box
 
     def _build_signal(self) -> QGroupBox:
@@ -444,9 +542,92 @@ class ReceiverWindow(QMainWindow):
             self._tune(float(freq_hz))
         self._presets.setCurrentIndex(0)
 
+    def _found_chosen(self, index: int) -> None:
+        freq_hz = self._found.itemData(index)
+        if freq_hz is not None:
+            self._tune(float(freq_hz))
+
+    def _scan_or_stop(self) -> None:
+        """The one button: start a sweep, or stop the one running."""
+        if self._sweep is not None:
+            self._sweep.cancel()
+            self._stopping = True
+            self._say_what_can_be_used()
+            self._set_notice("stopping the scan...", _SCANNING)
+            return
+        self._sweep = Sweep(self, self.controller)
+        self._sweep.progress.connect(self._scanning)
+        self._sweep.finished.connect(self._scan_ended)
+        self._say_what_can_be_used()
+        self._sweep.go()
+
+    def _scanning(self, line: str) -> None:
+        """On the GUI thread: where the sweep has got to."""
+        self._set_notice(line, _SCANNING)
+
+    def _scan_ended(self, found, why: str) -> None:
+        """On the GUI thread: the sweep is over, for whatever reason."""
+        sweep, self._sweep = self._sweep, None
+        self._stopping = False
+        if sweep is not None:
+            # Its parent is the window, so without this every sweep
+            # ever run stays a child of it - and each one holds a
+            # demodulator and a spectrum maker.
+            sweep.deleteLater()
+        self._say_what_can_be_used()
+        if why:
+            self._set_notice("the scan stopped: %s" % why)
+            return
+        self._show_what_was_found(found)
+        self._set_notice(
+            "scan found %d" % len(found) if found
+            else "scan found nothing", _SCANNING)
+
+    def _say_what_can_be_used(self) -> None:
+        """Work out what is live, from everything that decides it.
+
+        Three things do: whether the device is still there, whether
+        a sweep owns the tuner, and whether the gain is on auto.
+        They were decided in three places and undid each other - a
+        sweep turns the AGC off, the next refresh saw manual gain
+        and handed the slider back mid-sweep, and a gain moved then
+        puts the sweep's hops in different units.  A sweep that has
+        ended cannot hand the controls back to a receiver that has
+        gone, either.
+        """
+        alive = getattr(self.controller, "device_failure", None) is None
+        sweeping = self._sweep is not None
+        usable = alive and not sweeping
+        for widget in (self._down, self._up, self._presets, self._found,
+                       self._auto_gain):
+            widget.setEnabled(usable)
+        # The slider is the one control with a third say in it.
+        self._gain_slider.setEnabled(usable
+                                     and not self._auto_gain.isChecked())
+        self._scan_button.setText("Stop" if sweeping else "Scan")
+        # Stopping is the one thing still worth offering mid-sweep,
+        # and nothing is once the device has gone.
+        self._scan_button.setEnabled(alive and not self._stopping)
+        # Recording goes with the rest.  A tune shuts any recording
+        # that is running - that is the receiver's rule, and a sweep
+        # is two dozen tunes - so a button pressed mid-sweep makes a
+        # file less than one hop long and then stops.  It offers
+        # something it cannot do.
+        for widget in (self._record_audio, self._record_iq):
+            widget.setEnabled(usable)
+
+    def _show_what_was_found(self, found) -> None:
+        """Fill the list of what is on the band, newest sweep only."""
+        self._found.clear()
+        self._found.addItem(
+            "%d found" % len(found) if found else "nothing found yet", None)
+        for signal in found:
+            self._found.addItem(_what_was_found(signal), signal.freq_hz)
+        self._found.setCurrentIndex(0)
+
     def _auto_gain_toggled(self, checked: bool) -> None:
         self._watch(self.controller.set_agc_mode(checked))
-        self._gain_slider.setEnabled(not checked)
+        self._say_what_can_be_used()
 
     def _gain_moved(self, value: int) -> None:
         """Apply a move that is not part of a drag.
@@ -571,10 +752,12 @@ class ReceiverWindow(QMainWindow):
         # The driver's own words, for whoever wants them.  Not on the
         # status line, where they would be most of a paragraph.
         self._health.setToolTip(why)
-        for widget in (self._down, self._up, self._presets,
-                       self._auto_gain, self._gain_slider,
-                       self._record_audio, self._record_iq):
-            widget.setEnabled(False)
+        # A sweep of a band the receiver can no longer hear is over,
+        # whatever it thinks; and it must not hand the controls back
+        # to a device that has gone when it notices.
+        if self._sweep is not None:
+            self._sweep.cancel()
+        self._say_what_can_be_used()
         # Asked before the release starts, not after: stop_recording
         # clears the flag and then flushes the queue, closes the wave file
         # and writes the sidecar, so a release already under way would
@@ -753,7 +936,10 @@ class ReceiverWindow(QMainWindow):
             self._auto_gain.blockSignals(True)
             self._auto_gain.setChecked(auto)
             self._auto_gain.blockSignals(False)
-            self._gain_slider.setEnabled(not auto)
+            # Not setEnabled here: a sweep turns the AGC off for its
+            # own reasons, and this ran every refresh and handed the
+            # slider back in the middle of one.
+            self._say_what_can_be_used()
         if not self._gain_slider.isSliderDown():
             self._gain_slider.blockSignals(True)
             self._gain_slider.setValue(int(round(gain_db * _GAIN_SCALE)))
@@ -822,10 +1008,32 @@ class ReceiverWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt naming
-        """Stop the timer and ask the receiver to shut down."""
+        """Stop the timer, stop any sweep, and shut the receiver down.
+
+        A sweep left running would go on retuning a receiver that is
+        being taken apart, and would put it back afterwards to a
+        frequency nobody is listening to.
+        """
         self._timer.stop()
+        self.stop_any_sweep()
         self.controller.quit_event.set()
         super().closeEvent(event)
+
+    def stop_any_sweep(self) -> None:
+        """Cancel a sweep and wait for it, if one is running.
+
+        The wait is not bounded by a hop.  A sweep stops at the next
+        one, but the hop it is in may be waiting on the device - a
+        request has five seconds - and it puts the receiver back
+        afterwards, which is two more writes.  On a device that has
+        stopped answering, closing the window can take that long.
+        Letting it go instead would leave something retuning a
+        receiver being taken apart, which is worse.
+        """
+        sweep, self._sweep = self._sweep, None
+        if sweep is not None:
+            sweep.cancel()
+            sweep.wait()
 
 
 class ReceiverSwitch(QObject):
