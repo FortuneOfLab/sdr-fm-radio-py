@@ -620,6 +620,13 @@ class FMReceiverController:
         what "Resampler history no longer covers pending output" means.
         The generation on each block tells that thread when the station
         has changed; it resets its own demodulator then.
+
+        The output is held across the write.  There is a gap either
+        way - the write takes about 50 ms and the demodulator then
+        refills its filters - and holding it makes the gap a silence
+        the card is not asking into (measured about one underrun per
+        retune before this) and gives the output its cushion back on
+        the far side.
         """
         shut = RecordingsShut(self.audio_output, self.sdr_receiver,
                               self.logger)
@@ -631,9 +638,16 @@ class FMReceiverController:
             # asked of this same worker, and the worker does one thing
             # at a time.
             shut.take()
-            self.sdr_receiver.set_center_frequency(freq_hz)
-            self._flush_data_queue()
-            self.auto_gain.reset_counters()
+            self.audio_output.hold()
+            try:
+                self.sdr_receiver.set_center_frequency(freq_hz)
+                self._flush_data_queue()
+                self.auto_gain.reset_counters()
+            finally:
+                # Even if the write failed: a held output that is
+                # never let go is a radio that has gone quiet for
+                # good.
+                self.audio_output.resume()
         finally:
             self._close_the_recordings(shut)
 

@@ -953,3 +953,53 @@ def test_a_picture_that_cannot_be_built_does_not_stop_the_block(receiver):
     run_blocks(receiver, 2)
 
     assert receiver.get_status() is not None, "the block died with the picture"
+
+
+# ----------------------------------------------------------------------
+# The output across a retune
+# ----------------------------------------------------------------------
+
+def test_a_tune_holds_the_output_across_the_write(receiver, monkeypatch):
+    """The gap is there either way; the card should not ask into it.
+
+    Asked from inside set_center_frequency, which is the write the
+    gap is made of: holding around the call and asking afterwards
+    would pass whether or not the hold covered the write.
+    """
+    held_during = []
+    real = receiver.sdr_receiver.set_center_frequency
+
+    def watched(freq_hz):
+        held_during.append(receiver.audio_output.held)
+        return real(freq_hz)
+
+    monkeypatch.setattr(receiver.sdr_receiver, "set_center_frequency",
+                        watched)
+
+    tuned(receiver, 80.1e6)
+
+    assert held_during == [True], "the write happened with the output live"
+    assert receiver.audio_output.held is False, "the output was not let go"
+
+
+def test_a_tune_leaves_the_output_waiting_for_a_cushion(receiver):
+    """After the gap it starts again the way it starts at boot.
+
+    Playing, then a retune, then not playing until enough has piled
+    up again - which is the underrun this is here to avoid: a queue
+    emptied by the gap and never refilled hands every block to a
+    card that is already waiting for it.
+    """
+    run_blocks(receiver, 4)
+    assert receiver.audio_output._playing is True, (
+        "the output never started, so there is nothing to hold")
+
+    tuned(receiver, 80.1e6)
+
+    assert receiver.audio_output._playing is False
+    assert receiver.audio_output.audio_buffer_queue.empty()
+    assert receiver.audio_output.held is False
+
+    run_blocks(receiver, 4)
+    assert receiver.audio_output._playing is True, (
+        "the output never came back")

@@ -9,6 +9,7 @@ unexpected write errors.
 
 from __future__ import annotations
 
+import logging
 import os
 import queue
 import struct
@@ -639,3 +640,107 @@ def test_cleanup_stops_a_stream_that_did_start(audio_output):
     audio_output.cleanup()
 
     assert audio_output.stream.stopped is True
+
+
+# ----------------------------------------------------------------------
+# Holding the output across a gap the receiver knows about
+# ----------------------------------------------------------------------
+
+def test_holding_stops_the_card_asking(audio_output):
+    """A stopped stream is a card that cannot underrun.
+
+    A card asking into an empty queue is an underrun a buffer; a
+    4.3 s band scan measured 68 of them.
+    """
+    _feed(audio_output, audio_output._preroll_frames)
+    assert audio_output.stream.started is True
+
+    audio_output.hold()
+
+    assert audio_output.held is True
+    assert audio_output.stream.started is False
+    assert audio_output.audio_buffer_queue.empty(), (
+        "what was queued belongs to where the receiver was")
+    assert audio_output._buffer_len == 0
+
+
+def test_a_block_handed_over_while_held_is_dropped(audio_output):
+    """Queueing it would play it late AND fill the cushion with it."""
+    audio_output.hold()
+    was_dropped = audio_output.dropped_blocks
+
+    _feed(audio_output, 4 * BLOCK_FRAMES)
+
+    assert audio_output.audio_buffer_queue.empty()
+    assert audio_output.stream.started is False
+    assert audio_output.dropped_blocks == was_dropped, (
+        "a held block is not a block the queue had no room for")
+
+
+def test_letting_go_does_not_start_the_stream_by_itself(audio_output):
+    """The cushion is built again before anything is played.
+
+    This is the whole point of the hold: without it the output comes
+    back from a gap with an empty queue and plays every block just
+    as the card asks for it.
+    """
+    _feed(audio_output, audio_output._preroll_frames)
+    audio_output.hold()
+    audio_output.resume()
+
+    assert audio_output.held is False
+    assert audio_output.stream.started is False, "nothing to play yet"
+
+    _feed(audio_output, audio_output._preroll_frames // 4)
+    assert audio_output.stream.started is False, "started without a cushion"
+
+    _feed(audio_output, audio_output._preroll_frames)
+    assert audio_output.stream.started is True
+
+
+def test_holds_nest(audio_output):
+    """A sweep holds for its length; each of its hops holds again."""
+    _feed(audio_output, audio_output._preroll_frames)
+    audio_output.hold()          # the sweep
+    audio_output.hold()          # a hop
+    audio_output.resume()        # the hop is done
+
+    assert audio_output.held is True
+    _feed(audio_output, 2 * audio_output._preroll_frames)
+    assert audio_output.stream.started is False, (
+        "the hop let go of a hold the sweep was still holding")
+
+    audio_output.resume()        # the sweep is done
+    assert audio_output.held is False
+    _feed(audio_output, audio_output._preroll_frames)
+    assert audio_output.stream.started is True
+
+
+def test_letting_go_more_often_than_it_was_held_is_survivable(audio_output,
+                                                              caplog):
+    """A count that went negative would make the next hold do nothing."""
+    with caplog.at_level(logging.WARNING, logger="fm_receiver.AudioOutput"):
+        audio_output.resume()
+
+    assert audio_output.held is False
+    assert any("let go twice" in r.getMessage() for r in caplog.records)
+
+    audio_output.hold()
+    assert audio_output.held is True, "the count went below zero"
+    _feed(audio_output, 2 * audio_output._preroll_frames)
+    assert audio_output.stream.started is False
+
+
+def test_a_hold_leaves_recording_alone(audio_output, tmp_path):
+    """The recorder takes the audio before the output does."""
+    path = str(tmp_path / "held.wav")
+    audio_output.start_recording(path)
+    audio_output.hold()
+
+    block = np.zeros(BLOCK_FRAMES * 2, dtype=np.float32)
+    audio_output.record(block)
+    audio_output.stop_recording()
+
+    with wave_mod.open(path, "rb") as f:
+        assert f.getnframes() == BLOCK_FRAMES, (
+            "the hold reached the recording")

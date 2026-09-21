@@ -519,12 +519,36 @@ class _AlwaysABlock:
         raise AssertionError("the fake feeds itself")
 
 
+class FakeAudioOutput:
+    """Enough output to be held, and a record of when it was."""
+
+    def __init__(self) -> None:
+        self.holds: int = 0
+        #: The count after each call, so a test can see whether it
+        #: ever reached zero in the middle of a sweep.
+        self.log: list[int] = []
+
+    def hold(self) -> None:
+        self.holds += 1
+        self.log.append(self.holds)
+
+    def resume(self) -> None:
+        assert self.holds > 0, "let go more often than it was held"
+        self.holds -= 1
+        self.log.append(self.holds)
+
+    @property
+    def held(self) -> bool:
+        return self.holds > 0
+
+
 class FakeController:
     """Enough receiver to be swept, and a record of what was asked."""
 
     def __init__(self, auto_gain: bool = True, at_hz: float = 80.0e6,
                  tune_answers=None, agc_answers=None) -> None:
         self.sdr_receiver = FakeSDR(at_hz)
+        self.audio_output = FakeAudioOutput()
         self._freq = at_hz
         self._auto = auto_gain
         self.tuned_to: list[float] = []
@@ -545,6 +569,16 @@ class FakeController:
         return not self._auto
 
     def tune(self, freq_hz):
+        # Holding the output across the write is what the real
+        # _tune_now does, and the sweep's hold has to survive two
+        # dozen of these.
+        self.audio_output.hold()
+        try:
+            return self._tune(freq_hz)
+        finally:
+            self.audio_output.resume()
+
+    def _tune(self, freq_hz):
         if (self.will_not_tune_to is not None
                 and abs(freq_hz - self.will_not_tune_to) < 1.0):
             self.tuned_to.append(freq_hz)
@@ -1038,6 +1072,67 @@ def test_the_receiver_is_put_back_even_when_the_sweep_fails(monkeypatch):
 
     assert controller.get_frequency() == 82.5e6
     assert controller.agc_calls[-1] is True
+
+
+def test_the_output_is_held_for_the_whole_sweep():
+    """Not hop by hop: the hops let go of their own holds.
+
+    Two dozen hops of other stations is not something to listen to,
+    and the card asking into the gaps between them measured 68
+    underruns across a 4.3 s sweep.  Each hop holds and lets go
+    around its own write, so the sweep's hold has to outlast all of
+    them.
+    """
+    controller = FakeController(auto_gain=True, at_hz=80.0e6)
+    scan = BandScan(controller)
+
+    scan.run(listen_sec=0.0)
+
+    log = controller.audio_output.log
+    assert log, "the sweep did not touch the output"
+    assert len(controller.tuned_to) > 2, "there were no hops to survive"
+    assert min(log[:-1]) >= 1, (
+        "the output was let go in the middle of the sweep: %r" % (log,))
+    assert log[-1] == 0
+    assert controller.audio_output.held is False
+
+
+def test_the_output_is_let_go_when_the_sweep_fails(monkeypatch):
+    """A held output that is never let go is a radio gone quiet."""
+    controller = FakeController(auto_gain=True, at_hz=82.5e6)
+    scan = BandScan(controller)
+
+    def explode(*args, **kwargs):
+        raise RuntimeError("the sweep broke")
+
+    monkeypatch.setattr(scan, "_look_at_the_band", explode)
+
+    with pytest.raises(RuntimeError):
+        scan.run(listen_sec=0.0)
+
+    assert controller.audio_output.held is False
+
+
+def test_the_output_is_let_go_when_the_tuner_will_not_go_back():
+    """The tuner failing is no reason to leave the radio silent."""
+    controller = FakeController(auto_gain=True, at_hz=80.0e6)
+    controller.will_not_tune_to = 80.0e6
+    scan = BandScan(controller)
+
+    with pytest.raises(ScanFailed):
+        scan.run(listen_sec=0.0)
+
+    assert controller.audio_output.held is False
+
+
+def test_a_cancelled_sweep_lets_the_output_go():
+    controller = FakeController(auto_gain=True, at_hz=80.0e6)
+    scan = BandScan(controller)
+    scan.cancel()
+
+    scan.run(listen_sec=0.0)
+
+    assert controller.audio_output.held is False
 
 
 def test_a_cancelled_sweep_stops_and_puts_things_back():

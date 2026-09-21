@@ -167,6 +167,14 @@ class AudioOutput(AudioOutputInterface):
         # matters; the lines are a sample of it.
         self._underrun_last_logged: float = 0.0
         self._underrun_logged_at: int = 0
+        # How many holds are in force; see hold().  Written under
+        # _play_lock, read from the realtime path, where a stale read
+        # costs one block either way.
+        self._holds: int = 0
+        # Blocks dropped because the output was held, counted so that
+        # the log can say how long a hold lasted in blocks rather
+        # than only in seconds.
+        self._held_drop_count: int = 0
         # Set for as long as a recording is being closed: the flag above
         # goes down first and the file stays open for the flush, the
         # worker handshake, the close and the sidecar - up to fifteen
@@ -342,6 +350,100 @@ class AudioOutput(AudioOutputInterface):
             held = AUDIO_CARD_BUFFER_MAX_SEC
         return int(round(held * self.output_rate))
 
+    def hold(self) -> None:
+        """Stop playing: nothing worth hearing is coming for a while.
+
+        For a gap the receiver knows about in advance - a band scan,
+        the moment of a retune - rather than for one it discovers by
+        running dry.  The stream is stopped so the card stops asking
+        (a card asking into an empty queue is an underrun a buffer,
+        and a 4.3 s scan measured 68 of them), what is queued is
+        dropped because it belongs to where the receiver was, and
+        the preroll is re-armed: when audio comes back it is played
+        from behind a cushion again, the way it is at startup, and
+        not handed to a card that is already waiting for it.
+
+        Holds nest, because the things that take one nest: a scan
+        holds for its whole length and each of its two dozen hops is
+        a retune that holds again.  The output plays again when the
+        last hold has been let go.
+
+        Recording is not affected: that path takes the audio before
+        this one.
+
+        Under ``_play_lock``: the count, ``stream.stop_stream()``,
+        which waits for the callback that may be running (one buffer,
+        21 ms here), clearing the callback's deque and draining the
+        queue, which is at most fifty ``get_nowait`` calls.  Nothing
+        else - the log line is written after the lock is let go,
+        because the realtime path takes this same lock in
+        ``_play_from_now_on`` and a log handler writes to a file.
+        """
+        with self._play_lock:
+            self._holds += 1
+            if self._holds > 1:
+                return
+            stopped = self._stop_playing_locked()
+        if stopped:
+            self.logger.info("Audio output held")
+
+    def resume(self) -> None:
+        """Let the output play again, once it has a cushion.
+
+        The stream is not started here - the next blocks to arrive
+        do that, when there are enough of them, through the same
+        path as at startup.
+        """
+        with self._play_lock:
+            if self._holds == 0:
+                # Nothing is broken by one resume too many, but it
+                # means a hold somewhere was not paired and the next
+                # one will not stop anything.
+                self.logger.warning("The audio output was let go twice")
+                return
+            self._holds -= 1
+            if self._holds:
+                return
+            dropped, self._held_drop_count = self._held_drop_count, 0
+        if dropped:
+            self.logger.info("Audio output let go after %d blocks held",
+                             dropped)
+
+    @property
+    def held(self) -> bool:
+        """Whether the output is being held; see :meth:`hold`."""
+        return self._holds > 0
+
+    def _stop_playing_locked(self) -> bool:
+        """Stop the card and empty everything between it and the DSP.
+
+        Caller holds ``_play_lock``.  The deque is the callback's
+        own, and is only touched here because stop_stream() has
+        returned: PortAudio does not call back into a stopped
+        stream.
+
+        Returns:
+            Whether a running stream was stopped, for the caller to
+            say so outside the lock.
+        """
+        was_playing = self._playing
+        if was_playing:
+            try:
+                self.stream.stop_stream()
+            except Exception as trouble:       # pragma: no cover - guard
+                self.logger.error("Could not stop the audio stream: %s",
+                                  trouble, exc_info=True)
+            self._playing = False
+        self._frames_ready = 0
+        self._buffer_deque.clear()
+        self._buffer_len = 0
+        while True:
+            try:
+                self.audio_buffer_queue.get_nowait()
+            except queue.Empty:
+                break
+        return was_playing
+
     def _play_from_now_on(self) -> None:
         """Start the stream, now that there is enough to play.
 
@@ -355,7 +457,7 @@ class AudioOutput(AudioOutputInterface):
         stopped stream, and only one of them should start it.
         """
         with self._play_lock:
-            if self._playing or self._closed.is_set():
+            if self._playing or self._closed.is_set() or self._holds:
                 return
             try:
                 self.stream.start_stream()
@@ -384,6 +486,15 @@ class AudioOutput(AudioOutputInterface):
 
     def _enqueue_locked(self, left: np.ndarray, right: np.ndarray) -> None:
         """Body of :meth:`enqueue_audio`; caller holds ``_close_lock``."""
+        if self._holds:
+            # Dropped rather than queued: it is the audio of a scan
+            # hop or of the station being left, and queueing it would
+            # both play it when the hold ends and fill the cushion
+            # with it.  Not counted as a dropped block - that counter
+            # means the queue was full, which is a fault, and this is
+            # not.
+            self._held_drop_count += 1
+            return
         try:
             left32 = np.asarray(left, dtype=np.float32, copy=False)
             right32 = np.asarray(right, dtype=np.float32, copy=False)
