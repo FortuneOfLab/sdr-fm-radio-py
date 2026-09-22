@@ -1,16 +1,21 @@
-"""Metadata sidecar tests (backlog item B5) and recording-path tests (B4)."""
+"""Metadata sidecar tests (backlog item B5), recording-path tests (B4),
+and tests for reading the sidecars back (P5 PR-A)."""
 
 from __future__ import annotations
 
 import json
+import os
 import re
+import wave
 
 import numpy as np
 import pytest
 
 import fm_radio.audio_output as ao_mod
 import fm_radio.sdr_receiver as sr_mod
-from fm_radio.recording_meta import sidecar_path
+from fm_radio.recording_meta import (
+    Recording, read_sidecar, scan_recordings, sidecar_path,
+)
 
 
 CHUNK = np.zeros(768 * 2, dtype=np.float32) + 0.25
@@ -159,3 +164,294 @@ def test_build_recording_path_uses_recordings_dir(tmp_path, monkeypatch):
     assert re.fullmatch(
         re.escape(RECORDINGS_DIR) + r"[\\/]\d{8}_\d{6}_80\.0MHz_IQ\.wav", p_iq,
     )
+
+
+# --------------------------------------------------------------------
+# Reading the sidecars back (P5 PR-A)
+# --------------------------------------------------------------------
+#
+# The numbers here are chosen so that the two sources of a duration
+# cannot be confused for one another: every fixture's WAV headers add
+# up to a fraction of a second while its timestamps are two minutes
+# apart.  A reader that quietly used the clock where it promised the
+# headers reads 120.0 where the test wants 0.3.
+
+#: Two minutes apart, so a clock-derived duration is 120.0 s.
+_STARTED = "2026-09-20T01:29:48+09:00"
+_STOPPED = "2026-09-20T01:31:48+09:00"
+
+
+def _write_wav(path, frames, rate=48000, channels=2):
+    """A real WAV of *frames* frames, so its header can be read."""
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(channels)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(b"\x00" * (frames * channels * 2))
+
+
+def _write_json(path, meta):
+    with open(str(path), "w", encoding="utf-8") as f:
+        json.dump(meta, f)
+
+
+def _iq_meta(parts, **extra):
+    meta = {
+        "type": "iq",
+        "file": parts[0],
+        "sample_rate_hz": 1024000,
+        "center_freq_hz": 91.6e6,
+        "gain_db": 8.7,
+        "started_at": _STARTED,
+        "stopped_at": _STOPPED,
+        "parts": list(parts),
+        "dropped_blocks": 2,
+    }
+    meta.update(extra)
+    return meta
+
+
+def test_reader_gets_back_what_the_writer_put_in(audio_output, tmp_path):
+    # Read what the recorder itself wrote, not a hand-made fixture:
+    # the two halves of this module have to agree on the spelling of
+    # every key, and only a round trip can say that they do.
+    ao = audio_output
+    base = tmp_path / "rt.wav"
+    ao.start_recording(
+        str(base), metadata={"center_freq_hz": 91.6e6, "gain_db": 20.7},
+    )
+    for _ in range(3):
+        ao.record(CHUNK.copy())
+    ao.stop_recording()
+
+    rec = read_sidecar(sidecar_path(str(base)))
+    assert rec.problem == ""
+    assert rec.kind == "audio"
+    assert rec.sample_rate_hz == 48000
+    assert rec.channels == 2
+    assert rec.center_freq_hz == pytest.approx(91.6e6)
+    assert rec.gain_db == pytest.approx(20.7)
+    assert rec.dropped == 0
+    assert rec.parts == ("rt.wav",)
+    assert rec.missing == ()
+    assert rec.complete is True
+    # Three chunks of 768 frames went in at 48 kHz.
+    assert rec.audio_seconds == pytest.approx(3 * 768 / 48000.0)
+    assert rec.started_at is not None and rec.stopped_at is not None
+
+
+def test_length_comes_from_the_wav_headers(tmp_path):
+    parts = ["m.wav", "m.part001.wav"]
+    _write_json(tmp_path / "m.json", _iq_meta(parts))
+    _write_wav(tmp_path / parts[0], 4800)    # 0.1 s
+    _write_wav(tmp_path / parts[1], 9600)    # 0.2 s
+
+    rec = read_sidecar(str(tmp_path / "m.json"))
+    assert rec.missing == ()
+    assert rec.audio_seconds == pytest.approx(0.3)
+    assert rec.wall_seconds == pytest.approx(120.0)
+    # The headers win over the clock, and say so.
+    assert rec.duration_s == pytest.approx(0.3)
+    assert rec.duration_is_measured is True
+
+
+def test_one_missing_part_falls_back_to_the_clock(tmp_path):
+    parts = ["m.wav", "m.part001.wav"]
+    _write_json(tmp_path / "m.json", _iq_meta(parts))
+    _write_wav(tmp_path / parts[0], 4800)    # the second part is gone
+
+    rec = read_sidecar(str(tmp_path / "m.json"))
+    assert rec.missing == ("m.part001.wav",)
+    assert rec.complete is False
+    # 0.1 s of the session is still there, but a tenth of a second is
+    # not the length of it: report nothing measured rather than a
+    # fraction dressed up as the whole.
+    assert rec.audio_seconds is None
+    assert rec.duration_s == pytest.approx(120.0)
+    assert rec.duration_is_measured is False
+
+
+def test_no_audio_left_at_all(tmp_path):
+    # The common case in the user's directory: 339 of 369 sidecars
+    # outlived their WAVs.
+    _write_json(tmp_path / "gone.json", _iq_meta(["gone.wav"]))
+
+    rec = read_sidecar(str(tmp_path / "gone.json"))
+    assert rec.problem == ""
+    assert rec.parts == ("gone.wav",)
+    assert rec.missing == ("gone.wav",)
+    assert rec.complete is False
+    assert rec.duration_s == pytest.approx(120.0)
+    assert rec.duration_is_measured is False
+    # Everything the sidecar knows still comes back.
+    assert rec.center_freq_hz == pytest.approx(91.6e6)
+    assert rec.sample_rate_hz == 1024000
+    assert rec.dropped == 2
+
+
+def test_a_part_that_is_not_a_readable_wav_is_present_but_unmeasured(tmp_path):
+    _write_json(tmp_path / "junk.json", _iq_meta(["junk.wav"]))
+    (tmp_path / "junk.wav").write_bytes(b"not a RIFF header at all")
+
+    rec = read_sidecar(str(tmp_path / "junk.json"))
+    assert rec.problem == ""
+    assert rec.missing == ()      # the file is there
+    assert rec.complete is True
+    assert rec.audio_seconds is None   # but it cannot be measured
+    assert rec.duration_s == pytest.approx(120.0)
+
+
+def test_a_session_that_never_stopped(tmp_path):
+    # Written at the start and never finalised: no parts, no stop.
+    _write_json(tmp_path / "half.json", {
+        "type": "iq",
+        "file": "half.wav",
+        "sample_rate_hz": 1024000,
+        "center_freq_hz": 80.0e6,
+        "gain_db": 36.4,
+        "started_at": _STARTED,
+    })
+    _write_wav(tmp_path / "half.wav", 24000, rate=48000)   # 0.5 s
+
+    rec = read_sidecar(str(tmp_path / "half.json"))
+    assert rec.problem == ""
+    assert rec.parts == ("half.wav",)     # taken from "file"
+    assert rec.stopped_at is None
+    assert rec.wall_seconds is None
+    assert rec.dropped is None
+    # The clock cannot answer, but the header can.
+    assert rec.duration_s == pytest.approx(0.5)
+    assert rec.duration_is_measured is True
+
+
+def test_parts_are_looked_for_beside_the_sidecar(tmp_path):
+    # A sidecar naming a path must not send the reader off to it.
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    _write_json(tmp_path / "p.json", _iq_meta(["elsewhere/p.wav"]))
+    _write_wav(elsewhere / "p.wav", 48000)     # 1.0 s, but not beside
+    rec = read_sidecar(str(tmp_path / "p.json"))
+    assert rec.missing == ("elsewhere/p.wav",)
+    assert rec.audio_seconds is None
+
+    _write_wav(tmp_path / "p.wav", 4800)       # 0.1 s, beside it
+    rec = read_sidecar(str(tmp_path / "p.json"))
+    assert rec.missing == ()
+    assert rec.audio_seconds == pytest.approx(0.1)
+
+
+def test_the_two_spellings_of_the_drop_count(tmp_path):
+    _write_json(tmp_path / "i.json", _iq_meta(["i.wav"]))
+    _write_json(tmp_path / "a.json", {
+        "type": "audio", "file": "a.wav", "parts": ["a.wav"],
+        "sample_rate_hz": 48000, "channels": 2,
+        "started_at": _STARTED, "stopped_at": _STOPPED,
+        "dropped_chunks": 7,
+    })
+    assert read_sidecar(str(tmp_path / "i.json")).dropped == 2
+    assert read_sidecar(str(tmp_path / "a.json")).dropped == 7
+
+
+def test_a_sidecar_that_is_not_json_says_so_and_keeps_its_row(tmp_path):
+    (tmp_path / "broken.json").write_text("{not json", encoding="utf-8")
+    (tmp_path / "list.json").write_text("[1, 2, 3]", encoding="utf-8")
+    _write_json(tmp_path / "ok.json", _iq_meta(["ok.wav"]))
+
+    broken = read_sidecar(str(tmp_path / "broken.json"))
+    assert "JSON" in broken.problem
+    assert broken.parts == () and broken.duration_s is None
+
+    a_list = read_sidecar(str(tmp_path / "list.json"))
+    assert "object" in a_list.problem
+
+    missing = read_sidecar(str(tmp_path / "nothing-here.json"))
+    assert missing.problem != ""
+
+    # The good one is still in the scan, and the bad ones are rows
+    # rather than an exception that loses the directory.
+    rows = scan_recordings(str(tmp_path))
+    assert len(rows) == 3
+    assert sum(1 for r in rows if r.problem) == 2
+    good = [r for r in rows if not r.problem]
+    assert len(good) == 1 and good[0].center_freq_hz == pytest.approx(91.6e6)
+
+
+def test_keys_that_are_missing_or_the_wrong_type_are_not_an_error(tmp_path):
+    _write_json(tmp_path / "odd.json", {
+        "type": 17,                      # not a string
+        "sample_rate_hz": "forty-eight",  # not a number
+        "center_freq_hz": None,
+        "started_at": "not a timestamp",
+        "stopped_at": _STOPPED,
+        "parts": ["a.wav", 5, "b.wav"],  # one entry is not a name
+        "something_new": {"nested": True},
+    })
+    rec = read_sidecar(str(tmp_path / "odd.json"))
+    assert rec.problem == ""
+    assert rec.kind == ""
+    assert rec.sample_rate_hz is None
+    assert rec.center_freq_hz is None
+    assert rec.started_at is None
+    assert rec.wall_seconds is None
+    assert rec.parts == ("a.wav", "b.wav")
+
+
+def test_numeric_fields_survive_the_shapes_json_allows(tmp_path):
+    _write_json(tmp_path / "n.json", _iq_meta(
+        ["n.wav"], sample_rate_hz=1024000.0, gain_db="8.7", channels=True,
+    ))
+    rec = read_sidecar(str(tmp_path / "n.json"))
+    assert rec.sample_rate_hz == 1024000
+    assert rec.gain_db == pytest.approx(8.7)
+    assert rec.channels is None      # a bool is not a channel count
+
+
+def test_scan_is_newest_first_and_undated_last(tmp_path):
+    def at(name, started):
+        meta = _iq_meta([name + ".wav"])
+        if started is None:
+            del meta["started_at"]
+        else:
+            meta["started_at"] = started
+        _write_json(tmp_path / (name + ".json"), meta)
+
+    at("old", "2026-09-19T10:00:00+09:00")
+    at("new", "2026-09-21T10:00:00+09:00")
+    at("mid", "2026-09-20T10:00:00+09:00")
+    # A naive timestamp next to the aware ones: ordering must not
+    # raise, and it must not push the dated ones around.
+    at("naive", "2026-09-20T12:00:00")
+    at("undated", None)
+
+    rows = scan_recordings(str(tmp_path))
+    names = [os.path.basename(r.sidecar) for r in rows]
+    assert names[0] == "new.json"
+    assert names[-1] == "undated.json"
+    assert names.index("mid.json") < names.index("old.json")
+    assert set(names) == {
+        "new.json", "mid.json", "naive.json", "old.json", "undated.json",
+    }
+
+
+def test_scan_ignores_wavs_that_no_sidecar_names(tmp_path):
+    _write_json(tmp_path / "kept.json", _iq_meta(["kept.wav"]))
+    _write_wav(tmp_path / "kept.wav", 4800)
+    _write_wav(tmp_path / "orphan.wav", 48000)
+    _write_wav(tmp_path / "orphan.part001.wav", 48000)
+
+    rows = scan_recordings(str(tmp_path))
+    assert len(rows) == 1
+    assert rows[0].parts == ("kept.wav",)
+
+
+def test_scan_of_a_directory_that_is_not_there(tmp_path):
+    assert scan_recordings(str(tmp_path / "no-such-dir")) == []
+
+
+def test_recordings_are_hashable_and_frozen(tmp_path):
+    _write_json(tmp_path / "f.json", _iq_meta(["f.wav"]))
+    rec = read_sidecar(str(tmp_path / "f.json"))
+    assert isinstance(rec, Recording)
+    assert len({rec, read_sidecar(str(tmp_path / "f.json"))}) == 1
+    with pytest.raises(Exception):
+        rec.kind = "audio"
