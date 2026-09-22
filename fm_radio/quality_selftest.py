@@ -1233,6 +1233,18 @@ def evaluate_quality(
 
 
 def _parser() -> argparse.ArgumentParser:
+    """Build the command line.
+
+    Everything argparse can print - the description, the help of each
+    argument, the metavars - stays ASCII.  --help writes to a console
+    whose encoding is the platform's, and cp932 (the Windows default
+    in Japan, where this receiver is used) has no em dash, no en dash
+    and no "approximately equal": printing one raises
+    UnicodeEncodeError, and the whole of --help is lost rather than
+    one character.  The log file is UTF-8 and holds Japanese station
+    names (see logging_config); the console is not, and help text has
+    nothing to say that needs those glyphs.
+    """
     p = argparse.ArgumentParser(description="FM demodulation quality self-test")
     p.add_argument("--duration", type=float, default=6.0, help="Test duration in seconds")
     p.add_argument("--tone-hz", type=float, default=1000.0, help="Tone frequency for THD/Sep")
@@ -1262,7 +1274,7 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--preemphasis", dest="preemphasis", action="store_true", default=True,
         help="Apply pre-emphasis to synthetic L/R before MPX synthesis "
-             "(default: on — real broadcasts always transmit with "
+             "(default: on - real broadcasts always transmit with "
              "pre-emphasis, and the receiver always de-emphasises)",
     )
     p.add_argument(
@@ -1367,7 +1379,7 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--sweep-freqs", type=str, default="",
         help="Comma-separated probe frequencies in Hz for --sweep-response "
-             "(default: log-spaced 50 Hz–20 kHz)",
+             "(default: log-spaced 50 Hz to 20 kHz)",
     )
     p.add_argument(
         "--sweep-ref-hz", type=float, default=1000.0,
@@ -1432,7 +1444,7 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--side-nr-alpha-floor", type=float, default=float("nan"),
         help="Side NR minimum Wiener gain in linear units, 0.0-1.0 "
-             "(0.15≈-16dB max attenuation). Higher = gentler.",
+             "(0.15 is about -16 dB max attenuation). Higher = gentler.",
     )
     p.add_argument(
         "--side-nr-beta", type=float, default=float("nan"),

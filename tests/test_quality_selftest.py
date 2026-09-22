@@ -854,3 +854,36 @@ def test_the_helper_refuses_the_same_values(name, value):
 
     with pytest.raises(ValueError):
         _set_up_the_demod(a_demodulator(), **{name: value})
+
+
+def test_help_prints_on_the_console_it_will_meet():
+    """--help must survive a cp932 console, glyph by glyph.
+
+    Repro: `py fm_radio/quality_selftest.py --help` on a Japanese
+    Windows console died with
+
+        UnicodeEncodeError: 'cp932' codec can't encode character
+        (U+2014, an em dash) in position 3545
+
+    and printed nothing usable - argparse writes the help in one
+    call, so a single character costs the whole of it.  Three
+    characters were in the help strings: an em dash, an en dash and
+    "almost equal to".  The check is the whole formatted help rather
+    than those three, because the next one will be typed into a new
+    argument, not into the old ones.
+
+    cp932 is checked by name, not by whatever this machine happens to
+    run under, so the test means the same thing in CI on Linux.
+    """
+    from fm_radio.quality_selftest import _parser
+
+    help_text = _parser().format_help()
+    try:
+        help_text.encode("cp932")
+    except UnicodeEncodeError as why:
+        bad = help_text[why.start:why.end]
+        line = help_text[:why.start].count(chr(10)) + 1
+        raise AssertionError(
+            f"--help cannot be printed on a cp932 console: "
+            f"{bad!r} (U+{ord(bad[0]):04X}) on line {line} of the help. "
+            f"Use ASCII in help strings.") from None
