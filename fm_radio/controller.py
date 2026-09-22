@@ -83,6 +83,14 @@ _SLOW_BLOCK_LOG_INTERVAL_SEC: float = 5.0
 # Queue depth, as a share of its capacity, at which the receiver is
 # no longer keeping up rather than merely being jittery.  Below this
 # the SDR queue is doing its job, which is absorbing the jitter.
+#
+# A share of the capacity and not a number of seconds, because what
+# it measures is how much room is left before the samples past the
+# end of the queue are dropped.  That means the same share is a
+# different amount of time in each mode - a quarter of eighty blocks
+# is 0.32 s of standard mode and 1.31 s of light mode, whose blocks
+# are four times as long - which is the right way round: light mode
+# has four times as much time in the same queue.
 _QUEUE_BACKLOG_SHARE: float = 0.25
 # Least time between "falling behind" lines.  Shorter than the
 # slow-block one: this is the line worth having, and a backlog that
@@ -109,20 +117,30 @@ class _BlockProfiler:
     - **The queue is backing up.**  A warning as it happens, because
       this is the receiver failing to keep up, and the SDR queue
       empties into dropped samples.  Rate limited to one a second.
-    - **A block went over the threshold.**  A warning too, but a
-      SAMPLE of them: one every
-      ``_SLOW_BLOCK_LOG_INTERVAL_SEC``, carrying how many there have
-      been since, and the stage breakdown of this one.  On a machine
-      where a tenth of the blocks run long while the receiver keeps
-      up perfectly, a line each buries everything else.
+    - **A block went over the threshold.**  A warning too, but one
+      line every ``_SLOW_BLOCK_LOG_INTERVAL_SEC``, and the line is
+      about the WORST block since the last one, not whichever block
+      happened to be due: a 400 ms stall in the enqueue stage is
+      exactly what a sample must not throw away, and the summary
+      would only have said max=400ms with nothing about where it
+      went.  The line carries that block's stage breakdown, its
+      queue depth, when it happened, and how many slow blocks it is
+      the worst of.  On a machine where a tenth of the blocks run
+      long while the receiver keeps up perfectly, a line each buries
+      everything else.
     - **How the last minute went**, at INFO, which is where the
       counts live.
     """
 
     def __init__(self, logger: logging.Logger, q_max_capacity: int,
+                 block_interval_sec: float = _BLOCK_BUDGET_SEC,
                  clock=time.perf_counter) -> None:
         self._log = logger
         self._q_capacity = q_max_capacity
+        #: How long one block of samples lasts, for saying a queue
+        #: depth in seconds.  Light mode's blocks are 65.5 ms, four
+        #: times standard mode's, so the budget constant is not it.
+        self._block_interval = float(block_interval_sec)
         #: Injectable so a test can drive the rate limits without
         #: waiting on them.
         self._clock = clock
@@ -133,6 +151,10 @@ class _BlockProfiler:
         self._t_last_slow_line: float | None = None
         self._t_last_backlog_line: float | None = None
         self._slow_reported: int = 0
+        #: The worst slow block since the last line was written, as
+        #: (dt_sec, q_depth, session_t, stage_times).  Waiting for a
+        #: line to be due, or for the summary if none comes.
+        self._worst: "tuple | None" = None
         #: Depth at which the queue counts as backing up.
         self._backlog_at: int = max(
             2, int(q_max_capacity * _QUEUE_BACKLOG_SHARE))
@@ -170,6 +192,29 @@ class _BlockProfiler:
         """Whether a line of this kind may be written now."""
         return last is None or now - last >= every
 
+    def _say_the_worst(self, now: float) -> None:
+        """Write the line for the worst block held back so far."""
+        dt_sec, q_depth, when, stage_times = self._worst
+        since = self._tot_slow_blocks - self._slow_reported
+        self._t_last_slow_line = now
+        self._slow_reported = self._tot_slow_blocks
+        self._worst = None
+        stages = ""
+        if stage_times is not None:
+            ag, pi, dm, eq, rc = stage_times
+            stages = (
+                f" stages_ms=[agc:{ag*1000:.1f} "
+                f"process_iq:{pi*1000:.1f} demod:{dm*1000:.1f} "
+                f"enqueue:{eq*1000:.1f} record:{rc*1000:.1f}]"
+            )
+        self._log.warning(
+            "BlockProfile: SLOW BLOCK dt=%.1fms q_depth=%d/%d "
+            "session_t=%.1fs (%.2fmin) total_slow=%d "
+            "(the worst of %d since the last of these)%s",
+            dt_sec * 1000.0, q_depth, self._q_capacity,
+            when, when / 60.0, self._tot_slow_blocks, since, stages,
+        )
+
     def record(
         self, dt_sec: float, q_depth: int,
         stage_times: tuple[float, float, float, float, float] | None = None,
@@ -198,35 +243,24 @@ class _BlockProfiler:
                 "session_t=%.1fs - the queue is %.1fs deep and the "
                 "samples past the end of it are dropped",
                 q_depth, self._q_capacity, dt_sec * 1000.0, elapsed,
-                q_depth * _BLOCK_BUDGET_SEC,
+                q_depth * self._block_interval,
             )
 
         if dt_sec >= _SLOW_BLOCK_THRESHOLD_SEC:
             self._win_slow_blocks += 1
             self._tot_slow_blocks += 1
+            if self._worst is None or dt_sec > self._worst[0]:
+                self._worst = (dt_sec, q_depth, elapsed, stage_times)
             if self._due(self._t_last_slow_line, now,
                          _SLOW_BLOCK_LOG_INTERVAL_SEC):
-                since = self._tot_slow_blocks - self._slow_reported
-                self._t_last_slow_line = now
-                self._slow_reported = self._tot_slow_blocks
-                stages = ""
-                if stage_times is not None:
-                    ag, pi, dm, eq, rc = stage_times
-                    stages = (
-                        f" stages_ms=[agc:{ag*1000:.1f} "
-                        f"process_iq:{pi*1000:.1f} demod:{dm*1000:.1f} "
-                        f"enqueue:{eq*1000:.1f} record:{rc*1000:.1f}]"
-                    )
-                self._log.warning(
-                    "BlockProfile: SLOW BLOCK dt=%.1fms q_depth=%d/%d "
-                    "session_t=%.1fs (%.2fmin) total_slow=%d "
-                    "(%d since the last of these)%s",
-                    dt_sec * 1000.0, q_depth, self._q_capacity,
-                    elapsed, elapsed / 60.0, self._tot_slow_blocks,
-                    since, stages,
-                )
+                self._say_the_worst(now)
 
         if now - self._t_last_summary >= _PROFILE_SUMMARY_INTERVAL_SEC:
+            # Before the summary, so that a stall nothing has
+            # reported yet is not left to the summary's max= alone,
+            # which says how long and nothing about where.
+            if self._worst is not None:
+                self._say_the_worst(now)
             blocks = max(self._win_blocks, 1)
             avg_ms = self._win_sum_dt * 1000.0 / blocks
             elapsed = now - self._t0_session
@@ -1407,6 +1441,8 @@ class FMReceiverController:
         self.logger.info("Processing thread started")
         profiler = _BlockProfiler(
             self.logger, self.sdr_receiver.data_queue.maxsize,
+            block_interval_sec=(self.sdr_receiver.block_size
+                                / self.sdr_receiver.sample_rate),
         )
         # Cleared on entry as well as in __init__: a thread that is
         # started a second time has a demodulator somebody else has been

@@ -68,16 +68,72 @@ def test_a_run_of_slow_blocks_is_one_line_carrying_the_count(profiling):
 
     said = lines(caplog, "SLOW BLOCK")
     assert len(said) == 1, "a line each is what buried the real one"
-    assert "(1 since the last of these)" in said[0]
+    assert "(the worst of 1 since the last of these)" in said[0]
 
     clock.on(_SLOW_BLOCK_LOG_INTERVAL_SEC)
     profiler.record(SLOW, q_depth=0)
 
     said = lines(caplog, "SLOW BLOCK")
     assert len(said) == 2
-    assert "(20 since the last of these)" in said[1], (
+    assert "(the worst of 20 since the last of these)" in said[1], (
         "the nineteen that were not printed have to be in the next line")
     assert "total_slow=21" in said[1]
+
+
+def test_the_line_is_about_the_worst_block_it_stands_for(profiling):
+    """Not whichever block happened to be due when the line was.
+
+    A 400 ms stall in one stage is exactly what a sample must not
+    throw away: the summary would say max=400ms and nothing about
+    where it went.
+    """
+    profiler, clock, caplog = profiling
+    ordinary = (0.0, 0.005, 0.016, 0.0, 0.0)
+    the_stall = (0.0, 0.001, 0.002, 0.400, 0.0)     # all of it in enqueue
+
+    profiler.record(SLOW, q_depth=0, stage_times=ordinary)   # writes a line
+    clock.on(0.5)
+    profiler.record(0.404, q_depth=4, stage_times=the_stall)  # held back
+    clock.on(0.5)
+    for _ in range(10):
+        profiler.record(SLOW, q_depth=0, stage_times=ordinary)
+        clock.on(0.1)
+
+    clock.on(_SLOW_BLOCK_LOG_INTERVAL_SEC)
+    profiler.record(SLOW, q_depth=0, stage_times=ordinary)
+
+    said = lines(caplog, "SLOW BLOCK")
+    assert len(said) == 2
+    assert "dt=404.0ms" in said[1], "the worst one was thrown away"
+    assert "enqueue:400.0" in said[1], "and with it, where the time went"
+    assert "q_depth=4/80" in said[1], "and what the queue was doing"
+    assert "session_t=0.5s" in said[1], "and when it happened"
+
+
+def test_a_stall_nothing_follows_is_still_reported(profiling):
+    """The line is written when a slow block is due, or by the summary.
+
+    A one-off stall on a receiver that then behaves would otherwise
+    wait for the next slow block, which may never come.
+    """
+    profiler, clock, caplog = profiling
+    the_stall = (0.0, 0.001, 0.002, 0.400, 0.0)
+
+    profiler.record(0.404, q_depth=4, stage_times=the_stall)
+    assert len(lines(caplog, "SLOW BLOCK")) == 1, (
+        "the first one is not held back; hold it back to test the rest")
+
+    clock.on(0.1)
+    profiler.record(0.404, q_depth=4, stage_times=the_stall)
+    assert len(lines(caplog, "SLOW BLOCK")) == 1, "held back, as it should be"
+
+    clock.on(61.0)
+    profiler.record(QUICK, q_depth=0)          # nothing slow about it
+
+    said = lines(caplog, "SLOW BLOCK")
+    assert len(said) == 2, "the summary let the stall out"
+    assert "enqueue:400.0" in said[1]
+    assert lines(caplog, "BlockProfile: t=")
 
 
 def test_the_summary_counts_every_slow_block(profiling):
@@ -133,7 +189,7 @@ def test_a_queue_backing_up_is_said_at_once(profiling):
     behind = lines(caplog, "FALLING BEHIND")
     assert len(behind) == 1
     assert "q_depth=%d/%d" % (deep, CAPACITY) in behind[0]
-    assert "0.3s deep" in behind[0], behind[0]
+    assert "0.3s deep" in behind[0], behind[0]     # 20 blocks of 16 ms
     assert len(lines(caplog, "SLOW BLOCK")) == 1, "still rate limited"
 
 
@@ -164,3 +220,24 @@ def test_a_queue_doing_its_job_is_not_a_backlog(profiling):
 
     assert lines(caplog, "FALLING BEHIND") == []
     assert profiler.window_max_ms == pytest.approx(QUICK * 1000.0)
+
+
+def test_the_queue_is_said_in_this_mode_s_seconds(caplog):
+    """Light mode's blocks are 65.5 ms, four times standard mode's.
+
+    The same twenty blocks are 0.32 s of one and 1.31 s of the
+    other, and a line that says 0.3 either way is telling a light
+    mode listener their queue is a quarter of what it is.
+    """
+    clock = Clock()
+    logger = logging.getLogger("fm_receiver.test_profiler_light")
+    caplog.set_level(logging.INFO, logger=logger.name)
+    profiler = _BlockProfiler(logger, CAPACITY,
+                              block_interval_sec=16384 / 250000.0,
+                              clock=clock)
+
+    profiler.record(QUICK, q_depth=int(CAPACITY * _QUEUE_BACKLOG_SHARE))
+
+    behind = lines(caplog, "FALLING BEHIND")
+    assert len(behind) == 1
+    assert "1.3s deep" in behind[0], behind[0]
