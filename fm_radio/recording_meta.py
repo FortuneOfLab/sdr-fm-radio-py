@@ -132,7 +132,7 @@ def part_list(base_wav_path: str, part_index: int, make_part_path) -> list[str]:
 # Nothing here raises for a sidecar it cannot make sense of.  A
 # directory of them is read to put a list in front of someone, and one
 # hand-edited or half-written file must not take the rest of them with
-# it; what could not be read is carried in ``Recording.problem`` and
+# it; what could not be used is carried in ``Recording.problem`` and
 # can be shown as its own row.
 
 
@@ -181,7 +181,7 @@ class Recording:
     audio_seconds: float | None
     #: ``stopped_at - started_at``, or None if either is missing.
     wall_seconds: float | None
-    #: Why the sidecar could not be read, or ``""`` when it was.
+    #: Why the sidecar could not be used, or ``""`` when it can be.
     problem: str
 
     @property
@@ -218,12 +218,16 @@ def _a_number(value) -> float | None:
     raises OverflowError on - so what would have been an exception out
     of a function that promises not to raise is simply "not a number".
     A bool is not one either: ``"channels": true`` is not two channels.
+
+    ``float()`` raises an OverflowError of its own on a JSON integer
+    too large to be one - four hundred digits of 9 is still valid
+    JSON - which is the same answer under a different name.
     """
     if value is None or isinstance(value, bool):
         return None
     try:
         number = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     return number if math.isfinite(number) else None
 
@@ -244,17 +248,26 @@ def _a_time(value) -> datetime | None:
         return None
 
 
-def _named_parts(meta: dict) -> tuple[str, ...]:
-    """The part file names *meta* lists, base first.
+def _named_parts(meta: dict) -> tuple[str, ...] | None:
+    """The part file names *meta* lists, base first, or None.
 
     ``parts`` is written when the session stops and is the whole
     story; ``file`` is written when it starts and names the base
     alone.  A session killed between the two has only ``file``, and
     one part of it is better than none.
+
+    None means the ``parts`` list holds something that is not a name.
+    Dropping that entry and keeping the rest is the worst answer
+    available: the names that remain are all present, so the
+    recording would be called complete and its length measured, when
+    what the sidecar says is that there was another part and nothing
+    here can find it.
     """
     parts = meta.get("parts")
     if isinstance(parts, list):
-        return tuple(p for p in parts if isinstance(p, str))
+        if not all(isinstance(p, str) for p in parts):
+            return None
+        return tuple(parts)
     base = meta.get("file")
     if isinstance(base, str):
         return (base,)
@@ -281,8 +294,15 @@ def _seconds_of_wav(path: str) -> float | None:
     return frames / float(rate)
 
 
-def _unreadable(path: str, problem: str) -> Recording:
-    """A row for a sidecar that could not be read, saying so."""
+def _unusable(path: str, problem: str) -> Recording:
+    """A row for a sidecar that could not be used, saying why.
+
+    Two kinds end up here: the ones that could not be read at all,
+    and the ones that read but say something about their parts that
+    cannot be acted on.  Both are shown rather than dropped, and
+    neither carries a length or a frequency - what such a file says
+    is not worth passing off as a capture's parameters.
+    """
     return Recording(
         sidecar=path, kind="", parts=(), missing=(),
         sample_rate_hz=None, center_freq_hz=None, gain_db=None,
@@ -311,20 +331,38 @@ def read_sidecar(path: str) -> Recording:
         with open(path, "r", encoding="utf-8") as f:
             meta = json.load(f)
     except OSError as e:
-        return _unreadable(path, f"could not be opened: {e}")
-    except (json.JSONDecodeError, UnicodeDecodeError) as e:
-        return _unreadable(path, f"is not valid JSON: {e}")
+        return _unusable(path, f"could not be opened: {e}")
+    except (ValueError, RecursionError) as e:
+        # ValueError covers JSONDecodeError and UnicodeDecodeError,
+        # and also the integer-digit limit CPython raises on a number
+        # of more than 4300 digits.  RecursionError is what deeply
+        # nested but otherwise valid JSON costs.  BaseException is
+        # left alone on purpose: a KeyboardInterrupt is not something
+        # to turn into a row.
+        return _unusable(path, f"is not valid JSON: {e}")
     if not isinstance(meta, dict):
-        return _unreadable(
+        return _unusable(
             path, f"is not a JSON object but a {type(meta).__name__}",
         )
 
-    here = os.path.dirname(path)
     parts = _named_parts(meta)
+    if parts is None:
+        return _unusable(path, "lists a part that is not a file name")
+
+    here = os.path.dirname(path)
     missing: list[str] = []
     lengths: list[float | None] = []
+    seen: set[str] = set()
     for name in parts:
-        beside = os.path.join(here, os.path.basename(name))
+        base = os.path.basename(name)
+        # Two names resolving to one file would be measured twice and
+        # make a one-second recording two seconds long.  The writer
+        # never repeats a part, so a repeat is a sidecar that cannot
+        # be believed about its parts at all.
+        if base in seen:
+            return _unusable(path, f"names {base} as more than one part")
+        seen.add(base)
+        beside = os.path.join(here, base)
         if os.path.isfile(beside):
             lengths.append(_seconds_of_wav(beside))
         else:

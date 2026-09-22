@@ -383,7 +383,7 @@ def test_keys_that_are_missing_or_the_wrong_type_are_not_an_error(tmp_path):
         "center_freq_hz": None,
         "started_at": "not a timestamp",
         "stopped_at": _STOPPED,
-        "parts": ["a.wav", 5, "b.wav"],  # one entry is not a name
+        "parts": ["a.wav", "b.wav"],
         "something_new": {"nested": True},
     })
     rec = read_sidecar(str(tmp_path / "odd.json"))
@@ -496,3 +496,76 @@ def test_start_times_the_platform_cannot_turn_into_posix_seconds(tmp_path):
     ]
     assert all(r.problem == "" for r in rows)
     assert rows[-1].started_at.year == 1960
+
+
+# --- Round 2: what a hand-edited sidecar can still do (PR #70 review) ---
+
+
+def test_numbers_too_large_for_a_float(tmp_path):
+    # Valid JSON, and float() raises OverflowError on it: an integer
+    # of 400 digits is larger than a float can be.
+    huge = "9" * 400
+    (tmp_path / "huge.json").write_text(
+        '{"type": "iq", "file": "h.wav", "sample_rate_hz": %s,'
+        ' "center_freq_hz": %s, "gain_db": -%s, "channels": %s,'
+        ' "dropped_blocks": %s}' % (huge, huge, huge, huge, huge),
+        encoding="utf-8",
+    )
+    rec = read_sidecar(str(tmp_path / "huge.json"))
+    assert rec.problem == ""
+    assert rec.parts == ("h.wav",)
+    assert rec.sample_rate_hz is None
+    assert rec.center_freq_hz is None
+    assert rec.gain_db is None
+    assert rec.channels is None
+    assert rec.dropped is None
+
+
+def test_json_that_parses_but_not_without_raising(tmp_path):
+    # Two ways valid JSON costs an exception that is not a
+    # JSONDecodeError: recursion, and CPython's 4300-digit limit on
+    # turning a number into an int.
+    (tmp_path / "deep.json").write_text(
+        '{"x":' + "[" * 2000 + "0" + "]" * 2000 + "}", encoding="utf-8")
+    (tmp_path / "digits.json").write_text(
+        '{"gain_db":' + "1" * 5000 + "}", encoding="utf-8")
+    _write_json(tmp_path / "ok.json", _iq_meta(["ok.wav"]))
+
+    deep = read_sidecar(str(tmp_path / "deep.json"))
+    assert "recursion" in deep.problem
+    digits = read_sidecar(str(tmp_path / "digits.json"))
+    assert "4300" in digits.problem
+
+    rows = scan_recordings(str(tmp_path))
+    assert len(rows) == 3
+    good = [r for r in rows if not r.problem]
+    assert len(good) == 1
+    assert good[0].center_freq_hz == pytest.approx(91.6e6)
+
+
+def test_a_parts_list_holding_something_that_is_not_a_name(tmp_path):
+    # Dropping the odd entry and keeping the rest is the trap: the
+    # names that remain are all present, so the recording would be
+    # called complete and measured at a second, when the sidecar says
+    # there was another part.
+    _write_json(tmp_path / "mixed.json", _iq_meta(["a.wav", 5]))
+    _write_wav(tmp_path / "a.wav", 48000)    # 1.0 s, and present
+
+    rec = read_sidecar(str(tmp_path / "mixed.json"))
+    assert rec.problem == "lists a part that is not a file name"
+    assert rec.parts == ()
+    assert rec.complete is False
+    assert rec.audio_seconds is None
+    assert rec.duration_s is None
+
+
+def test_two_part_names_that_are_one_file(tmp_path):
+    # Both resolve to a.wav beside the sidecar, so a one-second
+    # recording would measure two seconds long.
+    _write_json(tmp_path / "dup.json", _iq_meta(["x/a.wav", "y/a.wav"]))
+    _write_wav(tmp_path / "a.wav", 48000)    # 1.0 s
+
+    rec = read_sidecar(str(tmp_path / "dup.json"))
+    assert rec.problem == "names a.wav as more than one part"
+    assert rec.audio_seconds is None
+    assert rec.complete is False
