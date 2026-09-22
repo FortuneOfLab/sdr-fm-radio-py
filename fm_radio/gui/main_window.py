@@ -48,7 +48,7 @@ from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QGridLayout, QGroupBox, QHBoxLayout,
     QLabel, QMainWindow, QMessageBox, QProgressBar, QPushButton, QSizePolicy,
-    QSlider, QStatusBar,
+    QSlider, QStatusBar, QTabWidget,
     QVBoxLayout, QWidget,
 )
 
@@ -290,19 +290,16 @@ class ReceiverWindow(QMainWindow):
         #: True between asking a sweep to stop and its saying it has.
         self._stopping: bool = False
 
-        central = QWidget(self)
-        layout = QVBoxLayout(central)
-        layout.addWidget(self._build_tuner())
-        # Directly under the tuner: it is a picture of where the tuner
-        # is, and the controls that follow are about what to do there.
-        self._band = BandView(central)
-        # With the stretch, so a taller window is a taller picture
-        # rather than a taller gap under the controls.
-        layout.addWidget(self._band, 1)
-        layout.addWidget(self._build_signal())
-        layout.addWidget(self._build_gain())
-        layout.addWidget(self._build_recording())
-        self.setCentralWidget(central)
+        # Everything there has ever been is the first tab; the
+        # second is where the DSP settings are going.  The window
+        # updates every control every refresh whether or not its tab
+        # is the one showing - a control that stopped being updated
+        # while it was out of sight would be wrong the moment it
+        # came back, and Qt keeps hidden widgets alive and willing.
+        self._tabs = QTabWidget(self)
+        self._tabs.addTab(self._build_radio_tab(), "Radio")
+        self._tabs.addTab(self._build_dsp_tab(), "DSP")
+        self.setCentralWidget(self._tabs)
 
         self.setStatusBar(QStatusBar(self))
         self._health = QLabel("waiting for the first block")
@@ -354,6 +351,40 @@ class ReceiverWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Construction
     # ------------------------------------------------------------------
+
+    def _build_radio_tab(self) -> QWidget:
+        """The tuner, the band, and what to do about what is there.
+
+        The same controls in the same order as before there were
+        tabs; only their parent has changed.
+        """
+        page = QWidget(self)
+        layout = QVBoxLayout(page)
+        layout.addWidget(self._build_tuner())
+        # Directly under the tuner: it is a picture of where the tuner
+        # is, and the controls that follow are about what to do there.
+        self._band = BandView(page)
+        # With the stretch, so a taller window is a taller picture
+        # rather than a taller gap under the controls.
+        layout.addWidget(self._band, 1)
+        layout.addWidget(self._build_signal())
+        layout.addWidget(self._build_gain())
+        layout.addWidget(self._build_recording())
+        return page
+
+    def _build_dsp_tab(self) -> QWidget:
+        """Empty, and says so, until the next change fills it.
+
+        A tab that opens on nothing at all reads as a window that
+        has broken rather than one that is not finished.
+        """
+        page = QWidget(self)
+        layout = QVBoxLayout(page)
+        self._dsp_waiting = QLabel(
+            "The DSP settings go here.", page)
+        self._dsp_waiting.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self._dsp_waiting)
+        return page
 
     def _build_tuner(self) -> QGroupBox:
         box = QGroupBox("Tuner", self)

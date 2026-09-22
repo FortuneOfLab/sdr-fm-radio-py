@@ -380,6 +380,54 @@ def window(qt_app):
 
 
 # ----------------------------------------------------------------------
+# The tabs
+# ----------------------------------------------------------------------
+
+def test_the_controls_are_on_the_radio_tab(window):
+    """The same controls, one page down.
+
+    Named rather than counted: the next change adds the DSP tab's
+    contents, and a test that says "two tabs" would pass while they
+    were in the wrong one.
+    """
+    view, _ = window()
+
+    assert [view._tabs.tabText(i) for i in range(view._tabs.count())] == [
+        "Radio", "DSP"]
+    radio = view._tabs.widget(0)
+    for control in (view._frequency, view._down, view._up, view._presets,
+                    view._found, view._scan_button, view._band,
+                    view._blend, view._auto_gain, view._gain_slider,
+                    view._record_audio, view._record_iq):
+        assert radio.isAncestorOf(control), (
+            "%r is not on the Radio tab" % (control,))
+
+
+def test_the_window_still_updates_the_tab_nobody_is_looking_at(window):
+    """A control that stopped being updated out of sight would be
+    wrong the moment its tab came back.
+    """
+    view, controller = window(FakeController(snapshot(freq_hz=80.0e6)))
+    view._tabs.setCurrentIndex(1)               # the DSP tab
+    assert view._tabs.currentIndex() == 1
+
+    controller.status = snapshot(freq_hz=81.3e6, station="J-WAVE")
+    view.refresh()
+
+    assert view._frequency.text() == "81.3 MHz"
+    assert view._station.text() == "J-WAVE"
+
+
+def test_the_dsp_tab_says_it_is_not_finished(window):
+    """An empty page reads as a window that has broken."""
+    view, _ = window()
+    page = view._tabs.widget(1)
+
+    assert page.isAncestorOf(view._dsp_waiting)
+    assert view._dsp_waiting.text().strip() != ""
+
+
+# ----------------------------------------------------------------------
 # What it shows
 # ----------------------------------------------------------------------
 
