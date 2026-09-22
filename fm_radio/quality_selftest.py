@@ -40,7 +40,7 @@ from __future__ import annotations
 
 import argparse
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as dsp_replace
 from fractions import Fraction
 
 import numpy as np
@@ -59,6 +59,9 @@ from fm_radio.constants import (
 )
 import fm_radio.demodulator as _demod_mod
 from fm_radio.demodulator import FMDemodulator
+from fm_radio.dsp_settings import (
+    apply as dsp_apply, capture as dsp_capture,
+)
 
 
 def _dsp_subcarrier_offset_deg(use_pll: bool) -> float:
@@ -397,6 +400,68 @@ def _fm_modulate_iq(
     )
 
 
+def _set_up_the_demod(
+    demod,
+    fixed_blend: float | None = None,
+    disable_iq_phase_correction: bool = False,
+    mono_delay_samples: int | None = None,
+    subcarrier_phase_offset_deg: float | None = None,
+    lr_high_max_gain: float | None = None,
+    lr_super_high_max_gain: float | None = None,
+    side_nr_enable: bool | None = None,
+    side_nr_alpha_floor: float | None = None,
+    side_nr_beta: float | None = None,
+    synthetic_source: bool = False,
+) -> None:
+    """Put an experiment's overrides onto a fresh demodulator.
+
+    Through :class:`fm_radio.dsp_settings.DspSettings`, which is the
+    same road the GUI's settings tab takes while the radio plays.
+    One place, so that what can be tried by ear and what can be
+    measured offline are the same nine things, applied the same way
+    and refused for the same reasons.
+
+    Two of the arguments are softer than the settings are, because
+    they were softer before this and the callers rely on it: a blend
+    outside 0..1 is clipped rather than refused, and a negative
+    ``mono_delay_samples`` means "not asked for" - the command line
+    spells "leave it alone" that way.
+
+    Args:
+        synthetic_source: the IQ or composite was built here rather
+            than captured, so the hardware trim in the default
+            subcarrier phase does not belong: unless the caller
+            names an angle, the variant's DSP-intrinsic offset is
+            used instead (see _dsp_subcarrier_offset_deg).
+    """
+    changes: dict = {}
+    if fixed_blend is not None:
+        changes["force_blend_factor"] = float(np.clip(fixed_blend, 0.0, 1.0))
+    if disable_iq_phase_correction:
+        changes["iq_phase_correction_enabled"] = False
+    if mono_delay_samples is not None and int(mono_delay_samples) >= 0:
+        changes["mono_delay_samples"] = int(mono_delay_samples)
+    if subcarrier_phase_offset_deg is None and synthetic_source:
+        subcarrier_phase_offset_deg = _dsp_subcarrier_offset_deg(
+            getattr(demod, "use_pll_demod", False)
+        )
+    if subcarrier_phase_offset_deg is not None:
+        changes["subcarrier_phase_offset_rad"] = np.deg2rad(
+            float(subcarrier_phase_offset_deg))
+    if lr_high_max_gain is not None:
+        changes["lr_high_max_gain"] = float(lr_high_max_gain)
+    if lr_super_high_max_gain is not None:
+        changes["lr_super_high_max_gain"] = float(lr_super_high_max_gain)
+    if side_nr_enable is not None:
+        changes["side_nr_enabled"] = bool(side_nr_enable)
+    if side_nr_alpha_floor is not None:
+        changes["side_nr_alpha_floor"] = float(side_nr_alpha_floor)
+    if side_nr_beta is not None:
+        changes["side_nr_beta"] = float(side_nr_beta)
+    if changes:
+        dsp_apply(dsp_replace(dsp_capture(demod), **changes), demod)
+
+
 def _run_demod_from_iq(
     iq: np.ndarray,
     fixed_blend: float | None = None,
@@ -407,22 +472,14 @@ def _run_demod_from_iq(
     demod_diag_interval: int | None = None,
                ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     demod = FMDemodulator(stereo=True)
-    if fixed_blend is not None:
-        demod.force_blend_factor = float(np.clip(fixed_blend, 0.0, 1.0))
-    if disable_iq_phase_correction:
-        demod.iq_phase_correction_enabled = False
-    if mono_delay_samples is not None and int(mono_delay_samples) >= 0:
-        # The setter starts a new delay line of the right length.
-        demod.mono_delay_samples = int(mono_delay_samples)
-    # Synthetic source: replace the hardware-trimmed default with the
-    # variant's DSP-intrinsic offset unless the caller overrides (see
-    # _dsp_subcarrier_offset_deg; also applies to the composite-direct
-    # runner so pre-trim semantics are preserved for both variants).
-    if subcarrier_phase_offset_deg is None:
-        subcarrier_phase_offset_deg = _dsp_subcarrier_offset_deg(
-            getattr(demod, "use_pll_demod", False)
-        )
-    demod.subcarrier_phase_offset_rad = np.deg2rad(float(subcarrier_phase_offset_deg))
+    _set_up_the_demod(
+        demod,
+        fixed_blend=fixed_blend,
+        disable_iq_phase_correction=disable_iq_phase_correction,
+        mono_delay_samples=mono_delay_samples,
+        subcarrier_phase_offset_deg=subcarrier_phase_offset_deg,
+        synthetic_source=True,
+    )
     if demod_diag:
         demod.diag_enable = True
     if demod_diag_interval is not None and demod_diag_interval > 0:
@@ -470,25 +527,18 @@ def _run_demod_diag_iq(
     where blend / pilot_snr_db are one entry per processed block.
     """
     demod = FMDemodulator(stereo=True)
-    if fixed_blend is not None:
-        demod.force_blend_factor = float(np.clip(fixed_blend, 0.0, 1.0))
-    if disable_iq_phase_correction:
-        demod.iq_phase_correction_enabled = False
-    if mono_delay_samples is not None and int(mono_delay_samples) >= 0:
-        # The setter starts a new delay line of the right length.
-        demod.mono_delay_samples = int(mono_delay_samples)
-    if subcarrier_phase_offset_deg is not None:
-        demod.subcarrier_phase_offset_rad = np.deg2rad(float(subcarrier_phase_offset_deg))
-    if lr_high_max_gain is not None:
-        demod.lr_high_max_gain = float(lr_high_max_gain)
-    if lr_super_high_max_gain is not None:
-        demod.lr_super_high_max_gain = float(lr_super_high_max_gain)
-    if side_nr_enable is not None:
-        demod.side_nr_enabled = bool(side_nr_enable)
-    if side_nr_alpha_floor is not None:
-        demod.side_nr.alpha_floor = float(side_nr_alpha_floor)
-    if side_nr_beta is not None:
-        demod.side_nr.beta = float(side_nr_beta)
+    _set_up_the_demod(
+        demod,
+        fixed_blend=fixed_blend,
+        disable_iq_phase_correction=disable_iq_phase_correction,
+        mono_delay_samples=mono_delay_samples,
+        subcarrier_phase_offset_deg=subcarrier_phase_offset_deg,
+        lr_high_max_gain=lr_high_max_gain,
+        lr_super_high_max_gain=lr_super_high_max_gain,
+        side_nr_enable=side_nr_enable,
+        side_nr_alpha_floor=side_nr_alpha_floor,
+        side_nr_beta=side_nr_beta,
+    )
 
     left_chunks: list[np.ndarray] = []
     right_chunks: list[np.ndarray] = []
@@ -587,22 +637,14 @@ def _run_demod_from_composite(
     demod_diag_interval: int | None = None,
                      ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     demod = FMDemodulator(stereo=True)
-    if fixed_blend is not None:
-        demod.force_blend_factor = float(np.clip(fixed_blend, 0.0, 1.0))
-    if disable_iq_phase_correction:
-        demod.iq_phase_correction_enabled = False
-    if mono_delay_samples is not None and int(mono_delay_samples) >= 0:
-        # The setter starts a new delay line of the right length.
-        demod.mono_delay_samples = int(mono_delay_samples)
-    # Synthetic source: replace the hardware-trimmed default with the
-    # variant's DSP-intrinsic offset unless the caller overrides (see
-    # _dsp_subcarrier_offset_deg; also applies to the composite-direct
-    # runner so pre-trim semantics are preserved for both variants).
-    if subcarrier_phase_offset_deg is None:
-        subcarrier_phase_offset_deg = _dsp_subcarrier_offset_deg(
-            getattr(demod, "use_pll_demod", False)
-        )
-    demod.subcarrier_phase_offset_rad = np.deg2rad(float(subcarrier_phase_offset_deg))
+    _set_up_the_demod(
+        demod,
+        fixed_blend=fixed_blend,
+        disable_iq_phase_correction=disable_iq_phase_correction,
+        mono_delay_samples=mono_delay_samples,
+        subcarrier_phase_offset_deg=subcarrier_phase_offset_deg,
+        synthetic_source=True,
+    )
     if demod_diag:
         demod.diag_enable = True
     if demod_diag_interval is not None and demod_diag_interval > 0:

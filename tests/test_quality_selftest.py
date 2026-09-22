@@ -556,3 +556,122 @@ def test_cli_sep_sweep_passes_carrier_offset(monkeypatch, capsys):
     assert captured[0]["carrier_offset_hz"] == 1237.0
     assert "carrier_offset=1237Hz" in out
     assert "notch transition" not in out
+
+
+# ----------------------------------------------------------------------
+# One place that sets the nine
+# ----------------------------------------------------------------------
+
+def a_demodulator():
+    """The light chain: the same nine attributes, built in a fraction
+    of the time the standard one takes."""
+    from fm_radio.demodulator import FMDemodulatorLight
+    return FMDemodulatorLight(stereo=True)
+
+
+def test_the_overrides_go_through_the_settings():
+    """The same nine the GUI changes, applied the same way.
+
+    Read back with capture(), so what is checked is the DSP's own
+    state and not the arguments going in.
+    """
+    from fm_radio.dsp_settings import capture
+    from fm_radio.quality_selftest import _set_up_the_demod
+
+    demod = a_demodulator()
+    _set_up_the_demod(
+        demod,
+        fixed_blend=0.25,
+        disable_iq_phase_correction=True,
+        mono_delay_samples=4,
+        subcarrier_phase_offset_deg=91.0,
+        lr_high_max_gain=0.8,
+        lr_super_high_max_gain=0.4,
+        side_nr_enable=False,
+        side_nr_alpha_floor=0.5,
+        side_nr_beta=2.0,
+    )
+
+    now = capture(demod)
+    assert now.force_blend_factor == pytest.approx(0.25)
+    assert now.iq_phase_correction_enabled is False
+    assert now.mono_delay_samples == 4
+    assert now.subcarrier_phase_offset_deg == pytest.approx(91.0)
+    assert now.lr_high_max_gain == pytest.approx(0.8)
+    assert now.lr_super_high_max_gain == pytest.approx(0.4)
+    assert now.side_nr_enabled is False
+    assert now.side_nr_alpha_floor == pytest.approx(0.5)
+    assert now.side_nr_beta == pytest.approx(2.0)
+    # The delay line is the length that was asked for, not just the
+    # number: the setter builds it.
+    assert demod._mono_delay_state.size == 4
+
+
+def test_nothing_asked_for_changes_nothing():
+    from fm_radio.dsp_settings import capture
+    from fm_radio.quality_selftest import _set_up_the_demod
+
+    demod = a_demodulator()
+    was = capture(demod)
+
+    _set_up_the_demod(demod)
+
+    assert capture(demod) == was
+
+
+@pytest.mark.parametrize("asked, expected", [
+    (1.7, 1.0),
+    (-0.5, 0.0),
+    (0.25, 0.25),
+])
+def test_a_blend_outside_the_range_is_clipped_not_refused(asked, expected):
+    """Softer than DspSettings on purpose: it was softer before this."""
+    from fm_radio.dsp_settings import capture
+    from fm_radio.quality_selftest import _set_up_the_demod
+
+    demod = a_demodulator()
+    _set_up_the_demod(demod, fixed_blend=asked)
+
+    assert capture(demod).force_blend_factor == pytest.approx(expected)
+
+
+def test_a_negative_delay_means_it_was_not_asked_for():
+    """How the command line spells "leave it alone"."""
+    from fm_radio.dsp_settings import capture
+    from fm_radio.quality_selftest import _set_up_the_demod
+
+    demod = a_demodulator()
+    _set_up_the_demod(demod, mono_delay_samples=7)
+    _set_up_the_demod(demod, mono_delay_samples=-1)
+
+    assert capture(demod).mono_delay_samples == 7, (
+        "a negative delay was taken as a change")
+
+
+def test_a_synthetic_source_drops_the_hardware_trim():
+    """The trim belongs to a signal that came through the radio.
+
+    The IQ and composite runners build their own, so unless the
+    caller names an angle they use the variant's DSP-intrinsic
+    offset instead.
+    """
+    from fm_radio.dsp_settings import capture
+    from fm_radio.quality_selftest import (
+        _dsp_subcarrier_offset_deg, _set_up_the_demod,
+    )
+
+    captured = a_demodulator()
+    _set_up_the_demod(captured)
+    synthetic = a_demodulator()
+    _set_up_the_demod(synthetic, synthetic_source=True)
+    named = a_demodulator()
+    _set_up_the_demod(named, synthetic_source=True,
+                      subcarrier_phase_offset_deg=70.0)
+
+    wanted = _dsp_subcarrier_offset_deg(
+        getattr(synthetic, "use_pll_demod", False))
+    assert capture(synthetic).subcarrier_phase_offset_deg == pytest.approx(
+        wanted)
+    assert capture(captured).subcarrier_phase_offset_deg != pytest.approx(
+        wanted), "the trim was dropped without being asked"
+    assert capture(named).subcarrier_phase_offset_deg == pytest.approx(70.0)
