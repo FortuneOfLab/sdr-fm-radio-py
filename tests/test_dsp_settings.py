@@ -14,6 +14,7 @@ asked, twice, what it is running under.
 
 from __future__ import annotations
 
+import logging
 import math
 import threading
 from dataclasses import replace
@@ -774,3 +775,26 @@ def test_two_writers_changing_different_parameters_do_not_undo_each_other(
     wanted = receiver.get_dsp_settings()
     assert wanted.side_nr_alpha_floor == 0.4, "the first change was undone"
     assert wanted.side_nr_beta == 2.0, "the second change was undone"
+
+
+def test_the_line_about_a_change_says_only_what_changed(receiver, monkeypatch,
+                                                        caplog):
+    """It is written on the processing thread, into a file handler.
+
+    The whole set came to 346 characters, and a dragged slider put
+    forty of those a second through the realtime path until the SDR
+    queue was 42 blocks deep and the audio ran dry.
+    """
+    wanted = replace(receiver.get_dsp_defaults(), side_nr_alpha_floor=0.4)
+    receiver.set_dsp_settings(wanted)
+
+    with caplog.at_level(logging.INFO, logger=receiver.logger.name):
+        seen, done = watch(receiver, monkeypatch, blocks_wanted=1)
+        feed(receiver, 1)
+        run_until(receiver, done)
+
+    said = [r.getMessage() for r in caplog.records
+            if "DSP settings changed" in r.getMessage()]
+    assert len(said) == 1
+    assert said[0] == "DSP settings changed: side_nr_alpha_floor=0.4", said[0]
+    assert len(said[0]) < 100, "the line is long enough to hurt again"

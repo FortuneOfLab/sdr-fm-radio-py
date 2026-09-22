@@ -397,3 +397,67 @@ def test_the_switch_goes_dark_with_everything_else(tab):
 
     for button in page._slot_buttons.buttons():
         assert not button.isEnabled()
+
+
+# ----------------------------------------------------------------------
+# A drag is one change
+# ----------------------------------------------------------------------
+
+class _Dragging:
+    """A slider with its handle held down, as Qt reports one."""
+
+    def __init__(self, slider) -> None:
+        self.slider = slider
+
+    def __enter__(self):
+        self.slider.setSliderDown(True)
+        return self.slider
+
+    def __exit__(self, *exc):
+        # Qt emits sliderReleased itself when the handle goes up.
+        self.slider.setSliderDown(False)
+
+
+def test_a_drag_asks_for_one_change_at_the_end_of_it(tab):
+    """Every step used to be a write and a log line on the
+    processing thread: one drag measured forty a second, the SDR
+    queue 42 blocks deep and the audio running dry.
+    """
+    page, controller = tab()
+    slider = row(page, "side_nr_alpha_floor").widgets[0]
+
+    with _Dragging(slider):
+        for step in range(20, 61, 5):
+            slider.setValue(step)
+            assert controller.dsp_updates == [], (
+                "a step of the drag reached the receiver")
+            assert row(page, "side_nr_alpha_floor").readout.text() == (
+                "%.2f" % (step / _FRACTION_STEPS)), "the readout stopped"
+
+    assert controller.dsp_updates == [{"side_nr_alpha_floor": 0.60}]
+    assert controller.dsp_settings.side_nr_alpha_floor == pytest.approx(0.60)
+    assert page._slots["A"].side_nr_alpha_floor == pytest.approx(0.60)
+
+
+def test_a_click_on_the_groove_still_arrives(tab):
+    """Not every move is a drag: a click moves the handle at once."""
+    page, controller = tab()
+    slider = row(page, "side_nr_beta").widgets[0]
+
+    slider.setValue(15)                  # no handle held down
+
+    assert controller.dsp_updates == [{"side_nr_beta": 1.5}]
+
+
+def test_a_drag_of_the_blend_is_one_change_too(tab):
+    page, controller = tab()
+    forced, slider = row(page, "force_blend_factor").widgets
+    forced.setChecked(True)
+    before = len(controller.dsp_updates)
+
+    with _Dragging(slider):
+        for step in (10, 20, 30):
+            slider.setValue(step)
+
+    assert len(controller.dsp_updates) == before + 1
+    assert controller.dsp_settings.force_blend_factor == pytest.approx(0.30)

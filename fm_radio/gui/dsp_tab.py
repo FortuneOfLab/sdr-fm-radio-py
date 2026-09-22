@@ -257,6 +257,7 @@ class DspTab(QWidget):
 
         row = _Row(field, (slider,), read, show, readout)
         slider.valueChanged.connect(lambda _=0, r=row: self._changed(r))
+        slider.sliderReleased.connect(lambda r=row: self._let_go(r))
         grid.addWidget(slider, at, 1)
         self._finish(grid, at, label, row)
         row.put(getattr(settings, field))
@@ -317,6 +318,7 @@ class DspTab(QWidget):
                    readout)
         forced.toggled.connect(lambda _=False, r=row: self._changed(r))
         slider.valueChanged.connect(lambda _=0, r=row: self._changed(r))
+        slider.sliderReleased.connect(lambda r=row: self._let_go(r))
         grid.addWidget(holder, at, 1)
         self._finish(grid, at, "Blend", row)
         row.put(settings.force_blend_factor)
@@ -362,14 +364,46 @@ class DspTab(QWidget):
     # ------------------------------------------------------------------
 
     def _changed(self, row: _Row) -> None:
-        """One control moved: ask the receiver for that one change."""
+        """One control moved: ask the receiver for that one change.
+
+        A slider being dragged says so every step of the way, and
+        every step used to be a write and a log line on the
+        processing thread: one drag measured forty a second, the
+        SDR queue 42 blocks deep and the audio running dry.  While
+        the handle is down the readout follows the hand and nothing
+        else does; the value is applied when it is let go.
+        """
+        if self._settling:
+            return
+        if any(getattr(widget, "isSliderDown", bool)()
+               for widget in row.widgets):
+            row.put(row.read())         # the readout, and nothing else
+            return
+        self._ask_for(row)
+
+    def _let_go(self, row: _Row) -> None:
+        """A drag has finished: now the value is asked for."""
+        self._ask_for(row)
+
+    def _ask_for(self, row: _Row) -> None:
+        """Send this row's value, unless the slot already has it.
+
+        Unless, because the same value arrives more than once: Qt
+        emits sliderReleased when the handle goes up whether or not
+        it moved, and a release after a click that already applied
+        the value would write it again and put a second line in the
+        log for one change.
+        """
         if self._settling:
             return
         value = row.read()
+        if getattr(self._slots[self._slot], row.field) == value:
+            row.put(value)
+            return
         self._slots[self._slot] = replace(
             self._slots[self._slot], **{row.field: value})
         self.controller.update_dsp_settings(**{row.field: value})
-        row.put(value)                  # the readout, and nothing else
+        row.put(value)
 
     def _put_back(self, row: _Row) -> None:
         """This parameter, back to what the receiver started under."""

@@ -33,7 +33,7 @@ import sys
 import time
 import threading
 import logging
-from dataclasses import replace as dsp_replace
+from dataclasses import fields as dsp_fields, replace as dsp_replace
 from pathlib import Path
 
 import numpy as np
@@ -306,6 +306,17 @@ class _BlockProfiler:
 #: pipe, a Return into the console's own buffer - so this is only how
 #: long to wait before concluding that neither was available.
 READER_STOP_TIMEOUT_SEC: float = 1.0
+
+def _what_differs(was: DspSettings, now: DspSettings) -> str:
+    """The fields that are not the same, as name=value, or "nothing".
+
+    Comparing nine fields costs nothing against writing them.
+    """
+    said = ["%s=%s" % (f.name, getattr(now, f.name))
+            for f in dsp_fields(now)
+            if getattr(was, f.name) != getattr(now, f.name)]
+    return ", ".join(said) if said else "nothing"
+
 
 class RecordingsShut:
     """The recordings a tune has shut, and the finish they are owed.
@@ -1449,11 +1460,19 @@ class FMReceiverController:
         wanted = self._dsp_wanted
         if wanted is self._dsp_in_effect:
             return
+        was = self._dsp_in_effect
         dsp_apply(wanted, self.fm_demodulator)
         # After the apply, never before: the thread must not record
         # as running a set it has not finished writing.
         self._dsp_in_effect = wanted
-        self.logger.info("DSP settings changed to %s", wanted)
+        # What CHANGED, not all nine.  This line is written on the
+        # realtime thread, into a handler that writes a file and a
+        # console: the whole set came to 346 characters, and a
+        # dragged slider wrote forty of those a second until the SDR
+        # queue was 42 blocks deep and the audio ran dry.  A change
+        # is one field, and one field is forty characters.
+        self.logger.info("DSP settings changed: %s",
+                         _what_differs(was, wanted))
 
     def processing_thread(self) -> None:
         """Retrieve IQ samples from SDR, perform FM demodulation and audio conversion,
