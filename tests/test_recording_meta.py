@@ -3,6 +3,7 @@ and tests for reading the sidecars back (P5 PR-A)."""
 
 from __future__ import annotations
 
+import builtins
 import json
 import os
 import re
@@ -620,22 +621,31 @@ def test_the_same_part_named_twice(tmp_path):
 
 
 def test_two_spellings_of_one_name(tmp_path):
-    # Windows matches names without regard to case, so a.wav and
-    # A.wav are one file there and two seconds of audio would be
-    # measured from one second of it.  On a case-sensitive
-    # filesystem they really are two names and the second is simply
-    # not there.
+    # Whether a.wav and A.wav are one file is the filesystem's
+    # answer, not normcase's: Windows folds the case and says so
+    # through normcase, a case-insensitive APFS folds it and does
+    # not, and ext4 does not fold it at all.  So ask the filesystem
+    # what it did, and only then say which of the two checks should
+    # have caught it.
     _write_json(tmp_path / "case.json", _iq_meta(["a.wav", "A.wav"]))
     _write_wav(tmp_path / "a.wav", 48000)      # 1.0 s
 
     rec = read_sidecar(str(tmp_path / "case.json"))
-    if os.path.normcase("A.wav") == os.path.normcase("a.wav"):
-        assert rec.problem == "names A.wav as more than one part"
-        assert rec.audio_seconds is None
-    else:
+    upper = tmp_path / "A.wav"
+    if not upper.exists():
+        # Two names, and nothing behind the second one.
         assert rec.problem == ""
         assert rec.missing == ("A.wav",)
         assert rec.audio_seconds is None       # one part is missing
+        return
+
+    assert os.path.samefile(str(tmp_path / "a.wav"), str(upper))
+    assert rec.audio_seconds is None           # NOT 2.0
+    if os.path.normcase("A.wav") == os.path.normcase("a.wav"):
+        assert rec.problem == "names A.wav as more than one part"
+    else:
+        # The spelling check could not know; identity did.
+        assert rec.problem == "names one file as more than one part"
 
 
 def test_two_names_for_one_file(tmp_path):
@@ -803,3 +813,71 @@ def test_missing_parts_are_collected_even_when_there_is_a_problem(tmp_path):
     assert rec.missing == ("gone.wav",)
     assert rec.audio_seconds is None
     assert rec.complete is False
+
+
+def test_a_part_that_disappears_between_the_stat_and_the_open(tmp_path):
+    # Gone is gone.  Reporting it as present would have the row say
+    # nothing is missing about a file that is not there by the time
+    # the row is handed back.
+    _write_wav(tmp_path / "a.wav", 48000)
+    _write_json(tmp_path / "one.json", _iq_meta(["a.wav"]))
+
+    real_stat = os.stat
+    removed = []
+
+    def stat_then_remove(target, **kw):
+        found = real_stat(target, **kw)
+        if not removed and str(target).endswith("a.wav"):
+            removed.append(True)
+            os.remove(str(tmp_path / "a.wav"))
+        return found
+
+    os.stat = stat_then_remove
+    try:
+        rec = read_sidecar(str(tmp_path / "one.json"))
+    finally:
+        os.stat = real_stat
+
+    assert removed, "the stat hook never fired"
+    assert rec.missing == ("a.wav",)
+    assert rec.complete is False
+    assert rec.audio_seconds is None
+
+
+def test_a_close_that_fails_is_not_an_error(tmp_path):
+    # Some network filesystems fail a close.  This handle was only
+    # read from, so there is nothing to lose - and the answer was
+    # already worked out before the close, so letting the exception
+    # out would throw away a good measurement and break the promise
+    # not to raise.
+    _write_wav(tmp_path / "b.wav", 48000)      # 1.0 s
+    _write_json(tmp_path / "b.json", _iq_meta(["b.wav"]))
+
+    real_open = builtins.open
+
+    class ClosesBadly:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        def close(self):
+            self._inner.close()
+            raise OSError(5, "the share went away")
+
+    def open_that_closes_badly(target, mode="r", *a, **kw):
+        handle = real_open(target, mode, *a, **kw)
+        if "b" in mode and str(target).endswith("b.wav"):
+            return ClosesBadly(handle)
+        return handle
+
+    builtins.open = open_that_closes_badly
+    try:
+        rec = read_sidecar(str(tmp_path / "b.json"))   # must not raise
+    finally:
+        builtins.open = real_open
+
+    assert rec.problem == ""
+    assert rec.missing == ()
+    assert rec.audio_seconds == pytest.approx(1.0)

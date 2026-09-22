@@ -346,6 +346,13 @@ def _what_is_there(path: str) -> tuple[bool, tuple | None, float | None]:
     cannot be told from another - a filesystem that does not number
     its files reports inode 0, and a file that will not open cannot
     be asked at all; the caller decides what that is worth.
+
+    The open can fail two ways and they mean different things.  Gone
+    between the stat and the open is gone, and saying otherwise would
+    leave the caller reporting a part as present that is not there by
+    the time it answers.  Refused - no permission, a share that
+    dropped - is a file that exists and cannot be looked at, which is
+    "there, unidentified".
     """
     try:
         found = os.stat(path)
@@ -355,6 +362,8 @@ def _what_is_there(path: str) -> tuple[bool, tuple | None, float | None]:
         return False, None, None
     try:
         handle = open(path, "rb")
+    except (FileNotFoundError, NotADirectoryError):
+        return False, None, None
     except (OSError, ValueError):
         return True, None, None
     try:
@@ -365,7 +374,16 @@ def _what_is_there(path: str) -> tuple[bool, tuple | None, float | None]:
         identity = (held.st_dev, held.st_ino) if held.st_ino else None
         return True, identity, _seconds_of_wav(handle)
     finally:
-        handle.close()
+        # A close that fails is still a close, and this handle was
+        # only ever read from: there is no buffered write to lose and
+        # nothing to report.  Letting it out would be an exception
+        # from a function that promises not to raise, thrown after
+        # the answer was already worked out - some network
+        # filesystems fail a close that way.
+        try:
+            handle.close()
+        except (OSError, ValueError):
+            pass
 
 
 def _look_for_the_parts(
