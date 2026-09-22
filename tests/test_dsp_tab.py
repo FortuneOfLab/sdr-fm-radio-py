@@ -7,6 +7,7 @@ refuse is refused here too - without a receiver behind it.
 
 from __future__ import annotations
 
+import logging
 import math
 
 import pytest
@@ -17,7 +18,7 @@ from dataclasses import replace                                # noqa: E402
 
 from fm_radio.dsp_settings import MAX_MONO_DELAY_SAMPLES       # noqa: E402
 from fm_radio.gui.dsp_tab import (                             # noqa: E402
-    _BETA_MAX, _BETA_STEPS, _FRACTION_STEPS, DspTab,
+    SLOTS, _BETA_MAX, _BETA_STEPS, _FRACTION_STEPS, DspTab,
 )
 from test_gui_window import DSP_DEFAULTS, FakeController       # noqa: E402
 
@@ -278,3 +279,121 @@ def test_the_blend_slider_stays_out_of_reach_until_it_is_forced(tab):
     page.set_usable(False)
     page.set_usable(True)
     assert slider.isEnabled()
+
+
+# ----------------------------------------------------------------------
+# A and B
+# ----------------------------------------------------------------------
+
+def a_slot_button(page: DspTab, which: str):
+    """The radio button for a slot."""
+    for button in page._slot_buttons.buttons():
+        if button.text() == which:
+            return button
+    raise AssertionError("no button for slot %s" % which)
+
+
+def test_it_starts_on_a_with_b_at_the_defaults(tab):
+    """The first comparison anyone wants needs nothing set up."""
+    controller = FakeController()
+    controller.dsp_settings = replace(DSP_DEFAULTS, side_nr_alpha_floor=0.45)
+    page, _ = tab(controller)
+
+    assert page.slot() == "A"
+    assert page.showing()["side_nr_alpha_floor"] == pytest.approx(0.45)
+    assert page._slots["B"] == DSP_DEFAULTS
+    assert set(SLOTS) == {"A", "B"}
+
+
+def test_switching_slots_writes_the_whole_set_once(tab):
+    """A switch that arrived in pieces would have a block of neither."""
+    page, controller = tab()
+    row(page, "side_nr_alpha_floor").widgets[0].setValue(
+        int(0.55 * _FRACTION_STEPS))
+    updates_before = len(controller.dsp_updates)
+
+    a_slot_button(page, "B").setChecked(True)
+
+    assert page.slot() == "B"
+    assert controller.dsp_sets == [DSP_DEFAULTS]
+    assert len(controller.dsp_updates) == updates_before, (
+        "it switched one parameter at a time")
+    assert page.showing()["side_nr_alpha_floor"] == pytest.approx(
+        DSP_DEFAULTS.side_nr_alpha_floor)
+
+
+def test_the_slots_keep_their_own_settings(tab):
+    """Editing B does not touch A, and A comes back as it was."""
+    page, controller = tab()
+    row(page, "side_nr_alpha_floor").widgets[0].setValue(
+        int(0.55 * _FRACTION_STEPS))          # in A
+
+    a_slot_button(page, "B").setChecked(True)
+    row(page, "side_nr_alpha_floor").widgets[0].setValue(
+        int(0.20 * _FRACTION_STEPS))          # in B
+
+    assert page._slots["A"].side_nr_alpha_floor == pytest.approx(0.55)
+    assert page._slots["B"].side_nr_alpha_floor == pytest.approx(0.20)
+
+    a_slot_button(page, "A").setChecked(True)
+
+    assert page.showing()["side_nr_alpha_floor"] == pytest.approx(0.55)
+    assert controller.dsp_settings.side_nr_alpha_floor == pytest.approx(0.55)
+    assert controller.dsp_sets[-1] == page._slots["A"]
+
+
+def test_switching_does_not_write_the_controls_back(tab):
+    """Showing a slot raises every widget's signal; none is a change."""
+    page, controller = tab()
+    before = len(controller.dsp_updates)
+
+    a_slot_button(page, "B").setChecked(True)
+    a_slot_button(page, "A").setChecked(True)
+
+    assert len(controller.dsp_updates) == before, (
+        "the controls wrote themselves back as the slot was shown")
+    assert len(controller.dsp_sets) == 2
+
+
+def test_a_switch_says_in_the_log_which_slot_and_what_is_in_it(tab, caplog):
+    """The question a listening test ends on is "which one was that?"."""
+    page, _ = tab()
+    row(page, "side_nr_beta").widgets[0].setValue(15)      # 1.5 in A
+
+    with caplog.at_level(logging.INFO, logger="fm_receiver.gui"):
+        a_slot_button(page, "B").setChecked(True)
+        a_slot_button(page, "A").setChecked(True)
+
+    said = [r.getMessage() for r in caplog.records if "DSP slot" in r.getMessage()]
+    assert len(said) == 2
+    assert said[0].startswith("DSP slot B:")
+    assert "side_nr_beta=1.0" in said[0], said[0]
+    assert said[1].startswith("DSP slot A:")
+    assert "side_nr_beta=1.5" in said[1], said[1]
+    assert "subcarrier_phase_offset_rad=" in said[1], (
+        "the line has to say the whole set, not only what changed")
+
+
+def test_reset_all_leaves_the_other_slot_alone(tab):
+    """It is the other half of the comparison being made."""
+    page, _ = tab()
+    row(page, "side_nr_alpha_floor").widgets[0].setValue(
+        int(0.55 * _FRACTION_STEPS))                      # A
+    a_slot_button(page, "B").setChecked(True)
+    row(page, "side_nr_alpha_floor").widgets[0].setValue(
+        int(0.20 * _FRACTION_STEPS))                      # B
+
+    page._reset_all.click()
+
+    assert page._slots["B"] == DSP_DEFAULTS
+    assert page._slots["A"].side_nr_alpha_floor == pytest.approx(0.55), (
+        "Reset all emptied the slot it was not on")
+
+
+def test_the_switch_goes_dark_with_everything_else(tab):
+    page, _ = tab()
+
+    page.set_usable(False)
+
+    for button in page._slot_buttons.buttons():
+        assert not button.isEnabled()
