@@ -49,6 +49,7 @@ import json
 import logging
 import math
 import os
+import stat as stat_flags
 import wave
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -186,8 +187,13 @@ class Recording:
 
     @property
     def complete(self) -> bool:
-        """True when every part the sidecar names is on disk."""
-        return bool(self.parts) and not self.missing
+        """True when every part the sidecar names is on disk.
+
+        Never true of a row with a :attr:`problem`: a sidecar whose
+        part list could not be believed is not a recording anything
+        has all of.
+        """
+        return bool(self.parts) and not self.missing and not self.problem
 
     @property
     def duration_is_measured(self) -> bool:
@@ -248,30 +254,39 @@ def _a_time(value) -> datetime | None:
         return None
 
 
-def _named_parts(meta: dict) -> tuple[str, ...] | None:
-    """The part file names *meta* lists, base first, or None.
+def _named_parts(meta: dict) -> tuple[tuple[str, ...], str]:
+    """The part names *meta* lists, base first, and why they cannot be.
 
     ``parts`` is written when the session stops and is the whole
     story; ``file`` is written when it starts and names the base
     alone.  A session killed between the two has only ``file``, and
-    one part of it is better than none.
+    one part of it is better than none - but only when there is no
+    ``parts`` at all.  A ``parts`` that is present and wrong is not
+    an absent one: falling back to ``file`` would answer with the
+    first part of a rotated session as though it were all of it.
 
-    None means the ``parts`` list holds something that is not a name.
+    The same reasoning covers an entry that is not a string.
     Dropping that entry and keeping the rest is the worst answer
     available: the names that remain are all present, so the
     recording would be called complete and its length measured, when
     what the sidecar says is that there was another part and nothing
     here can find it.
+
+    The test is "a list of strings", not "a list of file names":
+    ``""`` and a name with a NUL in it are strings, and they get as
+    far as being looked for and not found.
     """
-    parts = meta.get("parts")
-    if isinstance(parts, list):
+    if "parts" in meta:
+        parts = meta["parts"]
+        if not isinstance(parts, list):
+            return (), "its parts are not a list"
         if not all(isinstance(p, str) for p in parts):
-            return None
-        return tuple(parts)
+            return (), "lists a part that is not a string"
+        return tuple(parts), ""
     base = meta.get("file")
     if isinstance(base, str):
-        return (base,)
-    return ()
+        return (base,), ""
+    return (), ""
 
 
 def _seconds_of_wav(path: str) -> float | None:
@@ -292,6 +307,69 @@ def _seconds_of_wav(path: str) -> float | None:
     if rate <= 0:
         return None
     return frames / float(rate)
+
+
+def _which_file(path: str) -> tuple | None:
+    """What file *path* is, or None if there is no plain file there.
+
+    Identity, not spelling.  Windows matches file names without
+    regard to case and ignores a trailing dot, so ``a.wav``,
+    ``A.wav`` and ``a.wav.`` are three names for one file - and
+    measuring that file once per name would make a one-second
+    recording three seconds long.  Device and inode are the same for
+    all three, and for a hard link or a symlink to it as well.
+
+    Filesystems that do not number their files report inode 0; there
+    the name is all there is to go on, and the caller's own check on
+    the names has already done what can be done.  Anything that is
+    not a plain file - a directory called ``a.wav``, a path with a
+    NUL in it - is nothing to measure and reads as absent.
+    """
+    try:
+        found = os.stat(path)
+    except (OSError, ValueError):
+        return None
+    if not stat_flags.S_ISREG(found.st_mode):
+        return None
+    if not found.st_ino:
+        return (os.path.normcase(path),)
+    return (found.st_dev, found.st_ino)
+
+
+def _look_for_the_parts(
+    here: str, parts: tuple[str, ...],
+) -> tuple[tuple[str, ...], tuple[float | None, ...], str]:
+    """Find *parts* beside *here*: (missing, lengths, problem).
+
+    Parts are looked for beside the sidecar, by base name.  The
+    writer only ever puts base names in, and taking the base name
+    rather than joining what is written means a sidecar carrying a
+    path cannot send this looking somewhere else on the disk.
+
+    Two names for one file is a problem rather than a measurement:
+    the writer never repeats a part, so a sidecar that does cannot be
+    believed about its parts at all.
+    """
+    missing: list[str] = []
+    lengths: list[float | None] = []
+    spellings: set[str] = set()
+    files: set[tuple] = set()
+    for name in parts:
+        base = os.path.basename(name)
+        spelling = os.path.normcase(base)
+        if spelling in spellings:
+            return (), (), f"names {base} as more than one part"
+        spellings.add(spelling)
+        beside = os.path.join(here, base)
+        which = _which_file(beside)
+        if which is None:
+            missing.append(name)
+            continue
+        if which in files:
+            return (), (), f"names one file as more than one part"
+        files.add(which)
+        lengths.append(_seconds_of_wav(beside))
+    return tuple(missing), tuple(lengths), ""
 
 
 def _unusable(path: str, problem: str) -> Recording:
@@ -315,17 +393,20 @@ def read_sidecar(path: str) -> Recording:
     """Read one ``.json`` sidecar and look for the audio it names.
 
     Never raises.  A file that is not there, is not JSON, or is JSON
-    that is not an object comes back as a :class:`Recording` with
-    :attr:`~Recording.problem` set and everything else empty.  A
-    sidecar that parses always comes back with ``problem == ""``,
-    however few of its keys are present: a key this does not
-    recognise is ignored, and a key it wants and does not find is
-    None.
+    that is not an object has nothing to say and comes back as a
+    :class:`Recording` with :attr:`~Recording.problem` set and
+    everything else empty.
 
-    Parts are looked for beside the sidecar, by base name.  The
-    writer only ever puts base names in, and taking the base name
-    rather than joining what is written means a sidecar carrying a
-    path cannot send this looking somewhere else on the disk.
+    A sidecar that parses as an object comes back with everything it
+    does say, however few of its keys are present: a key this does
+    not recognise is ignored, and an optional one it does not find
+    reads as None.  If what that object says about its *parts*
+    cannot be believed, the problem is on the row and the rest of the
+    row stands - the frequency, the gain and the timestamps were read
+    on their own and are no less true for it, and a row that lost its
+    start time would fall out of the ordering and could not be found
+    by when it was made.  Such a row is never
+    :attr:`~Recording.complete` and never carries a measured length.
     """
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -345,35 +426,21 @@ def read_sidecar(path: str) -> Recording:
             path, f"is not a JSON object but a {type(meta).__name__}",
         )
 
-    parts = _named_parts(meta)
-    if parts is None:
-        return _unusable(path, "lists a part that is not a file name")
-
-    here = os.path.dirname(path)
-    missing: list[str] = []
-    lengths: list[float | None] = []
-    seen: set[str] = set()
-    for name in parts:
-        base = os.path.basename(name)
-        # Two names resolving to one file would be measured twice and
-        # make a one-second recording two seconds long.  The writer
-        # never repeats a part, so a repeat is a sidecar that cannot
-        # be believed about its parts at all.
-        if base in seen:
-            return _unusable(path, f"names {base} as more than one part")
-        seen.add(base)
-        beside = os.path.join(here, base)
-        if os.path.isfile(beside):
-            lengths.append(_seconds_of_wav(beside))
-        else:
-            missing.append(name)
+    parts, problem = _named_parts(meta)
+    missing: tuple[str, ...] = ()
+    lengths: tuple[float | None, ...] = ()
+    if not problem:
+        missing, lengths, problem = _look_for_the_parts(
+            os.path.dirname(path), parts,
+        )
 
     # Only a complete set of readable headers adds up to the length of
     # the recording.  Summing what is left of a session whose other
     # parts have been deleted would report a fraction as though it
     # were the whole, which is worse than saying nothing and falling
     # back to the clock.
-    if parts and not missing and all(s is not None for s in lengths):
+    if (not problem and parts and not missing
+            and all(s is not None for s in lengths)):
         audio_seconds = float(sum(lengths))
     else:
         audio_seconds = None
@@ -399,7 +466,7 @@ def read_sidecar(path: str) -> Recording:
         sidecar=path,
         kind=kind if isinstance(kind, str) else "",
         parts=parts,
-        missing=tuple(missing),
+        missing=missing,
         sample_rate_hz=_a_whole_number(meta.get("sample_rate_hz")),
         center_freq_hz=_a_number(meta.get("center_freq_hz")),
         gain_db=_a_number(meta.get("gain_db")),
@@ -409,7 +476,7 @@ def read_sidecar(path: str) -> Recording:
         dropped=dropped,
         audio_seconds=audio_seconds,
         wall_seconds=wall_seconds,
-        problem="",
+        problem=problem,
     )
 
 
@@ -459,6 +526,15 @@ def scan_recordings(directory: str) -> list[Recording]:
     A directory that does not exist is not an error; glob finds
     nothing in it and the answer is an empty list, which is what a
     fresh checkout should get.
+
+    Glob itself can still raise, which is why it is guarded: a
+    directory name with a NUL in it reaches os.scandir and comes back
+    as ValueError, not as no matches.  That guard was here, taken out
+    in review as unreachable because a directory that is merely
+    absent does not raise, and put back when this one turned up.
     """
-    found = glob.glob(os.path.join(directory, "*.json"))
+    try:
+        found = glob.glob(os.path.join(directory, "*.json"))
+    except (OSError, ValueError):
+        return []
     return sorted((read_sidecar(p) for p in found), key=_newest_first)

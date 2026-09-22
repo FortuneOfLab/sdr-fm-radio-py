@@ -552,11 +552,16 @@ def test_a_parts_list_holding_something_that_is_not_a_name(tmp_path):
     _write_wav(tmp_path / "a.wav", 48000)    # 1.0 s, and present
 
     rec = read_sidecar(str(tmp_path / "mixed.json"))
-    assert rec.problem == "lists a part that is not a file name"
+    assert rec.problem == "lists a part that is not a string"
     assert rec.parts == ()
     assert rec.complete is False
     assert rec.audio_seconds is None
-    assert rec.duration_s is None
+    # The row keeps what it could read on its own, so it can still be
+    # found by when it was made and what it was tuned to.
+    assert rec.center_freq_hz == pytest.approx(91.6e6)
+    assert rec.started_at is not None
+    assert rec.duration_s == pytest.approx(120.0)
+    assert rec.duration_is_measured is False
 
 
 def test_two_part_names_that_are_one_file(tmp_path):
@@ -569,3 +574,102 @@ def test_two_part_names_that_are_one_file(tmp_path):
     assert rec.problem == "names a.wav as more than one part"
     assert rec.audio_seconds is None
     assert rec.complete is False
+
+
+# --- Round 3: parts that cannot be believed (PR #70, second review) ---
+
+
+def test_a_parts_that_is_not_a_list_does_not_fall_back_to_file(tmp_path):
+    # "parts" present and wrong is not "parts" absent.  Falling back
+    # to "file" would answer with the base of a rotated session as
+    # though it were all of it: a.wav is there, so the recording
+    # would come back complete and one second long.
+    _write_json(tmp_path / "bad.json", {
+        "type": "iq", "file": "a.wav", "parts": 5,
+        "center_freq_hz": 91.6e6, "gain_db": 8.7,
+        "started_at": _STARTED, "stopped_at": _STOPPED,
+    })
+    _write_wav(tmp_path / "a.wav", 48000)      # 1.0 s, and present
+
+    rec = read_sidecar(str(tmp_path / "bad.json"))
+    assert rec.problem == "its parts are not a list"
+    assert rec.parts == ()
+    assert rec.complete is False
+    assert rec.audio_seconds is None
+    # ...and everything read on its own still stands, so the row can
+    # be found by when it was made and what it was tuned to.
+    assert rec.center_freq_hz == pytest.approx(91.6e6)
+    assert rec.gain_db == pytest.approx(8.7)
+    assert rec.kind == "iq"
+    assert rec.started_at is not None
+    assert rec.duration_s == pytest.approx(120.0)
+    assert rec.duration_is_measured is False
+
+
+def test_the_same_part_named_twice(tmp_path):
+    _write_json(tmp_path / "twice.json", _iq_meta(["a.wav", "a.wav"]))
+    _write_wav(tmp_path / "a.wav", 48000)      # 1.0 s
+
+    rec = read_sidecar(str(tmp_path / "twice.json"))
+    assert rec.problem == "names a.wav as more than one part"
+    assert rec.audio_seconds is None
+    # Both names are present, so only the problem keeps this from
+    # calling itself complete.
+    assert rec.missing == ()
+    assert rec.complete is False
+
+
+def test_two_spellings_of_one_name(tmp_path):
+    # Windows matches names without regard to case, so a.wav and
+    # A.wav are one file there and two seconds of audio would be
+    # measured from one second of it.  On a case-sensitive
+    # filesystem they really are two names and the second is simply
+    # not there.
+    _write_json(tmp_path / "case.json", _iq_meta(["a.wav", "A.wav"]))
+    _write_wav(tmp_path / "a.wav", 48000)      # 1.0 s
+
+    rec = read_sidecar(str(tmp_path / "case.json"))
+    if os.path.normcase("A.wav") == os.path.normcase("a.wav"):
+        assert rec.problem == "names A.wav as more than one part"
+        assert rec.audio_seconds is None
+    else:
+        assert rec.problem == ""
+        assert rec.missing == ("A.wav",)
+        assert rec.audio_seconds is None       # one part is missing
+
+
+def test_two_names_for_one_file(tmp_path):
+    # Spelled differently, folded differently, and still one file:
+    # a hard link has its own name and the same inode.  Caught by
+    # identity, which is what a trailing dot on Windows needs too.
+    _write_wav(tmp_path / "a.wav", 48000)      # 1.0 s
+    try:
+        os.link(str(tmp_path / "a.wav"), str(tmp_path / "b.wav"))
+    except (OSError, NotImplementedError, AttributeError) as e:
+        pytest.skip(f"this filesystem has no hard links: {e}")
+    _write_json(tmp_path / "linked.json", _iq_meta(["a.wav", "b.wav"]))
+
+    rec = read_sidecar(str(tmp_path / "linked.json"))
+    assert rec.problem == "names one file as more than one part"
+    assert rec.audio_seconds is None
+    assert rec.complete is False
+
+
+def test_a_part_name_that_is_a_string_but_not_a_file_name(tmp_path):
+    # The test is "a list of strings", not "a list of file names":
+    # these get as far as being looked for and not found, which is a
+    # missing part, not a broken sidecar.
+    for name, part in (("empty", ""), ("nul", "bad\x00.wav")):
+        _write_json(tmp_path / (name + ".json"), _iq_meta([part]))
+        rec = read_sidecar(str(tmp_path / (name + ".json")))
+        assert rec.problem == ""
+        assert rec.parts == (part,)
+        assert rec.missing == (part,)
+        assert rec.complete is False
+
+
+def test_scan_of_a_directory_name_the_platform_will_not_take(tmp_path):
+    # glob reaches os.scandir, which raises ValueError on a NUL
+    # rather than returning no matches.
+    assert scan_recordings("\x00") == []
+    assert scan_recordings(str(tmp_path) + "\x00") == []
