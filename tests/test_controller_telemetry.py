@@ -9,6 +9,7 @@ the DSP.
 from __future__ import annotations
 
 import contextlib
+import logging
 import sys
 import threading
 import time
@@ -989,3 +990,43 @@ def test_a_tune_does_not_stop_the_output(receiver, monkeypatch):
         "the retune stopped the card, which costs more than it saves")
     assert receiver.audio_output._playing is True
     assert receiver.audio_output.held is False
+
+
+def test_the_thread_says_what_stalled_it_on_the_way_down(receiver,
+                                                         monkeypatch,
+                                                         caplog):
+    """A stall in the last seconds has no next line to wait for.
+
+    The slow-block line is one every five seconds, so a stall that
+    is held back when the receiver stops would go down with the
+    thread - and it is the one a listener who has just given up and
+    closed the window would want to read about.
+    """
+    demod = receiver.fm_demodulator
+    real = demod.demodulate
+    stalls = []
+
+    def sometimes_slow(composite):
+        if len(stalls) < 2:
+            stalls.append(True)
+            # Busy, not asleep: this is the block being slow, which
+            # is the thing under test, and sleeping would not count
+            # towards the block time any differently.
+            until = time.perf_counter() + 0.025
+            while time.perf_counter() < until:
+                pass
+        return real(composite)
+
+    monkeypatch.setattr(demod, "demodulate", sometimes_slow)
+
+    with caplog.at_level(logging.INFO, logger=receiver.logger.name):
+        run_blocks(receiver, 3)
+
+    said = [r.getMessage() for r in caplog.records]
+    assert len(stalls) == 2, "the blocks were not made slow"
+    assert sum(1 for m in said if "SLOW BLOCK" in m) >= 2, (
+        "the second stall was never reported")
+    stopped = next(i for i, m in enumerate(said)
+                   if "Processing thread stopped" in m)
+    assert "SLOW BLOCK" in said[stopped - 1], (
+        "the stall held back when the thread stopped went down with it")

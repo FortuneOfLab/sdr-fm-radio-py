@@ -241,3 +241,70 @@ def test_the_queue_is_said_in_this_mode_s_seconds(caplog):
     behind = lines(caplog, "FALLING BEHIND")
     assert len(behind) == 1
     assert "1.3s deep" in behind[0], behind[0]
+
+
+def test_a_stall_is_let_out_by_the_blocks_that_follow_it(profiling):
+    """The blocks after a stall are the quick ones.
+
+    Waiting for the next SLOW block to carry it out could be a long
+    wait on a receiver that has recovered, and the sixty-second
+    summary is a long way off.
+    """
+    profiler, clock, caplog = profiling
+    the_stall = (0.0, 0.001, 0.002, 0.400, 0.0)
+
+    profiler.record(SLOW, q_depth=0)            # uses up the line
+    clock.on(0.1)
+    profiler.record(0.404, q_depth=4, stage_times=the_stall)
+    assert len(lines(caplog, "SLOW BLOCK")) == 1, "held back for now"
+
+    clock.on(_SLOW_BLOCK_LOG_INTERVAL_SEC)
+    for _ in range(3):
+        profiler.record(QUICK, q_depth=0)       # nothing slow about these
+        clock.on(0.016)
+
+    said = lines(caplog, "SLOW BLOCK")
+    assert len(said) == 2, "the quick blocks let it out"
+    assert "enqueue:400.0" in said[1]
+
+
+def test_a_stall_is_let_out_when_the_blocks_stop_coming(profiling):
+    """No block at all is the other way a stall gets stranded."""
+    profiler, clock, caplog = profiling
+    the_stall = (0.0, 0.001, 0.002, 0.400, 0.0)
+
+    profiler.record(SLOW, q_depth=0)
+    clock.on(0.1)
+    profiler.record(0.404, q_depth=4, stage_times=the_stall)
+
+    clock.on(1.0)
+    profiler.say_anything_held_back()           # a second with no block
+    assert len(lines(caplog, "SLOW BLOCK")) == 1, "not due yet"
+
+    clock.on(_SLOW_BLOCK_LOG_INTERVAL_SEC)
+    profiler.say_anything_held_back()
+
+    said = lines(caplog, "SLOW BLOCK")
+    assert len(said) == 2
+    assert "enqueue:400.0" in said[1]
+
+
+def test_the_last_stall_is_let_out_on_the_way_down(profiling):
+    """A receiver shutting down has no next line to wait for."""
+    profiler, clock, caplog = profiling
+    the_stall = (0.0, 0.001, 0.002, 0.400, 0.0)
+
+    profiler.record(SLOW, q_depth=0)
+    clock.on(0.1)
+    profiler.record(0.404, q_depth=4, stage_times=the_stall)
+    assert len(lines(caplog, "SLOW BLOCK")) == 1
+
+    profiler.say_anything_held_back(force=True)
+
+    said = lines(caplog, "SLOW BLOCK")
+    assert len(said) == 2, "the stall went down with the thread"
+    assert "enqueue:400.0" in said[1]
+
+    # And nothing is said twice.
+    profiler.say_anything_held_back(force=True)
+    assert len(lines(caplog, "SLOW BLOCK")) == 2

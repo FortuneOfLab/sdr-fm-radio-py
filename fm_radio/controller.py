@@ -192,6 +192,25 @@ class _BlockProfiler:
         """Whether a line of this kind may be written now."""
         return last is None or now - last >= every
 
+    def say_anything_held_back(self, force: bool = False) -> None:
+        """Write the line for a stall that nothing has followed yet.
+
+        Called after every block, from the loop when no block
+        arrives, and once more when the processing thread stops -
+        that last one with ``force``, because a receiver that is
+        shutting down has no next line to wait for and the stage
+        breakdown would go with it.
+
+        Args:
+            force: write it whether or not a line is due.
+        """
+        if self._worst is None:
+            return
+        now = self._clock()
+        if force or self._due(self._t_last_slow_line, now,
+                              _SLOW_BLOCK_LOG_INTERVAL_SEC):
+            self._say_the_worst(now)
+
     def _say_the_worst(self, now: float) -> None:
         """Write the line for the worst block held back so far."""
         dt_sec, q_depth, when, stage_times = self._worst
@@ -251,16 +270,18 @@ class _BlockProfiler:
             self._tot_slow_blocks += 1
             if self._worst is None or dt_sec > self._worst[0]:
                 self._worst = (dt_sec, q_depth, elapsed, stage_times)
-            if self._due(self._t_last_slow_line, now,
-                         _SLOW_BLOCK_LOG_INTERVAL_SEC):
-                self._say_the_worst(now)
+
+        # Whatever this block was: a stall waits for the next line to
+        # be due, and the blocks after a stall are usually the quick
+        # ones.  Waiting for the next SLOW one could be a long wait,
+        # or for ever.
+        self.say_anything_held_back()
 
         if now - self._t_last_summary >= _PROFILE_SUMMARY_INTERVAL_SEC:
             # Before the summary, so that a stall nothing has
             # reported yet is not left to the summary's max= alone,
             # which says how long and nothing about where.
-            if self._worst is not None:
-                self._say_the_worst(now)
+            self.say_anything_held_back(force=True)
             blocks = max(self._win_blocks, 1)
             avg_ms = self._win_sum_dt * 1000.0 / blocks
             elapsed = now - self._t0_session
@@ -1458,6 +1479,10 @@ class FMReceiverController:
                     generation, iq_samples = self.sdr_receiver.data_queue.get(
                         timeout=1)
                 except queue.Empty:
+                    # A second with no block is a second in which a
+                    # stall held back for the next line would wait
+                    # for a block that may not come.
+                    profiler.say_anything_held_back()
                     continue
                 except Exception as e:
                     self.logger.error(f"Error getting IQ samples from queue: {e}")
@@ -1541,6 +1566,11 @@ class FMReceiverController:
         except Exception as e:
             self.logger.critical(f"Fatal error in processing thread: {e}", exc_info=True)
         finally:
+            # Before the "stopped" line: a stall in the last few
+            # seconds has nothing left to wait for, and it is the
+            # one a listener who has just given up and closed the
+            # window would want to read about.
+            profiler.say_anything_held_back(force=True)
             self.logger.info("Processing thread stopped")
 
     def start_background(self) -> None:
