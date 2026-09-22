@@ -9,6 +9,7 @@ unexpected write errors.
 
 from __future__ import annotations
 
+import logging
 import os
 import queue
 import struct
@@ -245,6 +246,57 @@ def test_underruns_accumulate(audio_output):
     drain_into_buffer(audio_output, 192)
     audio_output.callback(None, 384, {}, 0)
     assert audio_output.underruns == 2
+
+
+def underrun_lines(caplog):
+    """The log lines that say the output ran dry."""
+    return [r for r in caplog.records
+            if "Audio buffer underrun" in r.getMessage()]
+
+
+def test_an_underrun_says_so_in_the_log(audio_output, caplog):
+    """At INFO, which is the level a run is recorded at.
+
+    The counter on the screen is no use for working out WHEN the
+    radio was interrupted, and at DEBUG the line never reached a
+    log recorded with --log-file: 72 underruns on the screen and
+    nothing in the file.
+    """
+    with caplog.at_level(logging.INFO, logger="fm_receiver.AudioOutput"):
+        audio_output.callback(None, 384, {}, 0)
+
+    said = underrun_lines(caplog)
+    assert len(said) == 1
+    assert said[0].levelno == logging.INFO
+    assert "768 of 768 frames" in said[0].getMessage()
+
+
+def test_a_flood_of_underruns_is_one_line_carrying_the_count(audio_output,
+                                                             caplog):
+    """Fifty a second is not fifty lines a second - but none are lost.
+
+    The line is rate limited, and the next one to come out says how
+    many there have been since the last, so the log accounts for
+    every underrun the counter did.
+    """
+    with caplog.at_level(logging.INFO, logger="fm_receiver.AudioOutput"):
+        for _ in range(4):
+            audio_output.callback(None, 384, {}, 0)
+        assert len(underrun_lines(caplog)) == 1, "one line per interval"
+
+        # The interval has passed.  Moving the clock rather than
+        # waiting on it: five seconds of test time for a line that
+        # says the same thing either way.
+        audio_output._underrun_last_logged -= (
+            ao_mod._UNDERRUN_LOG_INTERVAL_SEC + 1.0)
+        audio_output.callback(None, 384, {}, 0)
+
+    said = underrun_lines(caplog)
+    assert len(said) == 2
+    assert "4 since" in said[1].getMessage(), (
+        "the second line has to account for the three it did not print "
+        "and itself, not just for itself")
+    assert audio_output.underruns == 5
 
 
 def test_a_dropped_block_is_counted(audio_output, monkeypatch):

@@ -292,7 +292,15 @@ class AudioOutput(AudioOutputInterface):
                     since = self._underrun_count - self._underrun_logged_at
                     self._underrun_last_logged = now
                     self._underrun_logged_at = self._underrun_count
-                    self.logger.debug(
+                    # INFO, not DEBUG: this is the one line that
+                    # says the radio was audibly interrupted.  A run
+                    # recorded with --log-file, which is INFO, had 72
+                    # underruns on the screen and not one line about
+                    # them in the file.  It is rate limited to one
+                    # per _UNDERRUN_LOG_INTERVAL_SEC and carries how
+                    # many there have been since, so a bad stretch
+                    # is a line every five seconds and not a flood.
+                    self.logger.info(
                         "Audio buffer underrun (%d of %d frames; %d since "
                         "the last of these)",
                         requested_samples - filled, requested_samples, since)

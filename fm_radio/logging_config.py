@@ -33,6 +33,13 @@ import logging
 def setup_logging(log_level: int = logging.INFO, log_file: str | None = None) -> None:
     """Setup logging configuration for the FM receiver system.
 
+    The file is written as UTF-8 whatever the console is.  Left to
+    Python it takes the platform encoding, which on this machine is
+    cp932: a log full of station names, areas and site names, and
+    ``This looks like 関東`` unreadable in every editor that opens
+    the file as UTF-8.  The console handler keeps the platform
+    encoding, because that is what the console can display.
+
     Args:
         log_level: Logging level (default: INFO).
         log_file: Optional log file path. If None, logs to console only.
@@ -41,7 +48,7 @@ def setup_logging(log_level: int = logging.INFO, log_file: str | None = None) ->
     handlers: list[logging.Handler] = [logging.StreamHandler()]
 
     if log_file:
-        handlers.append(logging.FileHandler(log_file))
+        handlers.append(logging.FileHandler(log_file, encoding="utf-8"))
 
     logging.basicConfig(
         level=log_level,
