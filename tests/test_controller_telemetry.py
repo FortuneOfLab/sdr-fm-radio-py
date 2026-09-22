@@ -953,3 +953,39 @@ def test_a_picture_that_cannot_be_built_does_not_stop_the_block(receiver):
     run_blocks(receiver, 2)
 
     assert receiver.get_status() is not None, "the block died with the picture"
+
+
+# ----------------------------------------------------------------------
+# The output across a retune
+# ----------------------------------------------------------------------
+
+def test_a_tune_does_not_stop_the_output(receiver, monkeypatch):
+    """A retune costs an underrun, and stopping the card costs more.
+
+    A band scan holds the output for its whole length; a retune does
+    not.  PortAudio's stop plays out what the card is holding first -
+    101 to 110 ms on this device - and a retune only loses about one
+    underrun's worth of audio, 21 ms, at the moment the station
+    changes anyway.  Asked from inside set_center_frequency, which is
+    the write the gap is made of.
+    """
+    held_during = []
+    real = receiver.sdr_receiver.set_center_frequency
+
+    def watched(freq_hz):
+        held_during.append(receiver.audio_output.held)
+        return real(freq_hz)
+
+    monkeypatch.setattr(receiver.sdr_receiver, "set_center_frequency",
+                        watched)
+
+    run_blocks(receiver, 4)
+    assert receiver.audio_output._playing is True, (
+        "the output never started, so there is nothing to keep playing")
+
+    tuned(receiver, 80.1e6)
+
+    assert held_during == [False], (
+        "the retune stopped the card, which costs more than it saves")
+    assert receiver.audio_output._playing is True
+    assert receiver.audio_output.held is False

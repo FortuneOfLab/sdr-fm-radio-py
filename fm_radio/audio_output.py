@@ -167,6 +167,20 @@ class AudioOutput(AudioOutputInterface):
         # matters; the lines are a sample of it.
         self._underrun_last_logged: float = 0.0
         self._underrun_logged_at: int = 0
+        # How many holds are in force; see hold().  Written under
+        # _play_lock, read from the realtime path, where a stale read
+        # costs one block either way.
+        self._holds: int = 0
+        # Whether the stream was actually stopped for the hold in
+        # force.  A stop that PortAudio refused leaves the card
+        # playing, and audio has to keep reaching it or the hold is
+        # a silence with underruns in it - which is worse than the
+        # gap it was meant to cover.
+        self._holding_stopped: bool = False
+        # Blocks dropped because the output was held, counted so that
+        # the log can say how long a hold lasted in blocks rather
+        # than only in seconds.
+        self._held_drop_count: int = 0
         # Set for as long as a recording is being closed: the flag above
         # goes down first and the file stays open for the flush, the
         # worker handshake, the close and the sidecar - up to fifteen
@@ -350,6 +364,151 @@ class AudioOutput(AudioOutputInterface):
             held = AUDIO_CARD_BUFFER_MAX_SEC
         return int(round(held * self.output_rate))
 
+    def hold(self) -> None:
+        """Stop playing: nothing worth hearing is coming for a while.
+
+        For a gap the receiver knows about in advance - a band scan,
+        the moment of a retune - rather than for one it discovers by
+        running dry.  The stream is stopped so the card stops asking
+        (a card asking into an empty queue is an underrun a buffer,
+        and a 4.3 s scan measured 68 of them), what is queued is
+        dropped because it belongs to where the receiver was, and
+        the preroll is re-armed: when audio comes back it is played
+        from behind a cushion again, the way it is at startup, and
+        not handed to a card that is already waiting for it.
+
+        Holds are counted rather than a flag, so that two callers
+        cannot end each other's hold: the output plays again when the
+        last one has been let go.  Today the band scan is the only
+        caller - a retune does not hold, because PortAudio's stop
+        costs more than the retune loses; see
+        FMReceiverController._tune_now.
+
+        Recording is not affected: that path takes the audio before
+        this one.
+
+        Three steps, because the middle one is slow:
+
+        1. The count goes up, under ``_play_lock``.  Nothing else
+           needs to be excluded here: audio still flows until step
+           3, because the card is still playing it.
+
+        2. The card is stopped, under ``_play_lock`` alone.  This is
+           the slow part: ``stop_stream()`` is PortAudio's graceful
+           stop, which plays out what the card is already holding -
+           measured 101, 109 and 110 ms against the 106.7 ms this
+           device reports as its output latency.  No lock the
+           realtime path needs is held across it: it takes
+           ``_play_lock`` only in ``_play_from_now_on``, and it
+           cannot reach that while the card is still marked playing.
+
+        3. What is queued is dropped and the preroll is re-armed,
+           under ``_close_lock`` and then ``_play_lock`` - the order
+           the enqueue path takes them in, so there is no cycle.
+           Only now is the output marked held for that path, and
+           because ``_enqueue_locked`` reads the mark and puts under
+           the same ``_close_lock``, no block can pass the mark and
+           then land behind the draining.  This is where the whole
+           race lives; steps 1 and 2 change nothing the enqueue path
+           looks at.
+
+        The log line is written after all three, because a handler
+        writes to a file.
+
+        A stop the card refuses stops at step 2: the hold stands, so
+        that it still pairs with its resume, but the audio goes on
+        reaching the card, because dropping blocks into a stream
+        that never stopped is a silence with underruns in it.
+        """
+        with self._play_lock:
+            self._holds += 1
+            if self._holds > 1:
+                return
+        stopped, was_playing = self._stop_the_card()
+        if not stopped:
+            return
+        self._empty_what_is_between()
+        if was_playing:
+            self.logger.info("Audio output held")
+
+    def resume(self) -> None:
+        """Let the output play again, once it has a cushion.
+
+        The stream is not started here - the next blocks to arrive
+        do that, when there are enough of them, through the same
+        path as at startup.
+        """
+        with self._play_lock:
+            if self._holds == 0:
+                # Nothing is broken by one resume too many, but it
+                # means a hold somewhere was not paired and the next
+                # one will not stop anything.
+                self.logger.warning("The audio output was let go twice")
+                return
+            self._holds -= 1
+            if self._holds:
+                return
+            self._holding_stopped = False
+            dropped, self._held_drop_count = self._held_drop_count, 0
+        if dropped:
+            self.logger.info("Audio output let go after %d blocks held",
+                             dropped)
+
+    @property
+    def held(self) -> bool:
+        """Whether the output is being held; see :meth:`hold`."""
+        return self._holds > 0
+
+    def _stop_the_card(self) -> "tuple[bool, bool]":
+        """Ask PortAudio to stop the stream.  Step 2 of :meth:`hold`.
+
+        A stop that FAILED changes nothing: PortAudio calls a stream
+        stopped once Pa_StopStream has returned successfully, and
+        until then the callback may still be running - clearing its
+        deque underneath it, or starting a stream that never
+        stopped, is worse than not holding at all.
+
+        Returns:
+            Whether the card is now stopped, and whether it had been
+            playing (for a caller that wants to say so).
+        """
+        with self._play_lock:
+            if not self._playing:
+                return True, False
+            try:
+                self.stream.stop_stream()
+            except Exception as trouble:       # pragma: no cover - guard
+                self.logger.error(
+                    "Could not stop the audio stream, so it keeps playing "
+                    "through this: %s", trouble, exc_info=True)
+                return False, True
+            self._playing = False
+            return True, True
+
+    def _empty_what_is_between(self) -> None:
+        """Drop what is queued and re-arm the preroll.  Step 3 of hold().
+
+        Under ``_close_lock`` then ``_play_lock``, so that the mark
+        this sets and the draining it does cannot be straddled by a
+        block on its way in: the enqueue path reads the mark and puts
+        under that same ``_close_lock``.
+
+        The deque is the callback's own, and is touched here because
+        the card has stopped by now: PortAudio does not call back
+        into a stopped stream.
+        """
+        with self._close_lock:
+            with self._play_lock:
+                self._holding_stopped = True
+                self._frames_ready = 0
+                self._buffer_deque.clear()
+                self._buffer_len = 0
+                while True:
+                    try:
+                        self.audio_buffer_queue.get_nowait()
+                    except queue.Empty:
+                        break
+
     def _play_from_now_on(self) -> None:
         """Start the stream, now that there is enough to play.
 
@@ -363,7 +522,7 @@ class AudioOutput(AudioOutputInterface):
         stopped stream, and only one of them should start it.
         """
         with self._play_lock:
-            if self._playing or self._closed.is_set():
+            if self._playing or self._closed.is_set() or self._holds:
                 return
             try:
                 self.stream.start_stream()
@@ -392,6 +551,20 @@ class AudioOutput(AudioOutputInterface):
 
     def _enqueue_locked(self, left: np.ndarray, right: np.ndarray) -> None:
         """Body of :meth:`enqueue_audio`; caller holds ``_close_lock``."""
+        if self._holds and self._holding_stopped:
+            # Dropped rather than queued: it is the audio of a scan
+            # hop, and queueing it would both play it when the hold
+            # ends and fill the cushion with it.  Not counted as a
+            # dropped block - that counter means the queue was full,
+            # which is a fault, and this is not.
+            #
+            # Only when the card really did stop.  If it would not,
+            # the hold stands but the audio keeps flowing, which is
+            # what the receiver did before any of this; dropping it
+            # into a card that is still playing would make the hold
+            # a silence full of underruns.
+            self._held_drop_count += 1
+            return
         try:
             left32 = np.asarray(left, dtype=np.float32, copy=False)
             right32 = np.asarray(right, dtype=np.float32, copy=False)

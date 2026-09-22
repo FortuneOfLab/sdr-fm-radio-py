@@ -620,6 +620,18 @@ class FMReceiverController:
         what "Resampler history no longer covers pending output" means.
         The generation on each block tells that thread when the station
         has changed; it resets its own demodulator then.
+
+        The output is NOT held across the write, although a band
+        scan holds for its whole length.  A retune costs about one
+        underrun, 21 ms of silence at the moment the station changes
+        anyway, and holding would cost more than it saves:
+        PortAudio's stop is graceful, so it plays out what the card
+        is already holding - measured 101, 109 and 110 ms against
+        this device's 106.7 ms of output latency - and every step of
+        the tuning would wait for it.  The seven seconds of ordinary
+        listening after a scan in that same run had no underruns at
+        all, so the cushion a retune loses is not one the receiver
+        was found to need.
         """
         shut = RecordingsShut(self.audio_output, self.sdr_receiver,
                               self.logger)
