@@ -1473,7 +1473,12 @@ def _check_the_ranges(args) -> None:
     the same spelling for all of them: NaN for the four that have no
     out-of-band value of their own, a negative number for the delay
     and the blend, which do.  Only that one passes; the other is a
-    value like any other, and an infinity is nobody's sentinel.
+    value like any other.  So an infinity is refused where NaN is the
+    sentinel, and -inf is the sentinel where a negative number is -
+    ``--fixed-blend=-inf`` is the adaptive blend, as every negative
+    number has always been.  What is refused for the blend is NaN,
+    which is neither negative nor something np.clip can put into
+    0..1.
 
     Raises:
         SystemExit: naming the argument, the range and the value.

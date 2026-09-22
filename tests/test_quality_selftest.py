@@ -786,6 +786,39 @@ def test_an_infinite_blend_is_still_clipped_rather_than_refused():
     assert capture(demod).force_blend_factor == pytest.approx(1.0)
 
 
+def test_a_negative_infinity_blend_is_the_adaptive_one(monkeypatch):
+    """--fixed-blend=-inf means what every negative number means.
+
+    Codex, third round: the specification said an infinity is nobody's
+    sentinel, and for this argument that is not true - the rule is
+    "negative means adaptive", and -inf is negative.  Kept, because
+    the rule is the pre-existing one and it is `main`'s too; the
+    documentation is what was wrong.  Checked at the boundary that
+    decides it, with the evaluation stubbed out.
+    """
+    import sys
+    import fm_radio.quality_selftest as qs
+    from fm_radio.quality_selftest import _check_the_ranges
+
+    _check_the_ranges(_the_arguments(fixed_blend=float("-inf")))
+
+    captured = []
+    _spy_eval(monkeypatch, captured)
+    monkeypatch.setattr(sys, "argv", [
+        "quality_selftest", "--duration", "1", "--fixed-blend=-inf",
+    ])
+    qs.main()
+    assert captured[0]["fixed_blend"] is None, "-inf stopped being adaptive"
+
+    captured.clear()
+    monkeypatch.setattr(sys, "argv", [
+        "quality_selftest", "--duration", "1", "--fixed-blend=inf",
+    ])
+    qs.main()
+    assert captured[0]["fixed_blend"] == float("inf"), (
+        "a positive infinity is a blend to be clipped, not a sentinel")
+
+
 def test_main_checks_the_ranges_before_it_builds_anything(monkeypatch):
     """The check is wired into main, and reached before the work."""
     import fm_radio.quality_selftest as qs
