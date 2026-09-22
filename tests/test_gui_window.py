@@ -11,15 +11,33 @@ Qt runs offscreen (see the ``qt_app`` fixture), so these need no display.
 from __future__ import annotations
 
 import logging
+import math
 import sys
 import threading
 import time
 import traceback
+from dataclasses import replace
 
 import pytest
 
+from fm_radio.dsp_settings import DspSettings
 from fm_radio.multipath import CLEAN_AM_DEPTH, NOISE_AM_DEPTH
 from fm_radio.telemetry import SILENCE_DBFS, StatusSnapshot
+
+#: What a receiver would hand the settings tab as its defaults.  A
+#: real DspSettings, so the tab's conversions meet the real thing,
+#: with the standard chain's subcarrier phase.
+DSP_DEFAULTS = DspSettings(
+    force_blend_factor=None,
+    subcarrier_phase_offset_rad=math.radians(85.0),
+    mono_delay_samples=0,
+    iq_phase_correction_enabled=True,
+    lr_high_max_gain=1.0,
+    lr_super_high_max_gain=1.0,
+    side_nr_enabled=True,
+    side_nr_alpha_floor=0.30,
+    side_nr_beta=1.0,
+)
 
 # QtWidgets, not just PySide6: the package imports fine on a machine
 # without the system EGL/GL libraries it links against, and only fails when
@@ -66,6 +84,13 @@ class FakeController:
         self.finishing_audio = False
         self.finishing_iq = False
         self.recording_path = None
+        # The DSP facade the settings tab uses.  update_ goes
+        # through the real dataclass, so a value the settings would
+        # refuse is refused here too.
+        self.dsp_defaults = DSP_DEFAULTS
+        self.dsp_settings = DSP_DEFAULTS
+        self.dsp_updates: list[dict] = []
+        self.dsp_sets: list[DspSettings] = []
         self.calls: list[tuple] = []
         self.cleanups: list[str] = []
         self.quit_event = _Event()
@@ -128,6 +153,21 @@ class FakeController:
 
     def current_station(self):
         return self.station
+
+    def get_dsp_defaults(self) -> DspSettings:
+        return self.dsp_defaults
+
+    def get_dsp_settings(self) -> DspSettings:
+        return self.dsp_settings
+
+    def update_dsp_settings(self, **changes) -> DspSettings:
+        self.dsp_updates.append(dict(changes))
+        self.dsp_settings = replace(self.dsp_settings, **changes)
+        return self.dsp_settings
+
+    def set_dsp_settings(self, settings: DspSettings) -> None:
+        self.dsp_sets.append(settings)
+        self.dsp_settings = settings
 
     def get_stations_list(self):
         return list(self.presets)
@@ -418,13 +458,14 @@ def test_the_window_still_updates_the_tab_nobody_is_looking_at(window):
     assert view._station.text() == "J-WAVE"
 
 
-def test_the_dsp_tab_says_it_is_not_finished(window):
-    """An empty page reads as a window that has broken."""
+def test_the_dsp_tab_holds_the_settings(window):
+    """The nine of them, and they are usable to begin with."""
     view, _ = window()
     page = view._tabs.widget(1)
 
-    assert page.isAncestorOf(view._dsp_waiting)
-    assert view._dsp_waiting.text().strip() != ""
+    assert page is view._dsp
+    assert len(view._dsp._rows) == 9
+    assert view._dsp._reset_all.isEnabled()
 
 
 # ----------------------------------------------------------------------
@@ -1750,6 +1791,35 @@ def test_what_the_sweep_is_doing_survives_a_refresh(window, monkeypatch,
     finally:
         let_it_go.set()
         finish(view, qt_app)
+
+
+def test_the_dsp_settings_go_with_the_rest_of_the_controls(
+        window, monkeypatch, qt_app):
+    """A sweep has the demodulator; a receiver that has gone has
+    nothing.  The DSP tab is decided in the same one place as
+    everything else, so it cannot disagree with the rest.
+    """
+    let_it_go = threading.Event()
+    view, controller, _ = a_scan(window, monkeypatch, hold=let_it_go)
+    a_control = view._dsp._rows[1].widgets[0]
+    assert a_control.isEnabled(), "this test needs a live receiver first"
+
+    view._scan_button.click()
+    qt_app.processEvents()
+    try:
+        assert not a_control.isEnabled(), "the sweep owns the demodulator"
+        assert not view._dsp._reset_all.isEnabled()
+    finally:
+        let_it_go.set()
+        finish(view, qt_app)
+
+    assert a_control.isEnabled(), "the sweep did not hand them back"
+
+    controller.device_failure = "the SDR was unplugged"
+    view.refresh()
+    qt_app.processEvents()
+    assert not a_control.isEnabled(), "there is no receiver to ask"
+    assert not view._dsp._reset_all.isEnabled()
 
 
 def test_a_device_that_goes_mid_sweep_keeps_the_controls_shut(
