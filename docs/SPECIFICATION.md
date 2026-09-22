@@ -778,6 +778,19 @@ GUI からの使い方と、推定結果をユーザに尋ねて書き込む流�
   side NR の定常成分減衰などを検証できる。`--preemphasis` /
   `--no-preemphasis` と `--side-nr*` を尊重。
 
+9 個の DSP 上書き（`--fixed-blend` / `--mono-delay-samples` /
+`--subcarrier-phase-offset-deg` / `--lr-*-max-gain` / `--side-nr*`）は
+GUI の設定タブと同じ `DspSettings` を通ります（→ 3.1、3.14.1）。
+したがって**同じ範囲で拒否されます**: 0..1 を外れた帯域上限や Wiener
+フロア、負の over-subtraction、1024 を超えるモノ遅延は、以前は復調器へ
+直接代入されて走っていましたが、いまはエラーです（`--side-nr-beta` の
+負値は `SideNoiseReducer` のコンストラクタが元々クランプしていたもので、
+属性への直接代入だけがそれをすり抜けていました）。範囲検査は
+`main()` が信号を合成する前に行い、引数名・範囲・値を 1 行で述べて
+終了します。NaN（float 引数）と負値（`--mono-delay-samples`、
+`--fixed-blend`）は従来どおり「上書きしない」の意味で、検査を素通り
+します。
+
 ### 3.12 録音メタデータ（recording_meta.py）
 
 録音セッションごとに `<base>.json` サイドカーを生成する共通モジュール。

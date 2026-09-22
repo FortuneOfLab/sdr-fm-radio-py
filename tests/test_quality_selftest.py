@@ -675,3 +675,114 @@ def test_a_synthetic_source_drops_the_hardware_trim():
     assert capture(captured).subcarrier_phase_offset_deg != pytest.approx(
         wanted), "the trim was dropped without being asked"
     assert capture(named).subcarrier_phase_offset_deg == pytest.approx(70.0)
+
+
+# --- What the command line may ask for -------------------------------
+#
+# Routing the overrides through DspSettings gave them its ranges, and
+# main() now says no before it builds anything.  Codex found the gap:
+# the PR claimed no behaviour change and the fifteen-case comparison
+# only ever passed in-range values, so it could not see that
+# --lr-high-max-gain 1.2 went from running to raising.
+
+
+def _the_arguments(**overrides):
+    """A parsed namespace with every default, then the overrides."""
+    from fm_radio.quality_selftest import _parser
+    args = _parser().parse_args([])
+    for name, value in overrides.items():
+        assert hasattr(args, name), name
+        setattr(args, name, value)
+    return args
+
+
+OUT_OF_RANGE = [
+    ("lr_high_max_gain", 1.2, "--lr-high-max-gain"),
+    ("lr_high_max_gain", -0.5, "--lr-high-max-gain"),
+    ("lr_super_high_max_gain", 1.5, "--lr-super-high-max-gain"),
+    ("side_nr_alpha_floor", 1.2, "--side-nr-alpha-floor"),
+    ("side_nr_beta", -0.1, "--side-nr-beta"),
+    ("mono_delay_samples", 1025, "--mono-delay-samples"),
+    ("subcarrier_phase_offset_deg", float("inf"),
+     "--subcarrier-phase-offset-deg"),
+]
+
+
+@pytest.mark.parametrize("name,value,flag", OUT_OF_RANGE)
+def test_the_command_line_refuses_what_the_dsp_will_not_take(
+        name, value, flag):
+    """One line naming the argument, not a traceback mid-run.
+
+    Before the overrides went through DspSettings these were written
+    onto the demodulator and ran; measured against the nearest value
+    in range they were not no-ops either (1025 samples of delay moved
+    the output by 7.0e-04, a Wiener floor of 1.2 by 1.0e-04).  They
+    are refused now, and this is where the refusal has to happen: by
+    the time _set_up_the_demod sees it, the signal has been built.
+    """
+    from fm_radio.quality_selftest import _check_the_ranges
+
+    with pytest.raises(SystemExit) as refused:
+        _check_the_ranges(_the_arguments(**{name: value}))
+
+    said = str(refused.value)
+    assert flag in said, said
+    assert str(value) in said, said
+
+
+def test_the_defaults_and_the_edges_are_let_through():
+    """The sentinels are not out of range, and the ends are inside.
+
+    NaN means "leave the constant" for four of them and a negative
+    delay means "leave it alone"; 1.0, 0.0 and 1024 are values the
+    demodulator takes, so an exclusive check here would refuse the
+    neutral ceiling that constants.py ships (LR_HIGH_MAX_GAIN = 1.00).
+    """
+    from fm_radio.quality_selftest import _check_the_ranges
+
+    _check_the_ranges(_the_arguments())  # every default, untouched.
+    _check_the_ranges(_the_arguments(
+        lr_high_max_gain=1.0,
+        lr_super_high_max_gain=0.0,
+        side_nr_alpha_floor=1.0,
+        side_nr_beta=0.0,
+        mono_delay_samples=1024,
+        subcarrier_phase_offset_deg=-720.0,
+    ))
+    _check_the_ranges(_the_arguments(
+        mono_delay_samples=-1, side_nr_beta=17.0))
+
+
+def test_main_checks_the_ranges_before_it_builds_anything(monkeypatch):
+    """The check is wired into main, and reached before the work."""
+    import fm_radio.quality_selftest as qs
+
+    def do_not_run(*args, **kwargs):  # pragma: no cover - must not run
+        raise AssertionError("the run started before the check")
+
+    monkeypatch.setattr(qs, "evaluate_quality", do_not_run)
+    monkeypatch.setattr(sys, "argv", [
+        "quality_selftest", "--duration", "0.2",
+        "--side-nr-alpha-floor", "1.2",
+    ])
+    with pytest.raises(SystemExit) as refused:
+        qs.main()
+    assert "--side-nr-alpha-floor" in str(refused.value)
+
+
+@pytest.mark.parametrize("name,value", [
+    ("lr_high_max_gain", 1.2),
+    ("side_nr_alpha_floor", 1.2),
+    ("side_nr_beta", -0.1),
+    ("mono_delay_samples", 1025),
+])
+def test_the_helper_refuses_the_same_values(name, value):
+    """A caller that comes straight in gets ValueError, not a run.
+
+    The command-line check is a better message, not the guard: the
+    tests and the sweeps call the runners directly.
+    """
+    from fm_radio.quality_selftest import _set_up_the_demod
+
+    with pytest.raises(ValueError):
+        _set_up_the_demod(a_demodulator(), **{name: value})

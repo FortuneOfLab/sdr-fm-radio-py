@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
 from dataclasses import dataclass, replace as dsp_replace
 from fractions import Fraction
 
@@ -60,7 +61,7 @@ from fm_radio.constants import (
 import fm_radio.demodulator as _demod_mod
 from fm_radio.demodulator import FMDemodulator
 from fm_radio.dsp_settings import (
-    apply as dsp_apply, capture as dsp_capture,
+    MAX_MONO_DELAY_SAMPLES, apply as dsp_apply, capture as dsp_capture,
 )
 
 
@@ -426,6 +427,15 @@ def _set_up_the_demod(
     outside 0..1 is clipped rather than refused, and a negative
     ``mono_delay_samples`` means "not asked for" - the command line
     spells "leave it alone" that way.
+
+    The rest are not softened, and that is a change: they used to be
+    written straight onto the demodulator, so a 7-12 kHz ceiling of
+    1.2, a Wiener floor of 1.2, an over-subtraction of -0.1 or a
+    1025-sample delay all ran and produced numbers.  They are refused
+    here.  ``main`` checks the same ranges before it builds anything,
+    so from the command line the refusal is one line rather than a
+    traceback; this raises ValueError for a caller that comes
+    straight in.
 
     Args:
         synthetic_source: the IQ or composite was built here rather
@@ -1297,7 +1307,8 @@ def _parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--mono-delay-samples", type=int, default=-1,
-        help="Mono delay override in composite samples (-1=default)",
+        help=f"Mono delay override in composite samples "
+             f"(-1=default, at most {MAX_MONO_DELAY_SAMPLES})",
     )
     p.add_argument(
         "--subcarrier-phase-offset-deg", type=float, default=float("nan"),
@@ -1402,13 +1413,13 @@ def _parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--lr-high-max-gain", type=float, default=float("nan"),
-        help="Override LR_HIGH_MAX_GAIN ceiling for 7-12 kHz L-R "
+        help="Override LR_HIGH_MAX_GAIN ceiling for 7-12 kHz L-R, 0.0-1.0 "
              "(NaN=use constant). Lower values reduce HF stereo noise.",
     )
     p.add_argument(
         "--lr-super-high-max-gain", type=float, default=float("nan"),
-        help="Override LR_SUPER_HIGH_MAX_GAIN ceiling for 12-15 kHz L-R "
-             "(NaN=use constant). Lower values reduce HF stereo noise.",
+        help="Override LR_SUPER_HIGH_MAX_GAIN ceiling for 12-15 kHz L-R, "
+             "0.0-1.0 (NaN=use constant). Lower values reduce HF stereo noise.",
     )
     p.add_argument(
         "--side-nr", dest="side_nr", action="store_true", default=None,
@@ -1420,15 +1431,69 @@ def _parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--side-nr-alpha-floor", type=float, default=float("nan"),
-        help="Side NR minimum Wiener gain in linear units "
+        help="Side NR minimum Wiener gain in linear units, 0.0-1.0 "
              "(0.15≈-16dB max attenuation). Higher = gentler.",
     )
     p.add_argument(
         "--side-nr-beta", type=float, default=float("nan"),
-        help="Side NR over-subtraction factor (1.0=pure Wiener, "
-             ">1=more aggressive)",
+        help="Side NR over-subtraction factor, 0.0 or more (1.0=pure "
+             "Wiener, >1=more aggressive)",
     )
     return p
+
+
+#: What the command line may ask for, and what the sentinel is that
+#: means "do not override".  The ranges are DspSettings', which the
+#: overrides go through since they were folded onto _set_up_the_demod:
+#: a ceiling above 1.0 is not a ceiling (LR_HIGH_MAX_GAIN is neutral
+#: at 1.0), a Wiener floor above 1.0 amplifies, a negative
+#: over-subtraction changes the gain's sign - SideNoiseReducer's
+#: constructor has always clamped that one, and only the direct
+#: attribute write these overrides used to do got past it - and the
+#: mono delay is allocated, so it is bounded.
+_ARGUMENT_RANGES = (
+    # (dest, low, high, what a value outside it would mean)
+    ("lr_high_max_gain", 0.0, 1.0, "a 7-12 kHz ceiling"),
+    ("lr_super_high_max_gain", 0.0, 1.0, "a 12-15 kHz ceiling"),
+    ("side_nr_alpha_floor", 0.0, 1.0, "a minimum Wiener gain"),
+    ("side_nr_beta", 0.0, math.inf, "an over-subtraction factor"),
+)
+
+
+def _check_the_ranges(args) -> None:
+    """Refuse an override the demodulator will not take, with a line.
+
+    The overrides reach the demodulator through ``DspSettings`` now,
+    which refuses what is out of range.  Without this, that refusal
+    arrives as a traceback from the middle of a run that has already
+    synthesised its signal; with it, it arrives as one line before
+    anything is built.  The sentinels pass untouched: NaN and a
+    negative delay both mean "not asked for".
+
+    Raises:
+        SystemExit: naming the argument, the range and the value.
+    """
+    for dest, low, high, what in _ARGUMENT_RANGES:
+        value = float(getattr(args, dest))
+        if math.isnan(value):
+            continue  # NaN is this argument's "leave the constant".
+        if not low <= value <= high:
+            flag = "--" + dest.replace("_", "-")
+            limit = "0.0 or more" if math.isinf(high) else f"{low} to {high}"
+            raise SystemExit(
+                f"{flag} must be {limit}, not {value}: it is {what}.")
+    delay = int(args.mono_delay_samples)
+    if delay > MAX_MONO_DELAY_SAMPLES:
+        raise SystemExit(
+            f"--mono-delay-samples must be at most "
+            f"{MAX_MONO_DELAY_SAMPLES}, not {delay}; the delay line is "
+            f"allocated, and the group delay being compensated is 160 "
+            f"samples.  A negative value means the default.")
+    phase = float(args.subcarrier_phase_offset_deg)
+    if math.isinf(phase):
+        raise SystemExit(
+            f"--subcarrier-phase-offset-deg must be a finite angle, "
+            f"not {phase}.  NaN means the variant's default.")
 
 
 def main() -> None:
@@ -1442,6 +1507,8 @@ def main() -> None:
     else:
         cnr_db = None if float(args.cnr_db) < 0 else float(args.cnr_db)
     fixed_blend = None if args.fixed_blend < 0.0 else float(args.fixed_blend)
+
+    _check_the_ranges(args)
 
     # Reject configurations that would produce zero post-warmup samples.
     # ``evaluate_quality`` and the IQ-WAV diagnostics path otherwise emit
