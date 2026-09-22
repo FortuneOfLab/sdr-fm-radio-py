@@ -353,6 +353,18 @@ def _what_is_there(path: str) -> tuple[bool, tuple | None, float | None]:
     the time it answers.  Refused - no permission, a share that
     dropped - is a file that exists and cannot be looked at, which is
     "there, unidentified".
+
+    Which of the two a failure is cannot be read off the exception.
+    A directory where the file was raises IsADirectoryError on Linux
+    and PermissionError on Windows, and a file that is really only
+    unreadable raises PermissionError on both; sorting by exception
+    type alone would answer correctly on one platform and wrongly on
+    the other.  So a refusal asks the path again, and the answer is
+    whether a plain file is still there.
+
+    ``os.fstat`` is asked the same question a second time, of the
+    handle rather than the path.  It is the handle that gets
+    measured, so it is the handle that has to be a plain file.
     """
     try:
         found = os.stat(path)
@@ -362,15 +374,21 @@ def _what_is_there(path: str) -> tuple[bool, tuple | None, float | None]:
         return False, None, None
     try:
         handle = open(path, "rb")
-    except (FileNotFoundError, NotADirectoryError):
+    except (FileNotFoundError, NotADirectoryError, IsADirectoryError):
         return False, None, None
     except (OSError, ValueError):
-        return True, None, None
+        try:
+            again = os.stat(path)
+        except (OSError, ValueError):
+            return False, None, None
+        return stat_flags.S_ISREG(again.st_mode), None, None
     try:
         try:
             held = os.fstat(handle.fileno())
         except OSError:
             return True, None, None
+        if not stat_flags.S_ISREG(held.st_mode):
+            return False, None, None
         identity = (held.st_dev, held.st_ino) if held.st_ino else None
         return True, identity, _seconds_of_wav(handle)
     finally:

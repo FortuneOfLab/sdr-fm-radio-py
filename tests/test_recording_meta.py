@@ -7,6 +7,7 @@ import builtins
 import json
 import os
 import re
+import stat
 import wave
 
 import numpy as np
@@ -881,3 +882,90 @@ def test_a_close_that_fails_is_not_an_error(tmp_path):
     assert rec.problem == ""
     assert rec.missing == ()
     assert rec.audio_seconds == pytest.approx(1.0)
+
+
+# --- Round 6: a path that stops being a plain file --------------------
+
+
+def test_a_part_that_becomes_a_directory_between_stat_and_open(tmp_path):
+    # Which exception that is depends on the platform - Linux raises
+    # IsADirectoryError, Windows PermissionError - and a file that is
+    # merely unreadable raises PermissionError on both.  So the
+    # answer cannot come from the exception type, and this test does
+    # not care which one was raised: a directory is not a part.
+    _write_wav(tmp_path / "a.wav", 48000)
+    _write_json(tmp_path / "one.json", _iq_meta(["a.wav"]))
+
+    real_stat = os.stat
+    swapped = []
+
+    def stat_then_make_it_a_directory(target, **kw):
+        found = real_stat(target, **kw)
+        if not swapped and str(target).endswith("a.wav"):
+            swapped.append(True)
+            os.remove(str(tmp_path / "a.wav"))
+            os.mkdir(str(tmp_path / "a.wav"))
+        return found
+
+    os.stat = stat_then_make_it_a_directory
+    try:
+        rec = read_sidecar(str(tmp_path / "one.json"))
+    finally:
+        os.stat = real_stat
+
+    assert swapped, "the stat hook never fired"
+    assert (tmp_path / "a.wav").is_dir()
+    assert rec.missing == ("a.wav",)
+    assert rec.complete is False
+    assert rec.audio_seconds is None
+
+
+def test_a_part_that_is_there_and_will_not_open(tmp_path):
+    # The other side of the same fork: still a plain file, just shut.
+    # Present, so not missing - and unidentified, so not measured.
+    _write_wav(tmp_path / "shut.wav", 48000)
+    _write_json(tmp_path / "shut.json", _iq_meta(["shut.wav"]))
+
+    real_open = builtins.open
+
+    def open_that_refuses(target, mode="r", *a, **kw):
+        if "b" in mode and str(target).endswith("shut.wav"):
+            raise PermissionError(13, "the file is shut")
+        return real_open(target, mode, *a, **kw)
+
+    builtins.open = open_that_refuses
+    try:
+        rec = read_sidecar(str(tmp_path / "shut.json"))
+    finally:
+        builtins.open = real_open
+
+    assert rec.problem == ""
+    assert rec.missing == ()
+    assert rec.complete is True
+    assert rec.audio_seconds is None
+    assert rec.duration_s == pytest.approx(120.0)   # the clock
+    assert rec.duration_is_measured is False
+
+
+def test_a_handle_that_turns_out_not_to_be_a_plain_file(tmp_path):
+    # The handle is what gets measured, so the handle is what has to
+    # be a plain file - asked of the open file, not of the name.
+    _write_wav(tmp_path / "a.wav", 48000)
+    _write_json(tmp_path / "one.json", _iq_meta(["a.wav"]))
+
+    real_fstat = os.fstat
+
+    def fstat_says_directory(fd, **kw):
+        fields = list(real_fstat(fd, **kw))
+        fields[0] = stat.S_IFDIR | 0o755          # st_mode
+        return os.stat_result(fields)
+
+    os.fstat = fstat_says_directory
+    try:
+        rec = read_sidecar(str(tmp_path / "one.json"))
+    finally:
+        os.fstat = real_fstat
+
+    assert rec.missing == ("a.wav",)
+    assert rec.complete is False
+    assert rec.audio_seconds is None
