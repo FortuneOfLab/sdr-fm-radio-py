@@ -455,3 +455,44 @@ def test_recordings_are_hashable_and_frozen(tmp_path):
     assert len({rec, read_sidecar(str(tmp_path / "f.json"))}) == 1
     with pytest.raises(Exception):
         rec.kind = "audio"
+
+
+def test_the_numbers_json_allows_that_are_not_numbers(tmp_path):
+    # json.loads accepts NaN and Infinity, so a sidecar can hand over
+    # either.  int(inf) raises OverflowError, which a reader that
+    # promises never to raise cannot afford to let out.
+    (tmp_path / "wild.json").write_text(
+        '{"type": "iq", "file": "w.wav",'
+        ' "sample_rate_hz": Infinity, "channels": -Infinity,'
+        ' "center_freq_hz": NaN, "gain_db": Infinity}',
+        encoding="utf-8",
+    )
+    rec = read_sidecar(str(tmp_path / "wild.json"))
+    assert rec.problem == ""
+    assert rec.kind == "iq" and rec.parts == ("w.wav",)
+    assert rec.sample_rate_hz is None
+    assert rec.channels is None
+    assert rec.center_freq_hz is None
+    assert rec.gain_db is None
+    assert len(scan_recordings(str(tmp_path))) == 1
+
+
+def test_start_times_the_platform_cannot_turn_into_posix_seconds(tmp_path):
+    # datetime.timestamp() raises OSError on Windows for a NAIVE
+    # timestamp outside the local clock's range.  One hand-edited
+    # sidecar dated 1960 must not cost the scan its directory.
+    for name, started in (
+        ("ancient", "1960-01-01T00:00:00"),
+        ("distant", "9999-12-31T23:59:59"),
+        ("normal", "2026-09-20T01:29:48+09:00"),
+    ):
+        meta = _iq_meta([name + ".wav"])
+        meta["started_at"] = started
+        _write_json(tmp_path / (name + ".json"), meta)
+
+    rows = scan_recordings(str(tmp_path))
+    assert [os.path.basename(r.sidecar) for r in rows] == [
+        "distant.json", "normal.json", "ancient.json",
+    ]
+    assert all(r.problem == "" for r in rows)
+    assert rows[-1].started_at.year == 1960

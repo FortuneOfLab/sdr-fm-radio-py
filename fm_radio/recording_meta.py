@@ -47,10 +47,11 @@ from __future__ import annotations
 import glob
 import json
 import logging
+import math
 import os
 import wave
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 def sidecar_path(base_wav_path: str) -> str:
@@ -208,24 +209,29 @@ class Recording:
         return self.wall_seconds
 
 
+def _a_number(value) -> float | None:
+    """*value* as a finite float, or None if it is not one.
+
+    JSON is allowed to carry ``NaN`` and ``Infinity`` and Python's
+    decoder accepts both, so a sidecar can hand over either.  Neither
+    is a frequency or a gain, and an infinity is also what ``int()``
+    raises OverflowError on - so what would have been an exception out
+    of a function that promises not to raise is simply "not a number".
+    A bool is not one either: ``"channels": true`` is not two channels.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
 def _a_whole_number(value) -> int | None:
     """*value* as an int, or None if it is not one."""
-    if value is None or isinstance(value, bool):
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _a_number(value) -> float | None:
-    """*value* as a float, or None if it is not one."""
-    if value is None or isinstance(value, bool):
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
+    number = _a_number(value)
+    return None if number is None else int(number)
 
 
 def _a_time(value) -> datetime | None:
@@ -369,17 +375,40 @@ def read_sidecar(path: str) -> Recording:
     )
 
 
+#: Ordering measures start times from here.  Only their order
+#: matters, so any fixed point would do.
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def _seconds_from_epoch(when: datetime) -> float:
+    """*when* as seconds from 1970, by arithmetic alone.
+
+    Not ``datetime.timestamp()``: that one asks the platform, and on
+    Windows it raises OSError for a naive timestamp outside the local
+    clock's range - 1960, or 9999 - which would cost a whole scan its
+    directory over one hand-edited sidecar.  Subtraction has no such
+    range.
+
+    A naive timestamp is read as UTC, which can put it up to a day
+    from where whoever typed it meant.  For ordering rows that is
+    nothing, and the recorder itself always writes the offset.
+    """
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return (when - _EPOCH).total_seconds()
+
+
 def _newest_first(recording: Recording) -> tuple:
     """Sort key: by start time, latest first, undated ones last.
 
-    Compared as POSIX timestamps rather than as datetimes, because a
-    hand-edited sidecar can carry a naive timestamp next to an aware
-    one and Python refuses to order those against each other.
+    Ordered by seconds rather than by the datetimes themselves,
+    because a hand-edited sidecar can carry a naive timestamp next to
+    an aware one and Python refuses to order those against each other.
     """
     started = recording.started_at
     if started is None:
         return (1, 0.0, recording.sidecar)
-    return (0, -started.timestamp(), recording.sidecar)
+    return (0, -_seconds_from_epoch(started), recording.sidecar)
 
 
 def scan_recordings(directory: str) -> list[Recording]:
