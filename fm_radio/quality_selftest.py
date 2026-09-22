@@ -1464,24 +1464,47 @@ def _check_the_ranges(args) -> None:
     """Refuse an override the demodulator will not take, with a line.
 
     The overrides reach the demodulator through ``DspSettings`` now,
-    which refuses what is out of range.  Without this, that refusal
-    arrives as a traceback from the middle of a run that has already
-    synthesised its signal; with it, it arrives as one line before
-    anything is built.  The sentinels pass untouched: NaN and a
-    negative delay both mean "not asked for".
+    which refuses what is out of range and what is not finite.
+    Without this, that refusal arrives as a traceback from the middle
+    of a run that has already synthesised its signal; with it, it
+    arrives as one line before anything is built.
+
+    Each argument has one spelling for "not asked for", and it is not
+    the same spelling for all of them: NaN for the four that have no
+    out-of-band value of their own, a negative number for the delay
+    and the blend, which do.  Only that one passes; the other is a
+    value like any other, and an infinity is nobody's sentinel.
 
     Raises:
         SystemExit: naming the argument, the range and the value.
     """
     for dest, low, high, what in _ARGUMENT_RANGES:
         value = float(getattr(args, dest))
+        flag = "--" + dest.replace("_", "-")
         if math.isnan(value):
             continue  # NaN is this argument's "leave the constant".
+        if not math.isfinite(value):
+            # 0.0 <= inf <= inf is true, so the range below lets an
+            # infinite beta through; DspSettings then refuses it in
+            # the middle of --sweep-response.
+            raise SystemExit(
+                f"{flag} must be a finite number, not {value}: it is "
+                f"{what}.  NaN is the one that means \"leave the "
+                f"constant\".")
         if not low <= value <= high:
-            flag = "--" + dest.replace("_", "-")
             limit = "0.0 or more" if math.isinf(high) else f"{low} to {high}"
             raise SystemExit(
                 f"{flag} must be {limit}, not {value}: it is {what}.")
+    blend = float(args.fixed_blend)
+    if math.isnan(blend):
+        # This one's sentinel is a negative number, and nan < 0.0 is
+        # false, so a NaN went past the sentinel, past np.clip, and
+        # into DspSettings mid-run.
+        raise SystemExit(
+            "--fixed-blend must be a number, not nan; a negative value "
+            "is how this one spells \"leave the blend adaptive\".  An "
+            "out-of-range blend is clipped into 0.0-1.0 rather than "
+            "refused, as it always has been.")
     delay = int(args.mono_delay_samples)
     if delay > MAX_MONO_DELAY_SAMPLES:
         raise SystemExit(

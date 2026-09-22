@@ -705,6 +705,18 @@ OUT_OF_RANGE = [
     ("mono_delay_samples", 1025, "--mono-delay-samples"),
     ("subcarrier_phase_offset_deg", float("inf"),
      "--subcarrier-phase-offset-deg"),
+    # Codex, second round: 0.0 <= inf <= inf is true, so the range
+    # let an infinite beta through and DspSettings refused it in the
+    # middle of --sweep-response (reproduced: "side_nr_beta must be a
+    # finite number, not inf", after the sweep had built its signal).
+    ("side_nr_beta", float("inf"), "--side-nr-beta"),
+    ("side_nr_beta", float("-inf"), "--side-nr-beta"),
+    ("lr_high_max_gain", float("inf"), "--lr-high-max-gain"),
+    ("lr_super_high_max_gain", float("-inf"), "--lr-super-high-max-gain"),
+    ("side_nr_alpha_floor", float("inf"), "--side-nr-alpha-floor"),
+    # And this one's sentinel is a negative number, so nan < 0.0 was
+    # false and a NaN blend reached DspSettings mid-run.
+    ("fixed_blend", float("nan"), "--fixed-blend"),
 ]
 
 
@@ -753,6 +765,27 @@ def test_the_defaults_and_the_edges_are_let_through():
         mono_delay_samples=-1, side_nr_beta=17.0))
 
 
+def test_an_infinite_blend_is_still_clipped_rather_than_refused():
+    """--fixed-blend keeps its own rule, and it is the old one.
+
+    The blend is clipped into 0..1 wherever it comes from - the
+    demodulator does it at the point of use too - so an infinity has
+    always meant 1.0 and still does.  Only NaN is refused, because
+    NaN is not a blend and this argument's "leave it alone" is a
+    negative number.
+    """
+    from fm_radio.dsp_settings import capture
+    from fm_radio.quality_selftest import _check_the_ranges, _set_up_the_demod
+
+    _check_the_ranges(_the_arguments(fixed_blend=float("inf")))
+    _check_the_ranges(_the_arguments(fixed_blend=-1.0))
+    _check_the_ranges(_the_arguments(fixed_blend=1.7))
+
+    demod = a_demodulator()
+    _set_up_the_demod(demod, fixed_blend=float("inf"))
+    assert capture(demod).force_blend_factor == pytest.approx(1.0)
+
+
 def test_main_checks_the_ranges_before_it_builds_anything(monkeypatch):
     """The check is wired into main, and reached before the work."""
     import fm_radio.quality_selftest as qs
@@ -774,7 +807,9 @@ def test_main_checks_the_ranges_before_it_builds_anything(monkeypatch):
     ("lr_high_max_gain", 1.2),
     ("side_nr_alpha_floor", 1.2),
     ("side_nr_beta", -0.1),
+    ("side_nr_beta", float("inf")),
     ("mono_delay_samples", 1025),
+    ("subcarrier_phase_offset_deg", float("inf")),
 ])
 def test_the_helper_refuses_the_same_values(name, value):
     """A caller that comes straight in gets ValueError, not a run.

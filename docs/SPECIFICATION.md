@@ -778,18 +778,34 @@ GUI からの使い方と、推定結果をユーザに尋ねて書き込む流�
   side NR の定常成分減衰などを検証できる。`--preemphasis` /
   `--no-preemphasis` と `--side-nr*` を尊重。
 
-9 個の DSP 上書き（`--fixed-blend` / `--mono-delay-samples` /
-`--subcarrier-phase-offset-deg` / `--lr-*-max-gain` / `--side-nr*`）は
-GUI の設定タブと同じ `DspSettings` を通ります（→ 3.1、3.14.1）。
-したがって**同じ範囲で拒否されます**: 0..1 を外れた帯域上限や Wiener
+9 個の DSP 上書きは GUI の設定タブと同じ `DspSettings` を通ります
+（→ 3.1、3.14.1）。上書きしないときの綴りは引数ごとに違い、範囲も
+`DspSettings` のものです。
+
+| 引数 | 範囲 | 「上書きしない」 |
+|---|---|---|
+| `--fixed-blend` | 0.0–1.0（外は**クリップ**） | 負値 |
+| `--disable-iq-phase-correction` | フラグ | 指定しない |
+| `--mono-delay-samples` | 0–1024 | 負値 |
+| `--subcarrier-phase-offset-deg` | 有限の角度 | NaN |
+| `--lr-high-max-gain` | 0.0–1.0 | NaN |
+| `--lr-super-high-max-gain` | 0.0–1.0 | NaN |
+| `--side-nr` / `--no-side-nr` | フラグ | どちらも指定しない |
+| `--side-nr-alpha-floor` | 0.0–1.0 | NaN |
+| `--side-nr-beta` | 0.0 以上の有限値 | NaN |
+
+`--fixed-blend` **だけが例外**で、範囲外は拒否ではなくクリップです
+（復調器が使用時点で forced blend をクリップするため、1.7 は元から
+実質 1.0）。残りは**拒否されます**: 0..1 を外れた帯域上限や Wiener
 フロア、負の over-subtraction、1024 を超えるモノ遅延は、以前は復調器へ
 直接代入されて走っていましたが、いまはエラーです（`--side-nr-beta` の
 負値は `SideNoiseReducer` のコンストラクタが元々クランプしていたもので、
-属性への直接代入だけがそれをすり抜けていました）。範囲検査は
-`main()` が信号を合成する前に行い、引数名・範囲・値を 1 行で述べて
-終了します。NaN（float 引数）と負値（`--mono-delay-samples`、
-`--fixed-blend`）は従来どおり「上書きしない」の意味で、検査を素通り
-します。
+属性への直接代入だけがそれをすり抜けていました）。無限大はどの引数の
+sentinel でもなく、同じく拒否されます。
+
+検査は `main()` が信号を合成する前に行い、引数名・範囲・値を 1 行で
+述べて終了します。ランナーを直接呼ぶ側（掃引・テスト）に対しては
+`DspSettings` の `ValueError` がそのまま残ります。
 
 ### 3.12 録音メタデータ（recording_meta.py）
 
