@@ -556,3 +556,301 @@ def test_cli_sep_sweep_passes_carrier_offset(monkeypatch, capsys):
     assert captured[0]["carrier_offset_hz"] == 1237.0
     assert "carrier_offset=1237Hz" in out
     assert "notch transition" not in out
+
+
+# ----------------------------------------------------------------------
+# One place that sets the nine
+# ----------------------------------------------------------------------
+
+def a_demodulator():
+    """The light chain: the same nine attributes, built in a fraction
+    of the time the standard one takes."""
+    from fm_radio.demodulator import FMDemodulatorLight
+    return FMDemodulatorLight(stereo=True)
+
+
+def test_the_overrides_go_through_the_settings():
+    """The same nine the GUI changes, applied the same way.
+
+    Read back with capture(), so what is checked is the DSP's own
+    state and not the arguments going in.
+    """
+    from fm_radio.dsp_settings import capture
+    from fm_radio.quality_selftest import _set_up_the_demod
+
+    demod = a_demodulator()
+    _set_up_the_demod(
+        demod,
+        fixed_blend=0.25,
+        disable_iq_phase_correction=True,
+        mono_delay_samples=4,
+        subcarrier_phase_offset_deg=91.0,
+        lr_high_max_gain=0.8,
+        lr_super_high_max_gain=0.4,
+        side_nr_enable=False,
+        side_nr_alpha_floor=0.5,
+        side_nr_beta=2.0,
+    )
+
+    now = capture(demod)
+    assert now.force_blend_factor == pytest.approx(0.25)
+    assert now.iq_phase_correction_enabled is False
+    assert now.mono_delay_samples == 4
+    assert now.subcarrier_phase_offset_deg == pytest.approx(91.0)
+    assert now.lr_high_max_gain == pytest.approx(0.8)
+    assert now.lr_super_high_max_gain == pytest.approx(0.4)
+    assert now.side_nr_enabled is False
+    assert now.side_nr_alpha_floor == pytest.approx(0.5)
+    assert now.side_nr_beta == pytest.approx(2.0)
+    # The delay line is the length that was asked for, not just the
+    # number: the setter builds it.
+    assert demod._mono_delay_state.size == 4
+
+
+def test_nothing_asked_for_changes_nothing():
+    from fm_radio.dsp_settings import capture
+    from fm_radio.quality_selftest import _set_up_the_demod
+
+    demod = a_demodulator()
+    was = capture(demod)
+
+    _set_up_the_demod(demod)
+
+    assert capture(demod) == was
+
+
+@pytest.mark.parametrize("asked, expected", [
+    (1.7, 1.0),
+    (-0.5, 0.0),
+    (0.25, 0.25),
+])
+def test_a_blend_outside_the_range_is_clipped_not_refused(asked, expected):
+    """Softer than DspSettings on purpose: it was softer before this."""
+    from fm_radio.dsp_settings import capture
+    from fm_radio.quality_selftest import _set_up_the_demod
+
+    demod = a_demodulator()
+    _set_up_the_demod(demod, fixed_blend=asked)
+
+    assert capture(demod).force_blend_factor == pytest.approx(expected)
+
+
+def test_a_negative_delay_means_it_was_not_asked_for():
+    """How the command line spells "leave it alone"."""
+    from fm_radio.dsp_settings import capture
+    from fm_radio.quality_selftest import _set_up_the_demod
+
+    demod = a_demodulator()
+    _set_up_the_demod(demod, mono_delay_samples=7)
+    _set_up_the_demod(demod, mono_delay_samples=-1)
+
+    assert capture(demod).mono_delay_samples == 7, (
+        "a negative delay was taken as a change")
+
+
+def test_a_synthetic_source_drops_the_hardware_trim():
+    """The trim belongs to a signal that came through the radio.
+
+    The IQ and composite runners build their own, so unless the
+    caller names an angle they use the variant's DSP-intrinsic
+    offset instead.
+    """
+    from fm_radio.dsp_settings import capture
+    from fm_radio.quality_selftest import (
+        _dsp_subcarrier_offset_deg, _set_up_the_demod,
+    )
+
+    captured = a_demodulator()
+    _set_up_the_demod(captured)
+    synthetic = a_demodulator()
+    _set_up_the_demod(synthetic, synthetic_source=True)
+    named = a_demodulator()
+    _set_up_the_demod(named, synthetic_source=True,
+                      subcarrier_phase_offset_deg=70.0)
+
+    wanted = _dsp_subcarrier_offset_deg(
+        getattr(synthetic, "use_pll_demod", False))
+    assert capture(synthetic).subcarrier_phase_offset_deg == pytest.approx(
+        wanted)
+    assert capture(captured).subcarrier_phase_offset_deg != pytest.approx(
+        wanted), "the trim was dropped without being asked"
+    assert capture(named).subcarrier_phase_offset_deg == pytest.approx(70.0)
+
+
+# --- What the command line may ask for -------------------------------
+#
+# Routing the overrides through DspSettings gave them its ranges, and
+# main() now says no before it builds anything.  Codex found the gap:
+# the PR claimed no behaviour change and the fifteen-case comparison
+# only ever passed in-range values, so it could not see that
+# --lr-high-max-gain 1.2 went from running to raising.
+
+
+def _the_arguments(**overrides):
+    """A parsed namespace with every default, then the overrides."""
+    from fm_radio.quality_selftest import _parser
+    args = _parser().parse_args([])
+    for name, value in overrides.items():
+        assert hasattr(args, name), name
+        setattr(args, name, value)
+    return args
+
+
+OUT_OF_RANGE = [
+    ("lr_high_max_gain", 1.2, "--lr-high-max-gain"),
+    ("lr_high_max_gain", -0.5, "--lr-high-max-gain"),
+    ("lr_super_high_max_gain", 1.5, "--lr-super-high-max-gain"),
+    ("side_nr_alpha_floor", 1.2, "--side-nr-alpha-floor"),
+    ("side_nr_beta", -0.1, "--side-nr-beta"),
+    ("mono_delay_samples", 1025, "--mono-delay-samples"),
+    ("subcarrier_phase_offset_deg", float("inf"),
+     "--subcarrier-phase-offset-deg"),
+    # Codex, second round: 0.0 <= inf <= inf is true, so the range
+    # let an infinite beta through and DspSettings refused it in the
+    # middle of --sweep-response (reproduced: "side_nr_beta must be a
+    # finite number, not inf", after the sweep had built its signal).
+    ("side_nr_beta", float("inf"), "--side-nr-beta"),
+    ("side_nr_beta", float("-inf"), "--side-nr-beta"),
+    ("lr_high_max_gain", float("inf"), "--lr-high-max-gain"),
+    ("lr_super_high_max_gain", float("-inf"), "--lr-super-high-max-gain"),
+    ("side_nr_alpha_floor", float("inf"), "--side-nr-alpha-floor"),
+    # And this one's sentinel is a negative number, so nan < 0.0 was
+    # false and a NaN blend reached DspSettings mid-run.
+    ("fixed_blend", float("nan"), "--fixed-blend"),
+]
+
+
+@pytest.mark.parametrize("name,value,flag", OUT_OF_RANGE)
+def test_the_command_line_refuses_what_the_dsp_will_not_take(
+        name, value, flag):
+    """One line naming the argument, not a traceback mid-run.
+
+    Before the overrides went through DspSettings these were written
+    onto the demodulator and ran; measured against the nearest value
+    in range they were not no-ops either (1025 samples of delay moved
+    the output by 7.0e-04, a Wiener floor of 1.2 by 1.0e-04).  They
+    are refused now, and this is where the refusal has to happen: by
+    the time _set_up_the_demod sees it, the signal has been built.
+    """
+    from fm_radio.quality_selftest import _check_the_ranges
+
+    with pytest.raises(SystemExit) as refused:
+        _check_the_ranges(_the_arguments(**{name: value}))
+
+    said = str(refused.value)
+    assert flag in said, said
+    assert str(value) in said, said
+
+
+def test_the_defaults_and_the_edges_are_let_through():
+    """The sentinels are not out of range, and the ends are inside.
+
+    NaN means "leave the constant" for four of them and a negative
+    delay means "leave it alone"; 1.0, 0.0 and 1024 are values the
+    demodulator takes, so an exclusive check here would refuse the
+    neutral ceiling that constants.py ships (LR_HIGH_MAX_GAIN = 1.00).
+    """
+    from fm_radio.quality_selftest import _check_the_ranges
+
+    _check_the_ranges(_the_arguments())  # every default, untouched.
+    _check_the_ranges(_the_arguments(
+        lr_high_max_gain=1.0,
+        lr_super_high_max_gain=0.0,
+        side_nr_alpha_floor=1.0,
+        side_nr_beta=0.0,
+        mono_delay_samples=1024,
+        subcarrier_phase_offset_deg=-720.0,
+    ))
+    _check_the_ranges(_the_arguments(
+        mono_delay_samples=-1, side_nr_beta=17.0))
+
+
+def test_an_infinite_blend_is_still_clipped_rather_than_refused():
+    """--fixed-blend keeps its own rule, and it is the old one.
+
+    The blend is clipped into 0..1 wherever it comes from - the
+    demodulator does it at the point of use too - so an infinity has
+    always meant 1.0 and still does.  Only NaN is refused, because
+    NaN is not a blend and this argument's "leave it alone" is a
+    negative number.
+    """
+    from fm_radio.dsp_settings import capture
+    from fm_radio.quality_selftest import _check_the_ranges, _set_up_the_demod
+
+    _check_the_ranges(_the_arguments(fixed_blend=float("inf")))
+    _check_the_ranges(_the_arguments(fixed_blend=-1.0))
+    _check_the_ranges(_the_arguments(fixed_blend=1.7))
+
+    demod = a_demodulator()
+    _set_up_the_demod(demod, fixed_blend=float("inf"))
+    assert capture(demod).force_blend_factor == pytest.approx(1.0)
+
+
+def test_a_negative_infinity_blend_is_the_adaptive_one(monkeypatch):
+    """--fixed-blend=-inf means what every negative number means.
+
+    Codex, third round: the specification said an infinity is nobody's
+    sentinel, and for this argument that is not true - the rule is
+    "negative means adaptive", and -inf is negative.  Kept, because
+    the rule is the pre-existing one and it is `main`'s too; the
+    documentation is what was wrong.  Checked at the boundary that
+    decides it, with the evaluation stubbed out.
+    """
+    import sys
+    import fm_radio.quality_selftest as qs
+    from fm_radio.quality_selftest import _check_the_ranges
+
+    _check_the_ranges(_the_arguments(fixed_blend=float("-inf")))
+
+    captured = []
+    _spy_eval(monkeypatch, captured)
+    monkeypatch.setattr(sys, "argv", [
+        "quality_selftest", "--duration", "1", "--fixed-blend=-inf",
+    ])
+    qs.main()
+    assert captured[0]["fixed_blend"] is None, "-inf stopped being adaptive"
+
+    captured.clear()
+    monkeypatch.setattr(sys, "argv", [
+        "quality_selftest", "--duration", "1", "--fixed-blend=inf",
+    ])
+    qs.main()
+    assert captured[0]["fixed_blend"] == float("inf"), (
+        "a positive infinity is a blend to be clipped, not a sentinel")
+
+
+def test_main_checks_the_ranges_before_it_builds_anything(monkeypatch):
+    """The check is wired into main, and reached before the work."""
+    import fm_radio.quality_selftest as qs
+
+    def do_not_run(*args, **kwargs):  # pragma: no cover - must not run
+        raise AssertionError("the run started before the check")
+
+    monkeypatch.setattr(qs, "evaluate_quality", do_not_run)
+    monkeypatch.setattr(sys, "argv", [
+        "quality_selftest", "--duration", "0.2",
+        "--side-nr-alpha-floor", "1.2",
+    ])
+    with pytest.raises(SystemExit) as refused:
+        qs.main()
+    assert "--side-nr-alpha-floor" in str(refused.value)
+
+
+@pytest.mark.parametrize("name,value", [
+    ("lr_high_max_gain", 1.2),
+    ("side_nr_alpha_floor", 1.2),
+    ("side_nr_beta", -0.1),
+    ("side_nr_beta", float("inf")),
+    ("mono_delay_samples", 1025),
+    ("subcarrier_phase_offset_deg", float("inf")),
+])
+def test_the_helper_refuses_the_same_values(name, value):
+    """A caller that comes straight in gets ValueError, not a run.
+
+    The command-line check is a better message, not the guard: the
+    tests and the sweeps call the runners directly.
+    """
+    from fm_radio.quality_selftest import _set_up_the_demod
+
+    with pytest.raises(ValueError):
+        _set_up_the_demod(a_demodulator(), **{name: value})

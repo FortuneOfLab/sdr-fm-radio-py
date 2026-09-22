@@ -40,7 +40,8 @@ from __future__ import annotations
 
 import argparse
 import logging
-from dataclasses import dataclass
+import math
+from dataclasses import dataclass, replace as dsp_replace
 from fractions import Fraction
 
 import numpy as np
@@ -59,6 +60,9 @@ from fm_radio.constants import (
 )
 import fm_radio.demodulator as _demod_mod
 from fm_radio.demodulator import FMDemodulator
+from fm_radio.dsp_settings import (
+    MAX_MONO_DELAY_SAMPLES, apply as dsp_apply, capture as dsp_capture,
+)
 
 
 def _dsp_subcarrier_offset_deg(use_pll: bool) -> float:
@@ -397,6 +401,77 @@ def _fm_modulate_iq(
     )
 
 
+def _set_up_the_demod(
+    demod,
+    fixed_blend: float | None = None,
+    disable_iq_phase_correction: bool = False,
+    mono_delay_samples: int | None = None,
+    subcarrier_phase_offset_deg: float | None = None,
+    lr_high_max_gain: float | None = None,
+    lr_super_high_max_gain: float | None = None,
+    side_nr_enable: bool | None = None,
+    side_nr_alpha_floor: float | None = None,
+    side_nr_beta: float | None = None,
+    synthetic_source: bool = False,
+) -> None:
+    """Put an experiment's overrides onto a fresh demodulator.
+
+    Through :class:`fm_radio.dsp_settings.DspSettings`, which is the
+    same road the GUI's settings tab takes while the radio plays.
+    One place, so that what can be tried by ear and what can be
+    measured offline are the same nine things, applied the same way
+    and refused for the same reasons.
+
+    Two of the arguments are softer than the settings are, because
+    they were softer before this and the callers rely on it: a blend
+    outside 0..1 is clipped rather than refused, and a negative
+    ``mono_delay_samples`` means "not asked for" - the command line
+    spells "leave it alone" that way.
+
+    The rest are not softened, and that is a change: they used to be
+    written straight onto the demodulator, so a 7-12 kHz ceiling of
+    1.2, a Wiener floor of 1.2, an over-subtraction of -0.1 or a
+    1025-sample delay all ran and produced numbers.  They are refused
+    here.  ``main`` checks the same ranges before it builds anything,
+    so from the command line the refusal is one line rather than a
+    traceback; this raises ValueError for a caller that comes
+    straight in.
+
+    Args:
+        synthetic_source: the IQ or composite was built here rather
+            than captured, so the hardware trim in the default
+            subcarrier phase does not belong: unless the caller
+            names an angle, the variant's DSP-intrinsic offset is
+            used instead (see _dsp_subcarrier_offset_deg).
+    """
+    changes: dict = {}
+    if fixed_blend is not None:
+        changes["force_blend_factor"] = float(np.clip(fixed_blend, 0.0, 1.0))
+    if disable_iq_phase_correction:
+        changes["iq_phase_correction_enabled"] = False
+    if mono_delay_samples is not None and int(mono_delay_samples) >= 0:
+        changes["mono_delay_samples"] = int(mono_delay_samples)
+    if subcarrier_phase_offset_deg is None and synthetic_source:
+        subcarrier_phase_offset_deg = _dsp_subcarrier_offset_deg(
+            getattr(demod, "use_pll_demod", False)
+        )
+    if subcarrier_phase_offset_deg is not None:
+        changes["subcarrier_phase_offset_rad"] = np.deg2rad(
+            float(subcarrier_phase_offset_deg))
+    if lr_high_max_gain is not None:
+        changes["lr_high_max_gain"] = float(lr_high_max_gain)
+    if lr_super_high_max_gain is not None:
+        changes["lr_super_high_max_gain"] = float(lr_super_high_max_gain)
+    if side_nr_enable is not None:
+        changes["side_nr_enabled"] = bool(side_nr_enable)
+    if side_nr_alpha_floor is not None:
+        changes["side_nr_alpha_floor"] = float(side_nr_alpha_floor)
+    if side_nr_beta is not None:
+        changes["side_nr_beta"] = float(side_nr_beta)
+    if changes:
+        dsp_apply(dsp_replace(dsp_capture(demod), **changes), demod)
+
+
 def _run_demod_from_iq(
     iq: np.ndarray,
     fixed_blend: float | None = None,
@@ -407,22 +482,14 @@ def _run_demod_from_iq(
     demod_diag_interval: int | None = None,
                ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     demod = FMDemodulator(stereo=True)
-    if fixed_blend is not None:
-        demod.force_blend_factor = float(np.clip(fixed_blend, 0.0, 1.0))
-    if disable_iq_phase_correction:
-        demod.iq_phase_correction_enabled = False
-    if mono_delay_samples is not None and int(mono_delay_samples) >= 0:
-        # The setter starts a new delay line of the right length.
-        demod.mono_delay_samples = int(mono_delay_samples)
-    # Synthetic source: replace the hardware-trimmed default with the
-    # variant's DSP-intrinsic offset unless the caller overrides (see
-    # _dsp_subcarrier_offset_deg; also applies to the composite-direct
-    # runner so pre-trim semantics are preserved for both variants).
-    if subcarrier_phase_offset_deg is None:
-        subcarrier_phase_offset_deg = _dsp_subcarrier_offset_deg(
-            getattr(demod, "use_pll_demod", False)
-        )
-    demod.subcarrier_phase_offset_rad = np.deg2rad(float(subcarrier_phase_offset_deg))
+    _set_up_the_demod(
+        demod,
+        fixed_blend=fixed_blend,
+        disable_iq_phase_correction=disable_iq_phase_correction,
+        mono_delay_samples=mono_delay_samples,
+        subcarrier_phase_offset_deg=subcarrier_phase_offset_deg,
+        synthetic_source=True,
+    )
     if demod_diag:
         demod.diag_enable = True
     if demod_diag_interval is not None and demod_diag_interval > 0:
@@ -470,25 +537,18 @@ def _run_demod_diag_iq(
     where blend / pilot_snr_db are one entry per processed block.
     """
     demod = FMDemodulator(stereo=True)
-    if fixed_blend is not None:
-        demod.force_blend_factor = float(np.clip(fixed_blend, 0.0, 1.0))
-    if disable_iq_phase_correction:
-        demod.iq_phase_correction_enabled = False
-    if mono_delay_samples is not None and int(mono_delay_samples) >= 0:
-        # The setter starts a new delay line of the right length.
-        demod.mono_delay_samples = int(mono_delay_samples)
-    if subcarrier_phase_offset_deg is not None:
-        demod.subcarrier_phase_offset_rad = np.deg2rad(float(subcarrier_phase_offset_deg))
-    if lr_high_max_gain is not None:
-        demod.lr_high_max_gain = float(lr_high_max_gain)
-    if lr_super_high_max_gain is not None:
-        demod.lr_super_high_max_gain = float(lr_super_high_max_gain)
-    if side_nr_enable is not None:
-        demod.side_nr_enabled = bool(side_nr_enable)
-    if side_nr_alpha_floor is not None:
-        demod.side_nr.alpha_floor = float(side_nr_alpha_floor)
-    if side_nr_beta is not None:
-        demod.side_nr.beta = float(side_nr_beta)
+    _set_up_the_demod(
+        demod,
+        fixed_blend=fixed_blend,
+        disable_iq_phase_correction=disable_iq_phase_correction,
+        mono_delay_samples=mono_delay_samples,
+        subcarrier_phase_offset_deg=subcarrier_phase_offset_deg,
+        lr_high_max_gain=lr_high_max_gain,
+        lr_super_high_max_gain=lr_super_high_max_gain,
+        side_nr_enable=side_nr_enable,
+        side_nr_alpha_floor=side_nr_alpha_floor,
+        side_nr_beta=side_nr_beta,
+    )
 
     left_chunks: list[np.ndarray] = []
     right_chunks: list[np.ndarray] = []
@@ -587,22 +647,14 @@ def _run_demod_from_composite(
     demod_diag_interval: int | None = None,
                      ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     demod = FMDemodulator(stereo=True)
-    if fixed_blend is not None:
-        demod.force_blend_factor = float(np.clip(fixed_blend, 0.0, 1.0))
-    if disable_iq_phase_correction:
-        demod.iq_phase_correction_enabled = False
-    if mono_delay_samples is not None and int(mono_delay_samples) >= 0:
-        # The setter starts a new delay line of the right length.
-        demod.mono_delay_samples = int(mono_delay_samples)
-    # Synthetic source: replace the hardware-trimmed default with the
-    # variant's DSP-intrinsic offset unless the caller overrides (see
-    # _dsp_subcarrier_offset_deg; also applies to the composite-direct
-    # runner so pre-trim semantics are preserved for both variants).
-    if subcarrier_phase_offset_deg is None:
-        subcarrier_phase_offset_deg = _dsp_subcarrier_offset_deg(
-            getattr(demod, "use_pll_demod", False)
-        )
-    demod.subcarrier_phase_offset_rad = np.deg2rad(float(subcarrier_phase_offset_deg))
+    _set_up_the_demod(
+        demod,
+        fixed_blend=fixed_blend,
+        disable_iq_phase_correction=disable_iq_phase_correction,
+        mono_delay_samples=mono_delay_samples,
+        subcarrier_phase_offset_deg=subcarrier_phase_offset_deg,
+        synthetic_source=True,
+    )
     if demod_diag:
         demod.diag_enable = True
     if demod_diag_interval is not None and demod_diag_interval > 0:
@@ -1255,7 +1307,8 @@ def _parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--mono-delay-samples", type=int, default=-1,
-        help="Mono delay override in composite samples (-1=default)",
+        help=f"Mono delay override in composite samples "
+             f"(-1=default, at most {MAX_MONO_DELAY_SAMPLES})",
     )
     p.add_argument(
         "--subcarrier-phase-offset-deg", type=float, default=float("nan"),
@@ -1360,13 +1413,13 @@ def _parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--lr-high-max-gain", type=float, default=float("nan"),
-        help="Override LR_HIGH_MAX_GAIN ceiling for 7-12 kHz L-R "
+        help="Override LR_HIGH_MAX_GAIN ceiling for 7-12 kHz L-R, 0.0-1.0 "
              "(NaN=use constant). Lower values reduce HF stereo noise.",
     )
     p.add_argument(
         "--lr-super-high-max-gain", type=float, default=float("nan"),
-        help="Override LR_SUPER_HIGH_MAX_GAIN ceiling for 12-15 kHz L-R "
-             "(NaN=use constant). Lower values reduce HF stereo noise.",
+        help="Override LR_SUPER_HIGH_MAX_GAIN ceiling for 12-15 kHz L-R, "
+             "0.0-1.0 (NaN=use constant). Lower values reduce HF stereo noise.",
     )
     p.add_argument(
         "--side-nr", dest="side_nr", action="store_true", default=None,
@@ -1378,15 +1431,97 @@ def _parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--side-nr-alpha-floor", type=float, default=float("nan"),
-        help="Side NR minimum Wiener gain in linear units "
+        help="Side NR minimum Wiener gain in linear units, 0.0-1.0 "
              "(0.15≈-16dB max attenuation). Higher = gentler.",
     )
     p.add_argument(
         "--side-nr-beta", type=float, default=float("nan"),
-        help="Side NR over-subtraction factor (1.0=pure Wiener, "
-             ">1=more aggressive)",
+        help="Side NR over-subtraction factor, 0.0 or more (1.0=pure "
+             "Wiener, >1=more aggressive)",
     )
     return p
+
+
+#: What the command line may ask for, and what the sentinel is that
+#: means "do not override".  The ranges are DspSettings', which the
+#: overrides go through since they were folded onto _set_up_the_demod:
+#: a ceiling above 1.0 is not a ceiling (LR_HIGH_MAX_GAIN is neutral
+#: at 1.0), a Wiener floor above 1.0 amplifies, a negative
+#: over-subtraction changes the gain's sign - SideNoiseReducer's
+#: constructor has always clamped that one, and only the direct
+#: attribute write these overrides used to do got past it - and the
+#: mono delay is allocated, so it is bounded.
+_ARGUMENT_RANGES = (
+    # (dest, low, high, what a value outside it would mean)
+    ("lr_high_max_gain", 0.0, 1.0, "a 7-12 kHz ceiling"),
+    ("lr_super_high_max_gain", 0.0, 1.0, "a 12-15 kHz ceiling"),
+    ("side_nr_alpha_floor", 0.0, 1.0, "a minimum Wiener gain"),
+    ("side_nr_beta", 0.0, math.inf, "an over-subtraction factor"),
+)
+
+
+def _check_the_ranges(args) -> None:
+    """Refuse an override the demodulator will not take, with a line.
+
+    The overrides reach the demodulator through ``DspSettings`` now,
+    which refuses what is out of range and what is not finite.
+    Without this, that refusal arrives as a traceback from the middle
+    of a run that has already synthesised its signal; with it, it
+    arrives as one line before anything is built.
+
+    Each argument has one spelling for "not asked for", and it is not
+    the same spelling for all of them: NaN for the four that have no
+    out-of-band value of their own, a negative number for the delay
+    and the blend, which do.  Only that one passes; the other is a
+    value like any other.  So an infinity is refused where NaN is the
+    sentinel, and -inf is the sentinel where a negative number is -
+    ``--fixed-blend=-inf`` is the adaptive blend, as every negative
+    number has always been.  What is refused for the blend is NaN,
+    which is neither negative nor something np.clip can put into
+    0..1.
+
+    Raises:
+        SystemExit: naming the argument, the range and the value.
+    """
+    for dest, low, high, what in _ARGUMENT_RANGES:
+        value = float(getattr(args, dest))
+        flag = "--" + dest.replace("_", "-")
+        if math.isnan(value):
+            continue  # NaN is this argument's "leave the constant".
+        if not math.isfinite(value):
+            # 0.0 <= inf <= inf is true, so the range below lets an
+            # infinite beta through; DspSettings then refuses it in
+            # the middle of --sweep-response.
+            raise SystemExit(
+                f"{flag} must be a finite number, not {value}: it is "
+                f"{what}.  NaN is the one that means \"leave the "
+                f"constant\".")
+        if not low <= value <= high:
+            limit = "0.0 or more" if math.isinf(high) else f"{low} to {high}"
+            raise SystemExit(
+                f"{flag} must be {limit}, not {value}: it is {what}.")
+    blend = float(args.fixed_blend)
+    if math.isnan(blend):
+        # This one's sentinel is a negative number, and nan < 0.0 is
+        # false, so a NaN went past the sentinel, past np.clip, and
+        # into DspSettings mid-run.
+        raise SystemExit(
+            "--fixed-blend must be a number, not nan; a negative value "
+            "is how this one spells \"leave the blend adaptive\".  An "
+            "out-of-range blend is clipped into 0.0-1.0 rather than "
+            "refused, as it always has been.")
+    delay = int(args.mono_delay_samples)
+    if delay > MAX_MONO_DELAY_SAMPLES:
+        raise SystemExit(
+            f"--mono-delay-samples must be at most "
+            f"{MAX_MONO_DELAY_SAMPLES}, not {delay}; the delay line is "
+            f"allocated, and the group delay being compensated is 160 "
+            f"samples.  A negative value means the default.")
+    phase = float(args.subcarrier_phase_offset_deg)
+    if math.isinf(phase):
+        raise SystemExit(
+            f"--subcarrier-phase-offset-deg must be a finite angle, "
+            f"not {phase}.  NaN means the variant's default.")
 
 
 def main() -> None:
@@ -1400,6 +1535,8 @@ def main() -> None:
     else:
         cnr_db = None if float(args.cnr_db) < 0 else float(args.cnr_db)
     fixed_blend = None if args.fixed_blend < 0.0 else float(args.fixed_blend)
+
+    _check_the_ranges(args)
 
     # Reject configurations that would produce zero post-warmup samples.
     # ``evaluate_quality`` and the IQ-WAV diagnostics path otherwise emit
