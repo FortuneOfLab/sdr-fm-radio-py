@@ -309,8 +309,8 @@ def _seconds_of_wav(path: str) -> float | None:
     return frames / float(rate)
 
 
-def _which_file(path: str) -> tuple | None:
-    """What file *path* is, or None if there is no plain file there.
+def _which_file(path: str) -> tuple[bool, tuple | None]:
+    """Whether a plain file is at *path*, and which file it is.
 
     Identity, not spelling.  Windows matches file names without
     regard to case and ignores a trailing dot, so ``a.wav``,
@@ -319,21 +319,30 @@ def _which_file(path: str) -> tuple | None:
     recording three seconds long.  Device and inode are the same for
     all three, and for a hard link or a symlink to it as well.
 
-    Filesystems that do not number their files report inode 0; there
-    the name is all there is to go on, and the caller's own check on
-    the names has already done what can be done.  Anything that is
-    not a plain file - a directory called ``a.wav``, a path with a
-    NUL in it - is nothing to measure and reads as absent.
+    ``os.stat`` follows symlinks, so a part that is a symlink is
+    measured as what it points at, wherever that is.  Deliberately:
+    the rule that parts are looked for beside the sidecar is there so
+    that *what the sidecar says* cannot send the reader elsewhere,
+    not to overrule what the person whose disk it is has arranged.
+    Moving a 4 GB capture to another drive and leaving a symlink
+    behind should not lose the recording.
+
+    Three answers.  ``(False, None)`` - nothing to measure: no file,
+    or something that is not a plain file, such as a directory called
+    ``a.wav`` or a path with a NUL in it.  ``(True, None)`` - a file
+    is there but the filesystem does not number its files (inode 0),
+    so it cannot be told from any other; the caller decides what that
+    is worth.  ``(True, identity)`` otherwise.
     """
     try:
         found = os.stat(path)
     except (OSError, ValueError):
-        return None
+        return False, None
     if not stat_flags.S_ISREG(found.st_mode):
-        return None
+        return False, None
     if not found.st_ino:
-        return (os.path.normcase(path),)
-    return (found.st_dev, found.st_ino)
+        return True, None
+    return True, (found.st_dev, found.st_ino)
 
 
 def _look_for_the_parts(
@@ -349,37 +358,58 @@ def _look_for_the_parts(
     Two names for one file is a problem rather than a measurement:
     the writer never repeats a part, so a sidecar that does cannot be
     believed about its parts at all.
+
+    The walk finishes whatever it finds.  Returning at the first
+    problem would leave ``missing`` saying that nothing is absent
+    when a part before the problem was, and ``missing`` is read by
+    whoever has to decide what can still be played.  The length is
+    the only thing a problem costs, and the caller withholds that.
     """
     missing: list[str] = []
     lengths: list[float | None] = []
     spellings: set[str] = set()
     files: set[tuple] = set()
+    unnumbered = 0
+    problem = ""
     for name in parts:
         base = os.path.basename(name)
         spelling = os.path.normcase(base)
-        if spelling in spellings:
-            return (), (), f"names {base} as more than one part"
+        if spelling in spellings and not problem:
+            problem = f"names {base} as more than one part"
         spellings.add(spelling)
         beside = os.path.join(here, base)
-        which = _which_file(beside)
-        if which is None:
+        there, which = _which_file(beside)
+        if not there:
             missing.append(name)
             continue
-        if which in files:
-            return (), (), f"names one file as more than one part"
-        files.add(which)
+        if which is None:
+            unnumbered += 1
+        elif which in files:
+            if not problem:
+                problem = "names one file as more than one part"
+        else:
+            files.add(which)
         lengths.append(_seconds_of_wav(beside))
-    return tuple(missing), tuple(lengths), ""
+
+    # A filesystem that does not number its files cannot say whether
+    # two names that got this far are two files or one, and the
+    # spelling check above cannot either - it does not know which
+    # names that filesystem folds together.  One part is safe; more
+    # than one might be the same file counted twice, and a length
+    # that might be double is worse than no length at all.
+    if unnumbered and len(lengths) > 1:
+        lengths = [None] * len(lengths)
+    return tuple(missing), tuple(lengths), problem
 
 
 def _unusable(path: str, problem: str) -> Recording:
-    """A row for a sidecar that could not be used, saying why.
+    """A row for a sidecar that had nothing to say, saying why.
 
-    Two kinds end up here: the ones that could not be read at all,
-    and the ones that read but say something about their parts that
-    cannot be acted on.  Both are shown rather than dropped, and
-    neither carries a length or a frequency - what such a file says
-    is not worth passing off as a capture's parameters.
+    Only for the ones that could not be read as a JSON object at
+    all: there is no frequency in a file that would not parse.  A
+    sidecar that parses and then says something unusable about its
+    *parts* keeps the rest of what it says and carries the problem
+    alongside it - :func:`read_sidecar` builds that row itself.
     """
     return Recording(
         sidecar=path, kind="", parts=(), missing=(),

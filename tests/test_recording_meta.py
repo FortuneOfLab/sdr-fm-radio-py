@@ -673,3 +673,89 @@ def test_scan_of_a_directory_name_the_platform_will_not_take(tmp_path):
     # rather than returning no matches.
     assert scan_recordings("\x00") == []
     assert scan_recordings(str(tmp_path) + "\x00") == []
+
+
+# --- Round 4: what the filesystem, not the sidecar, can do ------------
+
+
+def _read_with_unnumbered_files(path):
+    """read_sidecar as a filesystem that reports inode 0 would see it.
+
+    Patched around the call alone, not for the whole test, so that
+    nothing else in the run has to live without os.stat telling the
+    truth.
+    """
+    real_stat = os.stat
+
+    def without_inodes(target, **kw):
+        fields = list(real_stat(target, **kw))
+        fields[1] = 0                     # st_ino
+        return os.stat_result(fields)
+
+    os.stat = without_inodes
+    try:
+        return read_sidecar(path)
+    finally:
+        os.stat = real_stat
+
+
+def test_a_filesystem_that_does_not_number_its_files(tmp_path):
+    # Without inodes, two names that got as far as being opened
+    # cannot be told from one name twice - and the spelling check
+    # cannot help, because it does not know which names that
+    # filesystem folds together.  a.wav and a.wav. are the case on
+    # Windows.
+    _write_wav(tmp_path / "a.wav", 48000)          # 1.0 s
+    _write_json(tmp_path / "two.json", _iq_meta(["a.wav", "a.wav."]))
+
+    rec = _read_with_unnumbered_files(str(tmp_path / "two.json"))
+    assert rec.problem == ""
+    assert rec.missing == ()
+    assert rec.audio_seconds is None               # NOT 2.0
+    assert rec.duration_s == pytest.approx(120.0)  # the clock instead
+    assert rec.duration_is_measured is False
+
+    # One part cannot be itself twice, so it is still measured.
+    _write_json(tmp_path / "one.json", _iq_meta(["a.wav"]))
+    rec = _read_with_unnumbered_files(str(tmp_path / "one.json"))
+    assert rec.audio_seconds == pytest.approx(1.0)
+    assert rec.duration_is_measured is True
+
+
+def test_a_part_that_is_a_symlink_out_of_the_directory(tmp_path):
+    # Followed on purpose: the "beside the sidecar" rule is about
+    # what the sidecar says, not about what the owner of the disk has
+    # arranged.  Moving a 4 GB capture off this drive and leaving a
+    # symlink must not lose the recording.
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    _write_wav(elsewhere / "far.wav", 48000)       # 1.0 s, not beside
+    try:
+        os.symlink(str(elsewhere / "far.wav"), str(tmp_path / "here.wav"))
+    except (OSError, NotImplementedError, AttributeError) as e:
+        pytest.skip(f"symlinks are not available here: {e}")
+    _write_json(tmp_path / "link.json", _iq_meta(["here.wav"]))
+
+    rec = read_sidecar(str(tmp_path / "link.json"))
+    assert rec.problem == ""
+    assert rec.missing == ()
+    assert rec.complete is True
+    assert rec.audio_seconds == pytest.approx(1.0)
+
+
+def test_missing_parts_are_collected_even_when_there_is_a_problem(tmp_path):
+    # The walk used to stop at the problem, and missing came back
+    # empty - saying nothing was absent when gone.wav was.
+    _write_wav(tmp_path / "a.wav", 48000)
+    try:
+        os.link(str(tmp_path / "a.wav"), str(tmp_path / "b.wav"))
+    except (OSError, NotImplementedError, AttributeError) as e:
+        pytest.skip(f"this filesystem has no hard links: {e}")
+    _write_json(tmp_path / "both.json",
+                _iq_meta(["gone.wav", "a.wav", "b.wav"]))
+
+    rec = read_sidecar(str(tmp_path / "both.json"))
+    assert rec.problem == "names one file as more than one part"
+    assert rec.missing == ("gone.wav",)
+    assert rec.audio_seconds is None
+    assert rec.complete is False
