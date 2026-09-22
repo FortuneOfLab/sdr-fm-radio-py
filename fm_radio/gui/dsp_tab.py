@@ -48,19 +48,36 @@ and last-writer-wins is what it is for.
 standard and light chains do not share them (85.0 degrees of
 subcarrier phase against 84.3), so "reset" means the running
 variant's own default.
+
+There are two of everything: slot A and slot B, one switch between
+them, and whichever is selected is both the one being edited and the
+one the receiver is running.  B starts at the defaults, so the first
+useful comparison - what I have just changed against what it was -
+is there without setting anything up.  Every switch writes a line to
+the log saying which slot and what is in it, because the question a
+listening test ends on is "which one was that?" and the answer has
+to survive the session.
 """
 
 from __future__ import annotations
 
+import logging
 import math
+from dataclasses import fields, replace
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QCheckBox, QDoubleSpinBox, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
-    QPushButton, QSizePolicy, QSlider, QSpinBox, QVBoxLayout, QWidget,
+    QButtonGroup, QCheckBox, QDoubleSpinBox, QGridLayout, QGroupBox,
+    QHBoxLayout, QLabel, QPushButton, QRadioButton, QSizePolicy, QSlider,
+    QSpinBox, QVBoxLayout, QWidget,
 )
 
 from fm_radio.dsp_settings import MAX_MONO_DELAY_SAMPLES
+
+logger = logging.getLogger("fm_receiver.gui")
+
+#: The two slots, in the order they are shown.
+SLOTS = ("A", "B")
 
 #: Slider positions for a fraction 0..1, so one step is 0.01.
 _FRACTION_STEPS = 100
@@ -75,6 +92,20 @@ _BETA_STEPS = 30
 #: user type 0 to see what happens is a box in the way of the
 #: experiment this tab exists for.
 _PHASE_LIMIT_DEG = 180.0
+
+
+def _in_words(settings) -> str:
+    """A settings object on one line, for the log.
+
+    Only what differs from nothing is not worth doing: the whole set
+    is nine short numbers, and a line that left the unchanged ones
+    out would need the log read backwards to answer "what was I
+    listening to".
+    """
+    return ", ".join(
+        "%s=%s" % (field.name, getattr(settings, field.name))
+        for field in fields(settings)
+    )
 
 
 class _Row:
@@ -133,39 +164,64 @@ class DspTab(QWidget):
         #: the signals it cannot block do not come back as changes.
         self._settling = False
 
+        settings = controller.get_dsp_settings()
+        #: What each slot holds.  A is what the receiver is running
+        #: when the window opens; B is the defaults, so that the
+        #: first comparison anyone wants - this against what it was
+        #: - needs nothing set up first.
+        self._slots = {"A": settings, "B": self._defaults}
+        self._slot = "A"
+
         outer = QVBoxLayout(self)
         box = QGroupBox("DSP", self)
         grid = QGridLayout(box)
         grid.setColumnStretch(1, 1)
         outer.addWidget(box)
 
-        settings = controller.get_dsp_settings()
-        self._add_blend(grid, 0, settings)
-        self._add_flag(grid, 1, "Side noise reduction",
+        self._add_slots(grid, 0)
+        self._add_blend(grid, 1, settings)
+        self._add_flag(grid, 2, "Side noise reduction",
                        "side_nr_enabled", settings)
-        self._add_fraction(grid, 2, "NR floor", "side_nr_alpha_floor",
+        self._add_fraction(grid, 3, "NR floor", "side_nr_alpha_floor",
                            settings, _FRACTION_STEPS, 1.0)
-        self._add_fraction(grid, 3, "NR strength", "side_nr_beta",
+        self._add_fraction(grid, 4, "NR strength", "side_nr_beta",
                            settings, _BETA_STEPS, _BETA_MAX)
-        self._add_fraction(grid, 4, "L-R 7-12k ceiling",
+        self._add_fraction(grid, 5, "L-R 7-12k ceiling",
                            "lr_high_max_gain", settings, _FRACTION_STEPS, 1.0)
-        self._add_fraction(grid, 5, "L-R 12-15k ceiling",
+        self._add_fraction(grid, 6, "L-R 12-15k ceiling",
                            "lr_super_high_max_gain", settings,
                            _FRACTION_STEPS, 1.0)
-        self._add_phase(grid, 6, settings)
-        self._add_delay(grid, 7, settings)
-        self._add_flag(grid, 8, "I/Q phase correction",
+        self._add_phase(grid, 7, settings)
+        self._add_delay(grid, 8, settings)
+        self._add_flag(grid, 9, "I/Q phase correction",
                        "iq_phase_correction_enabled", settings)
 
         self._reset_all = QPushButton("Reset all", box)
         self._reset_all.clicked.connect(self._put_everything_back)
-        grid.addWidget(self._reset_all, 9, 3)
+        grid.addWidget(self._reset_all, 10, 3)
 
         outer.addStretch(1)
 
     # ------------------------------------------------------------------
     # Construction
     # ------------------------------------------------------------------
+
+    def _add_slots(self, grid, at: int) -> None:
+        """The switch: which set is being edited, and heard."""
+        holder = QWidget(self)
+        row_layout = QHBoxLayout(holder)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        self._slot_buttons = QButtonGroup(self)
+        for which in SLOTS:
+            button = QRadioButton(which, holder)
+            button.setChecked(which == self._slot)
+            self._slot_buttons.addButton(button)
+            button.toggled.connect(
+                lambda on, w=which: self._slot_chosen(w) if on else None)
+            row_layout.addWidget(button)
+        row_layout.addStretch(1)
+        grid.addWidget(QLabel("Comparing", self), at, 0)
+        grid.addWidget(holder, at, 1)
 
     def _finish(self, grid, at: int, label: str, row: _Row) -> None:
         """Put a row's label, readout and reset button around it."""
@@ -310,6 +366,8 @@ class DspTab(QWidget):
         if self._settling:
             return
         value = row.read()
+        self._slots[self._slot] = replace(
+            self._slots[self._slot], **{row.field: value})
         self.controller.update_dsp_settings(**{row.field: value})
         row.put(value)                  # the readout, and nothing else
 
@@ -317,22 +375,49 @@ class DspTab(QWidget):
         """This parameter, back to what the receiver started under."""
         value = getattr(self._defaults, row.field)
         row.put(value)
+        self._slots[self._slot] = replace(
+            self._slots[self._slot], **{row.field: value})
         self.controller.update_dsp_settings(**{row.field: value})
 
     def _put_everything_back(self) -> None:
-        """All nine at once: one set, one write, one block boundary.
+        """This slot, back to the defaults: one set, one write.
 
         Not nine updates - the whole set is what set_dsp_settings is
         for, and nine of them would be nine chances for a block to
         be demodulated under a half-reset configuration.
+
+        The other slot is left alone.  It is the other half of
+        whatever comparison is being made, and a button that emptied
+        both would be one nobody dared press.
         """
+        self._slots[self._slot] = self._defaults
+        self._show(self._defaults)
+        self.controller.set_dsp_settings(self._defaults)
+
+    def _slot_chosen(self, which: str) -> None:
+        """The other set, on the air and under the controls.
+
+        One write of the whole set, for the same reason Reset all is
+        one: the point of the switch is to hear one against the
+        other, and a switch that arrived in pieces would have a
+        block or two of neither.
+        """
+        if which == self._slot:
+            return
+        self._slot = which
+        settings = self._slots[which]
+        self._show(settings)
+        self.controller.set_dsp_settings(settings)
+        logger.info("DSP slot %s: %s", which, _in_words(settings))
+
+    def _show(self, settings) -> None:
+        """Put a whole set under the controls, changing nothing else."""
         self._settling = True
         try:
             for row in self._rows:
-                row.put(getattr(self._defaults, row.field))
+                row.put(getattr(settings, row.field))
         finally:
             self._settling = False
-        self.controller.set_dsp_settings(self._defaults)
 
     # ------------------------------------------------------------------
     # What the window does
@@ -351,6 +436,8 @@ class DspTab(QWidget):
             if row.reset is not None:
                 row.reset.setEnabled(usable)
         self._reset_all.setEnabled(usable)
+        for button in self._slot_buttons.buttons():
+            button.setEnabled(usable)
         # The blend slider has a second say in it, the way the gain
         # slider does in the window: it is only live while the blend
         # is being forced at all.
@@ -360,3 +447,7 @@ class DspTab(QWidget):
     def showing(self) -> "dict[str, object]":
         """What the controls say, by field name.  For tests."""
         return {row.field: row.read() for row in self._rows}
+
+    def slot(self) -> str:
+        """Which of :data:`SLOTS` is being edited and heard."""
+        return self._slot
