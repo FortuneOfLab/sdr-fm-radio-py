@@ -57,6 +57,7 @@ from fm_radio.band_scan import (
 )
 from fm_radio.exceptions import SDRDeviceError
 from fm_radio.gui.band_view import BandView
+from fm_radio.gui.dsp_tab import DspTab
 from fm_radio.multipath import NOISE_AM_DEPTH
 from fm_radio.stations import WillNotEdit
 from fm_radio.device_worker import TUNE
@@ -373,18 +374,14 @@ class ReceiverWindow(QMainWindow):
         return page
 
     def _build_dsp_tab(self) -> QWidget:
-        """Empty, and says so, until the next change fills it.
+        """The nine settings the demodulator will take while it runs.
 
-        A tab that opens on nothing at all reads as a window that
-        has broken rather than one that is not finished.
+        Its own module: this window is long enough, and the tab
+        talks to the same facade through its own controller
+        reference.  See fm_radio.gui.dsp_tab.
         """
-        page = QWidget(self)
-        layout = QVBoxLayout(page)
-        self._dsp_waiting = QLabel(
-            "The DSP settings go here.", page)
-        self._dsp_waiting.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self._dsp_waiting)
-        return page
+        self._dsp = DspTab(self.controller, self)
+        return self._dsp
 
     def _build_tuner(self) -> QGroupBox:
         box = QGroupBox("Tuner", self)
@@ -739,6 +736,10 @@ class ReceiverWindow(QMainWindow):
         # something it cannot do.
         for widget in (self._record_audio, self._record_iq):
             widget.setEnabled(usable)
+        # The DSP settings go with them: a sweep is using the
+        # demodulator for its own purposes, and a receiver that has
+        # gone cannot be asked for anything.
+        self._dsp.set_usable(usable)
 
     def _show_what_was_found(self, found) -> None:
         """Fill the list of what is on the band, newest sweep only."""

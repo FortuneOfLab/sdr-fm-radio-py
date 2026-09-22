@@ -9,7 +9,9 @@ downstream finds that out unless they are told.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import logging
+import math
 import sys
 import threading
 import time
@@ -18,6 +20,7 @@ import numpy as np
 import pytest
 
 from fm_radio.controller import FMReceiverController
+from fm_radio.dsp_settings import DspSettings
 from fm_radio.exceptions import SDRDeviceError
 
 
@@ -122,6 +125,20 @@ def test_a_device_that_never_goes_leaves_the_receiver_alone(receiver):
 # What the window does about it
 # ----------------------------------------------------------------------
 
+#: What a receiver hands the settings tab; the standard chain's.
+_DSP_DEFAULTS = DspSettings(
+    force_blend_factor=None,
+    subcarrier_phase_offset_rad=math.radians(85.0),
+    mono_delay_samples=0,
+    iq_phase_correction_enabled=True,
+    lr_high_max_gain=1.0,
+    lr_super_high_max_gain=1.0,
+    side_nr_enabled=True,
+    side_nr_alpha_floor=0.30,
+    side_nr_beta=1.0,
+)
+
+
 class _FakeController:
     """Enough of a controller for the window, with a device that can go."""
 
@@ -158,6 +175,21 @@ class _FakeController:
 
     def get_status(self):
         return None
+
+    # The DSP facade, for the settings tab the window builds.  Enough
+    # of it to be read once and written to; what the tab does with it
+    # has its own tests.
+    def get_dsp_defaults(self):
+        return _DSP_DEFAULTS
+
+    def get_dsp_settings(self):
+        return _DSP_DEFAULTS
+
+    def update_dsp_settings(self, **changes):
+        return dataclasses.replace(_DSP_DEFAULTS, **changes)
+
+    def set_dsp_settings(self, settings) -> None:
+        pass
 
     def get_spectrum(self):
         return None
