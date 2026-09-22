@@ -363,26 +363,46 @@ class AudioOutput(AudioOutputInterface):
         from behind a cushion again, the way it is at startup, and
         not handed to a card that is already waiting for it.
 
-        Holds nest, because the things that take one nest: a scan
-        holds for its whole length and each of its two dozen hops is
-        a retune that holds again.  The output plays again when the
-        last hold has been let go.
+        Holds are counted rather than a flag, so that two callers
+        cannot end each other's hold: the output plays again when the
+        last one has been let go.  Today the band scan is the only
+        caller - a retune does not hold, because PortAudio's stop
+        costs more than the retune loses; see
+        FMReceiverController._tune_now.
 
         Recording is not affected: that path takes the audio before
         this one.
 
-        Under ``_play_lock``: the count, ``stream.stop_stream()``,
-        which waits for the callback that may be running (one buffer,
-        21 ms here), clearing the callback's deque and draining the
-        queue, which is at most fifty ``get_nowait`` calls.  Nothing
-        else - the log line is written after the lock is let go,
-        because the realtime path takes this same lock in
-        ``_play_from_now_on`` and a log handler writes to a file.
+        Two steps, because the second one is slow and the first one
+        has to be atomic against the realtime path:
+
+        1. The count goes up under ``_close_lock`` and then
+           ``_play_lock`` - the order the enqueue path takes them in,
+           so there is no cycle.  ``_enqueue_locked`` reads the count
+           under ``_close_lock``, so once this returns, every later
+           block is dropped and no block already past the check can
+           still be waiting to go in.  All that happens under the two
+           locks is ``self._holds += 1``.
+        2. The stream is stopped and everything between the DSP and
+           the card is emptied, under ``_play_lock`` alone.  This is
+           the slow part: ``stop_stream()`` is PortAudio's graceful
+           stop, which plays out what the card is already holding -
+           measured 101, 109 and 110 ms against the 106.7 ms this
+           device reports as its output latency.  The realtime path
+           cannot be waiting on ``_play_lock`` meanwhile, because the
+           only place it takes that lock is ``_play_from_now_on``,
+           which it reaches from ``_enqueue_locked`` - and after step
+           1 that returns before it gets there.
+
+        The log line is written after both, because a handler writes
+        to a file.
         """
+        with self._close_lock:
+            with self._play_lock:
+                self._holds += 1
+                if self._holds > 1:
+                    return
         with self._play_lock:
-            self._holds += 1
-            if self._holds > 1:
-                return
             stopped = self._stop_playing_locked()
         if stopped:
             self.logger.info("Audio output held")
@@ -422,6 +442,15 @@ class AudioOutput(AudioOutputInterface):
         returned: PortAudio does not call back into a stopped
         stream.
 
+        A stop that FAILED leaves everything alone: PortAudio calls a
+        stream stopped once Pa_StopStream has returned successfully,
+        and until then the callback may still be running - clearing
+        its deque underneath it, or starting a stream that never
+        stopped, is worse than not holding at all.  The hold still
+        stands, so that it pairs with its resume; what the caller
+        gets is the behaviour there was before any of this, the
+        output playing through the gap.
+
         Returns:
             Whether a running stream was stopped, for the caller to
             say so outside the lock.
@@ -431,8 +460,10 @@ class AudioOutput(AudioOutputInterface):
             try:
                 self.stream.stop_stream()
             except Exception as trouble:       # pragma: no cover - guard
-                self.logger.error("Could not stop the audio stream: %s",
-                                  trouble, exc_info=True)
+                self.logger.error(
+                    "Could not stop the audio stream, so it keeps playing "
+                    "through this: %s", trouble, exc_info=True)
+                return False
             self._playing = False
         self._frames_ready = 0
         self._buffer_deque.clear()

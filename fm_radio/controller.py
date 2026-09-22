@@ -621,12 +621,17 @@ class FMReceiverController:
         The generation on each block tells that thread when the station
         has changed; it resets its own demodulator then.
 
-        The output is held across the write.  There is a gap either
-        way - the write takes about 50 ms and the demodulator then
-        refills its filters - and holding it makes the gap a silence
-        the card is not asking into (measured about one underrun per
-        retune before this) and gives the output its cushion back on
-        the far side.
+        The output is NOT held across the write, although a band
+        scan holds for its whole length.  A retune costs about one
+        underrun, 21 ms of silence at the moment the station changes
+        anyway, and holding would cost more than it saves:
+        PortAudio's stop is graceful, so it plays out what the card
+        is already holding - measured 101, 109 and 110 ms against
+        this device's 106.7 ms of output latency - and every step of
+        the tuning would wait for it.  The seven seconds of ordinary
+        listening after a scan in that same run had no underruns at
+        all, so the cushion a retune loses is not one the receiver
+        was found to need.
         """
         shut = RecordingsShut(self.audio_output, self.sdr_receiver,
                               self.logger)
@@ -638,16 +643,9 @@ class FMReceiverController:
             # asked of this same worker, and the worker does one thing
             # at a time.
             shut.take()
-            self.audio_output.hold()
-            try:
-                self.sdr_receiver.set_center_frequency(freq_hz)
-                self._flush_data_queue()
-                self.auto_gain.reset_counters()
-            finally:
-                # Even if the write failed: a held output that is
-                # never let go is a radio that has gone quiet for
-                # good.
-                self.audio_output.resume()
+            self.sdr_receiver.set_center_frequency(freq_hz)
+            self._flush_data_queue()
+            self.auto_gain.reset_counters()
         finally:
             self._close_the_recordings(shut)
 

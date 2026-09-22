@@ -518,10 +518,12 @@ class BandScan:
         was_at = self.controller.get_frequency()
         was_auto = not self.controller.is_manual_gain()
         sdr = self.controller.sdr_receiver
-        # Before the first hop, and let go by _put_the_receiver_back,
-        # which every way out of here goes through.
-        self.controller.audio_output.hold()
         self._blocks = sdr.watch_the_blocks()
+        # After the watcher, not before: watch_the_blocks raises when
+        # something is already watching, and a hold taken before that
+        # would never be let go - _put_the_receiver_back, which is
+        # what lets it go, is only reached from inside the try below.
+        self.controller.audio_output.hold()
         try:
             found = self._sweep(listen_sec)
         except BaseException as went_wrong:

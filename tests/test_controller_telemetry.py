@@ -959,12 +959,15 @@ def test_a_picture_that_cannot_be_built_does_not_stop_the_block(receiver):
 # The output across a retune
 # ----------------------------------------------------------------------
 
-def test_a_tune_holds_the_output_across_the_write(receiver, monkeypatch):
-    """The gap is there either way; the card should not ask into it.
+def test_a_tune_does_not_stop_the_output(receiver, monkeypatch):
+    """A retune costs an underrun, and stopping the card costs more.
 
-    Asked from inside set_center_frequency, which is the write the
-    gap is made of: holding around the call and asking afterwards
-    would pass whether or not the hold covered the write.
+    A band scan holds the output for its whole length; a retune does
+    not.  PortAudio's stop plays out what the card is holding first -
+    101 to 110 ms on this device - and a retune only loses about one
+    underrun's worth of audio, 21 ms, at the moment the station
+    changes anyway.  Asked from inside set_center_frequency, which is
+    the write the gap is made of.
     """
     held_during = []
     real = receiver.sdr_receiver.set_center_frequency
@@ -976,30 +979,13 @@ def test_a_tune_holds_the_output_across_the_write(receiver, monkeypatch):
     monkeypatch.setattr(receiver.sdr_receiver, "set_center_frequency",
                         watched)
 
-    tuned(receiver, 80.1e6)
-
-    assert held_during == [True], "the write happened with the output live"
-    assert receiver.audio_output.held is False, "the output was not let go"
-
-
-def test_a_tune_leaves_the_output_waiting_for_a_cushion(receiver):
-    """After the gap it starts again the way it starts at boot.
-
-    Playing, then a retune, then not playing until enough has piled
-    up again - which is the underrun this is here to avoid: a queue
-    emptied by the gap and never refilled hands every block to a
-    card that is already waiting for it.
-    """
     run_blocks(receiver, 4)
     assert receiver.audio_output._playing is True, (
-        "the output never started, so there is nothing to hold")
+        "the output never started, so there is nothing to keep playing")
 
     tuned(receiver, 80.1e6)
 
-    assert receiver.audio_output._playing is False
-    assert receiver.audio_output.audio_buffer_queue.empty()
+    assert held_during == [False], (
+        "the retune stopped the card, which costs more than it saves")
+    assert receiver.audio_output._playing is True
     assert receiver.audio_output.held is False
-
-    run_blocks(receiver, 4)
-    assert receiver.audio_output._playing is True, (
-        "the output never came back")

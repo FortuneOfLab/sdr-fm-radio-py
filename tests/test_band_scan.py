@@ -569,16 +569,6 @@ class FakeController:
         return not self._auto
 
     def tune(self, freq_hz):
-        # Holding the output across the write is what the real
-        # _tune_now does, and the sweep's hold has to survive two
-        # dozen of these.
-        self.audio_output.hold()
-        try:
-            return self._tune(freq_hz)
-        finally:
-            self.audio_output.resume()
-
-    def _tune(self, freq_hz):
         if (self.will_not_tune_to is not None
                 and abs(freq_hz - self.will_not_tune_to) < 1.0):
             self.tuned_to.append(freq_hz)
@@ -1075,13 +1065,12 @@ def test_the_receiver_is_put_back_even_when_the_sweep_fails(monkeypatch):
 
 
 def test_the_output_is_held_for_the_whole_sweep():
-    """Not hop by hop: the hops let go of their own holds.
+    """Once, around the lot - not hop by hop.
 
     Two dozen hops of other stations is not something to listen to,
     and the card asking into the gaps between them measured 68
-    underruns across a 4.3 s sweep.  Each hop holds and lets go
-    around its own write, so the sweep's hold has to outlast all of
-    them.
+    underruns across a 4.3 s sweep.  Holding and letting go around
+    each hop would leave every one of those gaps.
     """
     controller = FakeController(auto_gain=True, at_hz=80.0e6)
     scan = BandScan(controller)
@@ -1090,11 +1079,31 @@ def test_the_output_is_held_for_the_whole_sweep():
 
     log = controller.audio_output.log
     assert log, "the sweep did not touch the output"
-    assert len(controller.tuned_to) > 2, "there were no hops to survive"
-    assert min(log[:-1]) >= 1, (
-        "the output was let go in the middle of the sweep: %r" % (log,))
-    assert log[-1] == 0
+    assert len(controller.tuned_to) > 2, "there were no hops to cover"
+    assert log == [1, 0], (
+        "the output was held and let go more than once: %r" % (log,))
     assert controller.audio_output.held is False
+
+
+def test_a_sweep_that_cannot_watch_the_blocks_holds_nothing():
+    """The hold is taken after the watcher, so there is none to leak.
+
+    watch_the_blocks raises when something is already watching, and
+    that happens before the try whose exit lets a hold go.
+    """
+    controller = FakeController()
+
+    def taken(*args, **kwargs):
+        raise RuntimeError("something is already watching the blocks")
+
+    controller.sdr_receiver.watch_the_blocks = taken
+    scan = BandScan(controller)
+
+    with pytest.raises(RuntimeError):
+        scan.run(listen_sec=0.0)
+
+    assert controller.audio_output.held is False
+    assert controller.audio_output.log == [], "a hold was taken and left"
 
 
 def test_the_output_is_let_go_when_the_sweep_fails(monkeypatch):

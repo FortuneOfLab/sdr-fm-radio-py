@@ -744,3 +744,101 @@ def test_a_hold_leaves_recording_alone(audio_output, tmp_path):
     with wave_mod.open(path, "rb") as f:
         assert f.getnframes() == BLOCK_FRAMES, (
             "the hold reached the recording")
+
+
+def test_a_block_being_queued_when_the_hold_lands_does_not_survive_it(
+        audio_output):
+    """The hold has to be atomic against a block already on its way in.
+
+    The enqueue path reads the hold count and then puts; a hold that
+    ran entirely between those two would drop nothing, and the block
+    would be played when the output came back AND counted towards the
+    cushion.  The interleaving is forced rather than hoped for: the
+    put is held until the holding thread is waiting on the lock.
+    """
+    at_the_lock = threading.Event()
+    holder: dict[str, int] = {}
+    real_lock = audio_output._close_lock
+
+    class Watched:
+        """The output's close lock, saying when the hold reaches it."""
+
+        def acquire(self, *args, **kwargs):
+            if threading.get_ident() == holder.get("id"):
+                at_the_lock.set()
+            return real_lock.acquire(*args, **kwargs)
+
+        def release(self):
+            real_lock.release()
+
+        def __enter__(self):
+            self.acquire()
+            return self
+
+        def __exit__(self, *exc):
+            self.release()
+
+    audio_output._close_lock = Watched()
+
+    def hold_it():
+        holder["id"] = threading.get_ident()
+        audio_output.hold()
+
+    holding = threading.Thread(target=hold_it)
+    real_put = audio_output.audio_buffer_queue.put
+    on_its_way = []
+
+    def put(item, **kwargs):
+        if not on_its_way:
+            on_its_way.append(True)
+            holding.start()
+            # Recorded, not asserted: enqueue_audio catches whatever
+            # comes out of here and logs it, so an assertion in this
+            # function is a test that cannot fail.
+            on_its_way.append(at_the_lock.wait(10))
+        return real_put(item, **kwargs)
+
+    audio_output.audio_buffer_queue.put = put
+    try:
+        _feed(audio_output, BLOCK_FRAMES)
+    finally:
+        holding.join(timeout=10)
+
+    assert not holding.is_alive()
+    assert on_its_way[1:] == [True], (
+        "the hold did not wait for the block that was on its way in")
+    assert audio_output.held is True
+    assert audio_output.audio_buffer_queue.empty(), (
+        "a block got in behind the hold")
+    assert audio_output._frames_ready == 0, (
+        "it counted towards the cushion as well")
+
+
+def test_a_stream_that_will_not_stop_is_left_alone(audio_output, caplog):
+    """PortAudio calls a stream stopped when Pa_StopStream succeeded.
+
+    Until then the callback may still be running, so clearing its
+    deque underneath it - or starting a stream that never stopped -
+    is worse than not holding at all.
+    """
+    _feed(audio_output, audio_output._preroll_frames)
+    queued = audio_output.audio_buffer_queue.qsize()
+    assert queued, "nothing is queued, so there is nothing to leave alone"
+
+    def will_not_stop():
+        raise OSError("the card is busy")
+
+    audio_output.stream.stop_stream = will_not_stop
+
+    with caplog.at_level(logging.ERROR, logger="fm_receiver.AudioOutput"):
+        audio_output.hold()
+
+    assert audio_output._playing is True, "it said stopped without stopping"
+    assert audio_output.audio_buffer_queue.qsize() == queued, (
+        "the queue was emptied under a callback that may still be running")
+    assert any("keeps playing" in r.getMessage() for r in caplog.records)
+
+    # The hold still stands, so it still pairs with its resume.
+    assert audio_output.held is True
+    audio_output.resume()
+    assert audio_output.held is False
