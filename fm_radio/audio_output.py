@@ -171,6 +171,12 @@ class AudioOutput(AudioOutputInterface):
         # _play_lock, read from the realtime path, where a stale read
         # costs one block either way.
         self._holds: int = 0
+        # Whether the stream was actually stopped for the hold in
+        # force.  A stop that PortAudio refused leaves the card
+        # playing, and audio has to keep reaching it or the hold is
+        # a silence with underruns in it - which is worse than the
+        # gap it was meant to cover.
+        self._holding_stopped: bool = False
         # Blocks dropped because the output was held, counted so that
         # the log can say how long a hold lasted in blocks rather
         # than only in seconds.
@@ -396,6 +402,11 @@ class AudioOutput(AudioOutputInterface):
 
         The log line is written after both, because a handler writes
         to a file.
+
+        A stop the card refuses leaves the hold standing - so that
+        it still pairs with its resume - but lets the audio go on
+        reaching the card, because a hold that drops blocks into a
+        stream that never stopped is a silence with underruns in it.
         """
         with self._close_lock:
             with self._play_lock:
@@ -424,6 +435,7 @@ class AudioOutput(AudioOutputInterface):
             self._holds -= 1
             if self._holds:
                 return
+            self._holding_stopped = False
             dropped, self._held_drop_count = self._held_drop_count, 0
         if dropped:
             self.logger.info("Audio output let go after %d blocks held",
@@ -465,6 +477,7 @@ class AudioOutput(AudioOutputInterface):
                     "through this: %s", trouble, exc_info=True)
                 return False
             self._playing = False
+        self._holding_stopped = True
         self._frames_ready = 0
         self._buffer_deque.clear()
         self._buffer_len = 0
@@ -517,13 +530,18 @@ class AudioOutput(AudioOutputInterface):
 
     def _enqueue_locked(self, left: np.ndarray, right: np.ndarray) -> None:
         """Body of :meth:`enqueue_audio`; caller holds ``_close_lock``."""
-        if self._holds:
+        if self._holds and self._holding_stopped:
             # Dropped rather than queued: it is the audio of a scan
-            # hop or of the station being left, and queueing it would
-            # both play it when the hold ends and fill the cushion
-            # with it.  Not counted as a dropped block - that counter
-            # means the queue was full, which is a fault, and this is
-            # not.
+            # hop, and queueing it would both play it when the hold
+            # ends and fill the cushion with it.  Not counted as a
+            # dropped block - that counter means the queue was full,
+            # which is a fault, and this is not.
+            #
+            # Only when the card really did stop.  If it would not,
+            # the hold stands but the audio keeps flowing, which is
+            # what the receiver did before any of this; dropping it
+            # into a card that is still playing would make the hold
+            # a silence full of underruns.
             self._held_drop_count += 1
             return
         try:

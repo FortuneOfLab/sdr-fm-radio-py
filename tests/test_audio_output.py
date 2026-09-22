@@ -838,7 +838,15 @@ def test_a_stream_that_will_not_stop_is_left_alone(audio_output, caplog):
         "the queue was emptied under a callback that may still be running")
     assert any("keeps playing" in r.getMessage() for r in caplog.records)
 
-    # The hold still stands, so it still pairs with its resume.
+    # The hold still stands, so it still pairs with its resume...
     assert audio_output.held is True
+    # ...but audio keeps reaching a card that never stopped.  Dropping
+    # it there would make the hold a silence with underruns in it,
+    # which is worse than the gap the hold was for.
+    was_queued = audio_output.audio_buffer_queue.qsize()
+    _feed(audio_output, BLOCK_FRAMES)
+    assert audio_output.audio_buffer_queue.qsize() > was_queued, (
+        "the audio was dropped into a stream that is still playing")
+
     audio_output.resume()
     assert audio_output.held is False
