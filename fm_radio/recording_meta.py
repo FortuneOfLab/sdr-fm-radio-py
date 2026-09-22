@@ -289,17 +289,23 @@ def _named_parts(meta: dict) -> tuple[tuple[str, ...], str]:
     return (), ""
 
 
-def _seconds_of_wav(path: str) -> float | None:
+def _seconds_of_wav(handle) -> float | None:
     """The WAV header's length in seconds, or None if it cannot say.
 
-    Only the header is read, so this costs one open per part however
-    large the file is: a 4 GB IQ capture answers as fast as a short
-    one.  A file that is not a WAV at all, or whose header is
+    Takes an open binary file rather than a path, so that the caller
+    can measure exactly the file it has already identified - see
+    :func:`_what_is_there`.  ``wave`` does not close a handle it was
+    given, only one it opened itself.
+
+    Only the header is read, so this costs nothing beyond the open
+    however large the file is: a 4 GB IQ capture answers as fast as a
+    short one.  A file that is not a WAV at all, or whose header is
     truncated, is not an error here - the part exists, its length is
     simply unknown.
     """
     try:
-        with wave.open(path, "rb") as r:
+        handle.seek(0)
+        with wave.open(handle, "rb") as r:
             rate = r.getframerate()
             frames = r.getnframes()
     except Exception:
@@ -309,8 +315,8 @@ def _seconds_of_wav(path: str) -> float | None:
     return frames / float(rate)
 
 
-def _which_file(path: str) -> tuple[bool, tuple | None]:
-    """Whether a plain file is at *path*, and which file it is.
+def _what_is_there(path: str) -> tuple[bool, tuple | None, float | None]:
+    """Whether a plain file is at *path*, which file, and how long.
 
     Identity, not spelling.  Windows matches file names without
     regard to case and ignores a trailing dot, so ``a.wav``,
@@ -319,30 +325,47 @@ def _which_file(path: str) -> tuple[bool, tuple | None]:
     recording three seconds long.  Device and inode are the same for
     all three, and for a hard link or a symlink to it as well.
 
-    ``os.stat`` follows symlinks, so a part that is a symlink is
-    measured as what it points at, wherever that is.  Deliberately:
-    the rule that parts are looked for beside the sidecar is there so
-    that *what the sidecar says* cannot send the reader elsewhere,
-    not to overrule what the person whose disk it is has arranged.
-    Moving a 4 GB capture to another drive and leaving a symlink
-    behind should not lose the recording.
+    Identity and length come from **one open handle**, by
+    ``os.fstat`` rather than ``os.stat``.  Two separate lookups can
+    disagree: stat one file, have it replaced, and measure another -
+    a name identified as one file and measured as a second one is a
+    length attributed to a recording that never had it.  Held open,
+    they are the same file by construction.
 
-    Three answers.  ``(False, None)`` - nothing to measure: no file,
-    or something that is not a plain file, such as a directory called
-    ``a.wav`` or a path with a NUL in it.  ``(True, None)`` - a file
-    is there but the filesystem does not number its files (inode 0),
-    so it cannot be told from any other; the caller decides what that
-    is worth.  ``(True, identity)`` otherwise.
+    Symlinks are followed, so a part that is a symlink is measured as
+    what it points at, wherever that is.  Deliberately: the rule that
+    parts are looked for beside the sidecar is there so that *what
+    the sidecar says* cannot send the reader elsewhere, not to
+    overrule what the person whose disk it is has arranged.  Moving a
+    4 GB capture to another drive and leaving a symlink behind should
+    not lose the recording.
+
+    ``there`` is False for no file, or for something that is not a
+    plain file, such as a directory called ``a.wav`` or a path with a
+    NUL in it.  ``identity`` is None when the file is there and
+    cannot be told from another - a filesystem that does not number
+    its files reports inode 0, and a file that will not open cannot
+    be asked at all; the caller decides what that is worth.
     """
     try:
         found = os.stat(path)
     except (OSError, ValueError):
-        return False, None
+        return False, None, None
     if not stat_flags.S_ISREG(found.st_mode):
-        return False, None
-    if not found.st_ino:
-        return True, None
-    return True, (found.st_dev, found.st_ino)
+        return False, None, None
+    try:
+        handle = open(path, "rb")
+    except (OSError, ValueError):
+        return True, None, None
+    try:
+        try:
+            held = os.fstat(handle.fileno())
+        except OSError:
+            return True, None, None
+        identity = (held.st_dev, held.st_ino) if held.st_ino else None
+        return True, identity, _seconds_of_wav(handle)
+    finally:
+        handle.close()
 
 
 def _look_for_the_parts(
@@ -378,7 +401,7 @@ def _look_for_the_parts(
             problem = f"names {base} as more than one part"
         spellings.add(spelling)
         beside = os.path.join(here, base)
-        there, which = _which_file(beside)
+        there, which, seconds = _what_is_there(beside)
         if not there:
             missing.append(name)
             continue
@@ -389,7 +412,7 @@ def _look_for_the_parts(
                 problem = "names one file as more than one part"
         else:
             files.add(which)
-        lengths.append(_seconds_of_wav(beside))
+        lengths.append(seconds)
 
     # A filesystem that does not number its files cannot say whether
     # two names that got this far are two files or one, and the

@@ -681,37 +681,43 @@ def test_scan_of_a_directory_name_the_platform_will_not_take(tmp_path):
 def _read_with_unnumbered_files(path):
     """read_sidecar as a filesystem that reports inode 0 would see it.
 
-    Patched around the call alone, not for the whole test, so that
-    nothing else in the run has to live without os.stat telling the
+    os.fstat, not os.stat: the identity of a part is taken from the
+    handle it is measured through, so zeroing what os.stat says would
+    leave the real inode arriving by the other route and the test
+    passing for no reason.  Patched around the call alone, so that
+    nothing else in the run has to live without fstat telling the
     truth.
     """
-    real_stat = os.stat
+    real_fstat = os.fstat
 
-    def without_inodes(target, **kw):
-        fields = list(real_stat(target, **kw))
+    def without_inodes(fd, **kw):
+        fields = list(real_fstat(fd, **kw))
         fields[1] = 0                     # st_ino
         return os.stat_result(fields)
 
-    os.stat = without_inodes
+    os.fstat = without_inodes
     try:
         return read_sidecar(path)
     finally:
-        os.stat = real_stat
+        os.fstat = real_fstat
 
 
 def test_a_filesystem_that_does_not_number_its_files(tmp_path):
-    # Without inodes, two names that got as far as being opened
-    # cannot be told from one name twice - and the spelling check
-    # cannot help, because it does not know which names that
-    # filesystem folds together.  a.wav and a.wav. are the case on
-    # Windows.
+    # Two names that got as far as being opened cannot be told from
+    # one name twice without inodes, and the spelling check cannot
+    # stand in: it does not know which names such a filesystem folds
+    # together.  Here a.wav and b.wav really are two files - the
+    # point is that nothing available can prove it, so the length is
+    # withheld rather than guessed.
     _write_wav(tmp_path / "a.wav", 48000)          # 1.0 s
-    _write_json(tmp_path / "two.json", _iq_meta(["a.wav", "a.wav."]))
+    _write_wav(tmp_path / "b.wav", 96000)          # 2.0 s
+    _write_json(tmp_path / "two.json", _iq_meta(["a.wav", "b.wav"]))
 
     rec = _read_with_unnumbered_files(str(tmp_path / "two.json"))
-    assert rec.problem == ""
+    assert rec.problem == ""                       # the files are there
     assert rec.missing == ()
-    assert rec.audio_seconds is None               # NOT 2.0
+    assert rec.complete is True
+    assert rec.audio_seconds is None               # NOT 3.0
     assert rec.duration_s == pytest.approx(120.0)  # the clock instead
     assert rec.duration_is_measured is False
 
@@ -720,6 +726,44 @@ def test_a_filesystem_that_does_not_number_its_files(tmp_path):
     rec = _read_with_unnumbered_files(str(tmp_path / "one.json"))
     assert rec.audio_seconds == pytest.approx(1.0)
     assert rec.duration_is_measured is True
+
+
+def test_a_part_identified_and_measured_through_one_handle(tmp_path):
+    # Two lookups can disagree.  Stat a.wav, have it replaced by
+    # another name for b.wav, and measure that: the 1 s file is
+    # remembered as the identity while the 10 s file is what gets
+    # read, so b.wav is measured twice and the recording comes back
+    # 20 s long.  Identified and measured through one handle, the two
+    # names are the same file by construction.
+    _write_wav(tmp_path / "a.wav", 48000)          # 1.0 s
+    _write_wav(tmp_path / "b.wav", 480000)         # 10.0 s
+    _write_json(tmp_path / "swap.json", _iq_meta(["a.wav", "b.wav"]))
+
+    real_stat = os.stat
+    swapped = []
+
+    def stat_then_swap(target, **kw):
+        found = real_stat(target, **kw)
+        if not swapped and str(target).endswith("a.wav"):
+            swapped.append(True)
+            try:
+                os.replace(str(tmp_path / "a.wav"), str(tmp_path / "gone.wav"))
+                os.link(str(tmp_path / "b.wav"), str(tmp_path / "a.wav"))
+            except (OSError, NotImplementedError, AttributeError):
+                swapped.append("no")
+        return found
+
+    os.stat = stat_then_swap
+    try:
+        rec = read_sidecar(str(tmp_path / "swap.json"))
+    finally:
+        os.stat = real_stat
+    if "no" in swapped:
+        pytest.skip("this filesystem has no hard links")
+
+    assert rec.audio_seconds != pytest.approx(20.0)
+    assert rec.audio_seconds is None
+    assert rec.problem == "names one file as more than one part"
 
 
 def test_a_part_that_is_a_symlink_out_of_the_directory(tmp_path):
