@@ -850,3 +850,97 @@ def test_a_stream_that_will_not_stop_is_left_alone(audio_output, caplog):
 
     audio_output.resume()
     assert audio_output.held is False
+
+
+def test_a_block_being_queued_when_the_stop_returns_does_not_survive_it(
+        audio_output):
+    """The second window: blocks still go in while the card stops.
+
+    They have to - the card is still playing them, and the stop
+    takes about 107 ms.  But the moment the stop returns, the hold
+    marks the output held and drains the queue, and a block that
+    passed the mark before it was set must not land behind the
+    draining.  Forced, not hoped for: the block is held inside its
+    own queue.put until the hold has reached the lock it needs to
+    do the draining.
+    """
+    at_the_lock = threading.Event()
+    in_the_put = threading.Event()
+    let_the_put_finish = threading.Event()
+    the_card_has_stopped = []
+    holder = threading.get_ident()
+    real_lock = audio_output._close_lock
+
+    class Watched:
+        """The close lock, saying when the draining comes for it."""
+
+        def acquire(self, *args, **kwargs):
+            if the_card_has_stopped and threading.get_ident() == holder:
+                at_the_lock.set()
+            return real_lock.acquire(*args, **kwargs)
+
+        def release(self):
+            real_lock.release()
+
+        def __enter__(self):
+            self.acquire()
+            return self
+
+        def __exit__(self, *exc):
+            self.release()
+
+    _feed(audio_output, audio_output._preroll_frames)
+    assert audio_output.stream.started is True
+    audio_output._close_lock = Watched()
+
+    real_put = audio_output.audio_buffer_queue.put
+    put_waited = []
+
+    def put(item, **kwargs):
+        in_the_put.set()
+        # Recorded, not asserted: enqueue_audio logs whatever comes
+        # out of here, so an assertion in it cannot fail the test.
+        put_waited.append(let_the_put_finish.wait(10))
+        return real_put(item, **kwargs)
+
+    def a_block_on_its_way():
+        one = np.zeros(BLOCK_FRAMES, dtype=np.float32)
+        audio_output.audio_buffer_queue.put = put
+        audio_output.enqueue_audio(one, one)
+
+    queuing = threading.Thread(target=a_block_on_its_way)
+
+    def let_it_go():
+        # Once the draining has reached the lock - or never, which
+        # is the defect this is here for.
+        at_the_lock.wait(10)
+        let_the_put_finish.set()
+
+    releasing = threading.Thread(target=let_it_go)
+    releasing.start()
+
+    real_stop = audio_output.stream.stop_stream
+    saw_the_put = []
+
+    def stop_stream():
+        real_stop()
+        # Started here so that the put is in flight at the moment
+        # the stop returns, which is the window under test.
+        the_card_has_stopped.append(True)
+        queuing.start()
+        saw_the_put.append(in_the_put.wait(10))
+
+    audio_output.stream.stop_stream = stop_stream
+    try:
+        audio_output.hold()
+    finally:
+        let_the_put_finish.set()
+        queuing.join(timeout=10)
+        releasing.join(timeout=10)
+
+    assert saw_the_put == [True], "the block never reached its queue.put"
+    assert put_waited == [True], (
+        "the draining did not wait for the block on its way in")
+    assert audio_output.audio_buffer_queue.empty(), (
+        "a block got in behind the draining")
+    assert audio_output._frames_ready == 0
