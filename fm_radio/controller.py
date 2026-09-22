@@ -71,8 +71,23 @@ from fm_radio.constants import (
 # ~16 ms (at 1.024 Msps) so any block taking longer than that risks
 # backing up the SDR data_queue.
 _BLOCK_BUDGET_SEC: float = 0.016
-# Slow-block log threshold: log immediately if a block exceeds this.
+# Slow-block log threshold.
 _SLOW_BLOCK_THRESHOLD_SEC: float = 0.020
+# Least time between slow-block lines.  A machine that runs 9% of its
+# blocks over the threshold while keeping up perfectly - measured over
+# 3740 blocks: 336 slow, average 10.2 ms of the 16 ms budget, queue
+# never past 2 of 80 - writes 432 warnings in 82 seconds, and the one
+# that mattered (a queue at 47 of 80, recovering) was among them
+# unread.  The line is a sample now; the count is in the summary.
+_SLOW_BLOCK_LOG_INTERVAL_SEC: float = 5.0
+# Queue depth, as a share of its capacity, at which the receiver is
+# no longer keeping up rather than merely being jittery.  Below this
+# the SDR queue is doing its job, which is absorbing the jitter.
+_QUEUE_BACKLOG_SHARE: float = 0.25
+# Least time between "falling behind" lines.  Shorter than the
+# slow-block one: this is the line worth having, and a backlog that
+# lasts is worth a line a second.
+_BACKLOG_LOG_INTERVAL_SEC: float = 1.0
 # Periodic summary interval (real time, seconds).
 _PROFILE_SUMMARY_INTERVAL_SEC: float = 60.0
 # Least time between warnings about a snapshot that will not build.  A
@@ -88,16 +103,39 @@ _THREAD_JOIN_TIMEOUT_SEC: float = 3.0
 class _BlockProfiler:
     """Lightweight per-block timing profiler for the processing loop.
 
-    Tracks per-block processing time and SDR queue depth.  Logs a
-    summary every ``_PROFILE_SUMMARY_INTERVAL_SEC`` and warns
-    immediately on any block exceeding ``_SLOW_BLOCK_THRESHOLD_SEC``.
+    Tracks per-block processing time and SDR queue depth, and says
+    three different things about them:
+
+    - **The queue is backing up.**  A warning as it happens, because
+      this is the receiver failing to keep up, and the SDR queue
+      empties into dropped samples.  Rate limited to one a second.
+    - **A block went over the threshold.**  A warning too, but a
+      SAMPLE of them: one every
+      ``_SLOW_BLOCK_LOG_INTERVAL_SEC``, carrying how many there have
+      been since, and the stage breakdown of this one.  On a machine
+      where a tenth of the blocks run long while the receiver keeps
+      up perfectly, a line each buries everything else.
+    - **How the last minute went**, at INFO, which is where the
+      counts live.
     """
 
-    def __init__(self, logger: logging.Logger, q_max_capacity: int) -> None:
+    def __init__(self, logger: logging.Logger, q_max_capacity: int,
+                 clock=time.perf_counter) -> None:
         self._log = logger
         self._q_capacity = q_max_capacity
-        self._t0_session = time.perf_counter()
+        #: Injectable so a test can drive the rate limits without
+        #: waiting on them.
+        self._clock = clock
+        self._t0_session = self._clock()
         self._t_last_summary = self._t0_session
+        # When each kind of line was last written, and how many slow
+        # blocks the last slow-block line accounted for.
+        self._t_last_slow_line: float | None = None
+        self._t_last_backlog_line: float | None = None
+        self._slow_reported: int = 0
+        #: Depth at which the queue counts as backing up.
+        self._backlog_at: int = max(
+            2, int(q_max_capacity * _QUEUE_BACKLOG_SHARE))
         # Window stats (reset every summary)
         self._win_blocks = 0
         self._win_sum_dt = 0.0
@@ -126,7 +164,11 @@ class _BlockProfiler:
     @property
     def uptime_sec(self) -> float:
         """Seconds since the processing thread started."""
-        return time.perf_counter() - self._t0_session
+        return self._clock() - self._t0_session
+
+    def _due(self, last: "float | None", now: float, every: float) -> bool:
+        """Whether a line of this kind may be written now."""
+        return last is None or now - last >= every
 
     def record(
         self, dt_sec: float, q_depth: int,
@@ -145,27 +187,45 @@ class _BlockProfiler:
             self._win_max_dt = dt_sec
         if q_depth > self._win_q_max:
             self._win_q_max = q_depth
+        now = self._clock()
+        elapsed = now - self._t0_session
+
+        if q_depth >= self._backlog_at and self._due(
+                self._t_last_backlog_line, now, _BACKLOG_LOG_INTERVAL_SEC):
+            self._t_last_backlog_line = now
+            self._log.warning(
+                "BlockProfile: FALLING BEHIND q_depth=%d/%d dt=%.1fms "
+                "session_t=%.1fs - the queue is %.1fs deep and the "
+                "samples past the end of it are dropped",
+                q_depth, self._q_capacity, dt_sec * 1000.0, elapsed,
+                q_depth * _BLOCK_BUDGET_SEC,
+            )
+
         if dt_sec >= _SLOW_BLOCK_THRESHOLD_SEC:
             self._win_slow_blocks += 1
             self._tot_slow_blocks += 1
-            elapsed = time.perf_counter() - self._t0_session
-            stages = ""
-            if stage_times is not None:
-                ag, pi, dm, eq, rc = stage_times
-                stages = (
-                    f" stages_ms=[agc:{ag*1000:.1f} "
-                    f"process_iq:{pi*1000:.1f} demod:{dm*1000:.1f} "
-                    f"enqueue:{eq*1000:.1f} record:{rc*1000:.1f}]"
+            if self._due(self._t_last_slow_line, now,
+                         _SLOW_BLOCK_LOG_INTERVAL_SEC):
+                since = self._tot_slow_blocks - self._slow_reported
+                self._t_last_slow_line = now
+                self._slow_reported = self._tot_slow_blocks
+                stages = ""
+                if stage_times is not None:
+                    ag, pi, dm, eq, rc = stage_times
+                    stages = (
+                        f" stages_ms=[agc:{ag*1000:.1f} "
+                        f"process_iq:{pi*1000:.1f} demod:{dm*1000:.1f} "
+                        f"enqueue:{eq*1000:.1f} record:{rc*1000:.1f}]"
+                    )
+                self._log.warning(
+                    "BlockProfile: SLOW BLOCK dt=%.1fms q_depth=%d/%d "
+                    "session_t=%.1fs (%.2fmin) total_slow=%d "
+                    "(%d since the last of these)%s",
+                    dt_sec * 1000.0, q_depth, self._q_capacity,
+                    elapsed, elapsed / 60.0, self._tot_slow_blocks,
+                    since, stages,
                 )
-            self._log.warning(
-                "BlockProfile: SLOW BLOCK dt=%.1fms q_depth=%d/%d "
-                "session_t=%.1fs (%.2fmin) total_slow=%d%s",
-                dt_sec * 1000.0, q_depth, self._q_capacity,
-                elapsed, elapsed / 60.0, self._tot_slow_blocks,
-                stages,
-            )
 
-        now = time.perf_counter()
         if now - self._t_last_summary >= _PROFILE_SUMMARY_INTERVAL_SEC:
             blocks = max(self._win_blocks, 1)
             avg_ms = self._win_sum_dt * 1000.0 / blocks
