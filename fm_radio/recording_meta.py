@@ -45,6 +45,7 @@ above :class:`Recording`.
 from __future__ import annotations
 
 import glob
+import io
 import json
 import logging
 import math
@@ -315,6 +316,25 @@ def _seconds_of_wav(handle) -> float | None:
     return frames / float(rate)
 
 
+#: How a part is opened.  O_NONBLOCK exists on POSIX only and is there
+#: for one case: a named pipe opened for reading waits for something to
+#: open it for writing, so a FIFO called a.wav would stop the scan for
+#: good.  With the flag the open returns at once and fstat says what it
+#: opened.  A plain file ignores O_NONBLOCK when it is read.  O_BINARY
+#: exists on Windows only; without it the descriptor is in text mode.
+_OPEN_FLAGS = (os.O_RDONLY
+               | getattr(os, "O_NONBLOCK", 0)
+               | getattr(os, "O_BINARY", 0))
+
+
+def _a_plain_file_is_at(path: str) -> bool:
+    """Whether a stat of *path* finds a plain file.  Never raises."""
+    try:
+        return stat_flags.S_ISREG(os.stat(path).st_mode)
+    except (OSError, ValueError):
+        return False
+
+
 def _what_is_there(path: str) -> tuple[bool, tuple | None, float | None]:
     """Whether a plain file is at *path*, which file, and how long.
 
@@ -325,12 +345,16 @@ def _what_is_there(path: str) -> tuple[bool, tuple | None, float | None]:
     recording three seconds long.  Device and inode are the same for
     all three, and for a hard link or a symlink to it as well.
 
-    Identity and length come from **one open handle**, by
-    ``os.fstat`` rather than ``os.stat``.  Two separate lookups can
-    disagree: stat one file, have it replaced, and measure another -
-    a name identified as one file and measured as a second one is a
-    length attributed to a recording that never had it.  Held open,
-    they are the same file by construction.
+    **One open, and everything from it.**  The descriptor is asked
+    what it is, which file it is and how long its header says it is,
+    and the name is not looked up a second time, so nothing can be
+    swapped in between the answers.  There is no stat before the open
+    either.  A stat-then-open leaves a window in which ``a.wav`` can
+    become a named pipe, and a named pipe opened for reading waits
+    for a writer that never comes: the scan would not return.  Opened
+    with O_NONBLOCK a pipe returns at once, and fstat turns it away
+    with everything else that is not a plain file - including a
+    directory, which ``os.open`` on Linux opens without complaint.
 
     Symlinks are followed, so a part that is a symlink is measured as
     what it points at, wherever that is.  Deliberately: the rule that
@@ -341,66 +365,53 @@ def _what_is_there(path: str) -> tuple[bool, tuple | None, float | None]:
     not lose the recording.
 
     ``there`` is False for no file, or for something that is not a
-    plain file, such as a directory called ``a.wav`` or a path with a
-    NUL in it.  ``identity`` is None when the file is there and
-    cannot be told from another - a filesystem that does not number
-    its files reports inode 0, and a file that will not open cannot
-    be asked at all; the caller decides what that is worth.
+    plain file, or for a path with a NUL in it.  ``identity`` is None
+    when the file is there and cannot be told from another - a
+    filesystem that does not number its files reports inode 0, and a
+    file that will not open cannot be asked at all; the caller
+    decides what that is worth.
 
-    The open can fail two ways and they mean different things.  Gone
-    between the stat and the open is gone, and saying otherwise would
-    leave the caller reporting a part as present that is not there by
-    the time it answers.  Refused - no permission, a share that
-    dropped - is a file that exists and cannot be looked at, which is
-    "there, unidentified".
+    A refused open is either absence or a file that exists and may
+    not be read, and which one it is cannot be read off the
+    exception: Windows refuses a directory with PermissionError, and
+    a file that is only unreadable gets PermissionError everywhere.
+    So FileNotFoundError and its two relatives are absence, and any
+    other refusal asks the path whether a plain file is there.
 
-    Which of the two a failure is cannot be read off the exception.
-    A directory where the file was raises IsADirectoryError on Linux
-    and PermissionError on Windows, and a file that is really only
-    unreadable raises PermissionError on both; sorting by exception
-    type alone would answer correctly on one platform and wrongly on
-    the other.  So a refusal asks the path again, and the answer is
-    whether a plain file is still there.
-
-    ``os.fstat`` is asked the same question a second time, of the
-    handle rather than the path.  It is the handle that gets
-    measured, so it is the handle that has to be a plain file.
+    The descriptor is closed once, here, whatever happened.  A close
+    that fails is ignored: this descriptor was only read from, so
+    there is no buffered write to lose, and the answer was already
+    worked out - some network filesystems fail a close.
     """
     try:
-        found = os.stat(path)
-    except (OSError, ValueError):
-        return False, None, None
-    if not stat_flags.S_ISREG(found.st_mode):
-        return False, None, None
-    try:
-        handle = open(path, "rb")
+        fd = os.open(path, _OPEN_FLAGS)
     except (FileNotFoundError, NotADirectoryError, IsADirectoryError):
         return False, None, None
     except (OSError, ValueError):
-        try:
-            again = os.stat(path)
-        except (OSError, ValueError):
-            return False, None, None
-        return stat_flags.S_ISREG(again.st_mode), None, None
+        return _a_plain_file_is_at(path), None, None
     try:
         try:
-            held = os.fstat(handle.fileno())
+            held = os.fstat(fd)
         except OSError:
-            return True, None, None
+            return _a_plain_file_is_at(path), None, None
         if not stat_flags.S_ISREG(held.st_mode):
             return False, None, None
         identity = (held.st_dev, held.st_ino) if held.st_ino else None
-        return True, identity, _seconds_of_wav(handle)
-    finally:
-        # A close that fails is still a close, and this handle was
-        # only ever read from: there is no buffered write to lose and
-        # nothing to report.  Letting it out would be an exception
-        # from a function that promises not to raise, thrown after
-        # the answer was already worked out - some network
-        # filesystems fail a close that way.
+        # closefd=False keeps the descriptor this function's to close,
+        # and only this function's: a file object that closed it too
+        # would leave the close below shutting whatever descriptor the
+        # number had been handed to in the meantime, on another thread.
         try:
-            handle.close()
+            raw = io.FileIO(fd, "rb", closefd=False)
+            with io.BufferedReader(raw) as handle:
+                seconds = _seconds_of_wav(handle)
         except (OSError, ValueError):
+            seconds = None
+        return True, identity, seconds
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
             pass
 
 

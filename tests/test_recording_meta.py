@@ -8,6 +8,7 @@ import json
 import os
 import re
 import stat
+import threading
 import wave
 
 import numpy as np
@@ -739,42 +740,70 @@ def test_a_filesystem_that_does_not_number_its_files(tmp_path):
     assert rec.duration_is_measured is True
 
 
+def _hook_os_open(after_open=None, instead=None):
+    """Put a hook on os.open for the duration of a with-block.
+
+    *after_open(path, fd)* runs after a real open; *instead(path)*
+    runs in its place and its result or exception is the open's.
+    Either returns None to leave a given path alone.
+    """
+    class _Hooked:
+        def __enter__(self):
+            self.real = os.open
+
+            def hooked(path, flags, *a, **kw):
+                if instead is not None:
+                    got = instead(str(path))
+                    if got is not None:
+                        return got
+                fd = self.real(path, flags, *a, **kw)
+                if after_open is not None:
+                    after_open(str(path), fd)
+                return fd
+
+            os.open = hooked
+            return self
+
+        def __exit__(self, *exc):
+            os.open = self.real
+            return False
+
+    return _Hooked()
+
+
 def test_a_part_identified_and_measured_through_one_handle(tmp_path):
-    # Two lookups can disagree.  Stat a.wav, have it replaced by
-    # another name for b.wav, and measure that: the 1 s file is
-    # remembered as the identity while the 10 s file is what gets
-    # read, so b.wav is measured twice and the recording comes back
-    # 20 s long.  Identified and measured through one handle, the two
-    # names are the same file by construction.
+    # Open a.wav, and then have the NAME a.wav become another name
+    # for the 10-second b.wav.  The descriptor still holds the
+    # 1-second file it opened, so that is what is identified and what
+    # is measured: 1 + 10 = 11 s.  A reader that went back to the name
+    # for either answer would read b.wav twice - 20 s - or call the
+    # two parts one file.
     _write_wav(tmp_path / "a.wav", 48000)          # 1.0 s
     _write_wav(tmp_path / "b.wav", 480000)         # 10.0 s
     _write_json(tmp_path / "swap.json", _iq_meta(["a.wav", "b.wav"]))
 
-    real_stat = os.stat
     swapped = []
 
-    def stat_then_swap(target, **kw):
-        found = real_stat(target, **kw)
-        if not swapped and str(target).endswith("a.wav"):
+    def swap_after_opening_a(path, fd):
+        if not swapped and path.endswith("a.wav"):
             swapped.append(True)
             try:
-                os.replace(str(tmp_path / "a.wav"), str(tmp_path / "gone.wav"))
+                os.replace(str(tmp_path / "a.wav"), str(tmp_path / "old.wav"))
                 os.link(str(tmp_path / "b.wav"), str(tmp_path / "a.wav"))
             except (OSError, NotImplementedError, AttributeError):
                 swapped.append("no")
-        return found
 
-    os.stat = stat_then_swap
-    try:
+    with _hook_os_open(after_open=swap_after_opening_a):
         rec = read_sidecar(str(tmp_path / "swap.json"))
-    finally:
-        os.stat = real_stat
     if "no" in swapped:
-        pytest.skip("this filesystem has no hard links")
+        # Windows will not rename a file another handle holds open, so
+        # the swap this test stages cannot happen there at all: the
+        # race it guards against is one only POSIX can run.
+        pytest.skip("an open file cannot be renamed here")
 
-    assert rec.audio_seconds != pytest.approx(20.0)
-    assert rec.audio_seconds is None
-    assert rec.problem == "names one file as more than one part"
+    assert swapped, "the open hook never fired"
+    assert rec.problem == ""
+    assert rec.audio_seconds == pytest.approx(11.0)    # NOT 20.0
 
 
 def test_a_part_that_is_a_symlink_out_of_the_directory(tmp_path):
@@ -816,105 +845,78 @@ def test_missing_parts_are_collected_even_when_there_is_a_problem(tmp_path):
     assert rec.complete is False
 
 
-def test_a_part_that_disappears_between_the_stat_and_the_open(tmp_path):
-    # Gone is gone.  Reporting it as present would have the row say
-    # nothing is missing about a file that is not there by the time
-    # the row is handed back.
-    _write_wav(tmp_path / "a.wav", 48000)
-    _write_json(tmp_path / "one.json", _iq_meta(["a.wav"]))
+def test_a_part_that_is_gone_by_the_time_it_is_opened(tmp_path):
+    # Two ways for a part to vanish around the open.  Gone before it:
+    # the open says FileNotFoundError.  Refused, and gone by the time
+    # the path is asked what is there: the second look finds nothing.
+    # Both are missing, not "there, unidentified".
+    for name, refuse in (("gone", False), ("refused", True)):
+        _write_wav(tmp_path / (name + ".wav"), 48000)
+        _write_json(tmp_path / (name + ".json"), _iq_meta([name + ".wav"]))
+        target = str(tmp_path / (name + ".wav"))
 
-    real_stat = os.stat
-    removed = []
+        def vanish(path, target=target, refuse=refuse):
+            if path != target:
+                return None
+            os.remove(target)
+            if refuse:
+                raise PermissionError(13, "refused, then removed")
+            return None                  # and the real open finds nothing
 
-    def stat_then_remove(target, **kw):
-        found = real_stat(target, **kw)
-        if not removed and str(target).endswith("a.wav"):
-            removed.append(True)
-            os.remove(str(tmp_path / "a.wav"))
-        return found
-
-    os.stat = stat_then_remove
-    try:
-        rec = read_sidecar(str(tmp_path / "one.json"))
-    finally:
-        os.stat = real_stat
-
-    assert removed, "the stat hook never fired"
-    assert rec.missing == ("a.wav",)
-    assert rec.complete is False
-    assert rec.audio_seconds is None
+        with _hook_os_open(instead=vanish):
+            rec = read_sidecar(str(tmp_path / (name + ".json")))
+        assert rec.missing == (name + ".wav",), name
+        assert rec.complete is False, name
+        assert rec.audio_seconds is None, name
 
 
 def test_a_close_that_fails_is_not_an_error(tmp_path):
-    # Some network filesystems fail a close.  This handle was only
+    # Some network filesystems fail a close.  The descriptor was only
     # read from, so there is nothing to lose - and the answer was
-    # already worked out before the close, so letting the exception
-    # out would throw away a good measurement and break the promise
-    # not to raise.
+    # already worked out, so letting the exception out would throw a
+    # good measurement away and break the promise not to raise.
     _write_wav(tmp_path / "b.wav", 48000)      # 1.0 s
     _write_json(tmp_path / "b.json", _iq_meta(["b.wav"]))
 
-    real_open = builtins.open
+    ours = []
 
-    class ClosesBadly:
-        def __init__(self, inner):
-            self._inner = inner
+    def remember(path, fd):
+        if path.endswith("b.wav"):
+            ours.append(fd)
 
-        def __getattr__(self, name):
-            return getattr(self._inner, name)
+    real_close = os.close
+    refused = []
 
-        def close(self):
-            self._inner.close()
+    def close_badly(fd):
+        real_close(fd)
+        if fd in ours:
+            refused.append(fd)
             raise OSError(5, "the share went away")
 
-    def open_that_closes_badly(target, mode="r", *a, **kw):
-        handle = real_open(target, mode, *a, **kw)
-        if "b" in mode and str(target).endswith("b.wav"):
-            return ClosesBadly(handle)
-        return handle
-
-    builtins.open = open_that_closes_badly
+    os.close = close_badly
     try:
-        rec = read_sidecar(str(tmp_path / "b.json"))   # must not raise
+        with _hook_os_open(after_open=remember):
+            rec = read_sidecar(str(tmp_path / "b.json"))   # must not raise
     finally:
-        builtins.open = real_open
+        os.close = real_close
 
+    # The failure has to have happened for this to mean anything.
+    assert refused == ours and len(ours) == 1
     assert rec.problem == ""
     assert rec.missing == ()
     assert rec.audio_seconds == pytest.approx(1.0)
 
 
-# --- Round 6: a path that stops being a plain file --------------------
-
-
-def test_a_part_that_becomes_a_directory_between_stat_and_open(tmp_path):
-    # Which exception that is depends on the platform - Linux raises
-    # IsADirectoryError, Windows PermissionError - and a file that is
-    # merely unreadable raises PermissionError on both.  So the
-    # answer cannot come from the exception type, and this test does
-    # not care which one was raised: a directory is not a part.
-    _write_wav(tmp_path / "a.wav", 48000)
+def test_a_part_that_is_a_directory(tmp_path):
+    # Refused on one platform, opened on the other: Windows's os.open
+    # raises PermissionError on a directory and Linux's opens it, and
+    # fstat then says what it opened.  Two different routes to one
+    # answer, and this test does not care which one was taken.
+    (tmp_path / "a.wav").mkdir()
     _write_json(tmp_path / "one.json", _iq_meta(["a.wav"]))
 
-    real_stat = os.stat
-    swapped = []
-
-    def stat_then_make_it_a_directory(target, **kw):
-        found = real_stat(target, **kw)
-        if not swapped and str(target).endswith("a.wav"):
-            swapped.append(True)
-            os.remove(str(tmp_path / "a.wav"))
-            os.mkdir(str(tmp_path / "a.wav"))
-        return found
-
-    os.stat = stat_then_make_it_a_directory
-    try:
-        rec = read_sidecar(str(tmp_path / "one.json"))
-    finally:
-        os.stat = real_stat
-
-    assert swapped, "the stat hook never fired"
-    assert (tmp_path / "a.wav").is_dir()
+    rec = read_sidecar(str(tmp_path / "one.json"))
+    assert rec.problem == ""
     assert rec.missing == ("a.wav",)
     assert rec.complete is False
     assert rec.audio_seconds is None
@@ -925,19 +927,15 @@ def test_a_part_that_is_there_and_will_not_open(tmp_path):
     # Present, so not missing - and unidentified, so not measured.
     _write_wav(tmp_path / "shut.wav", 48000)
     _write_json(tmp_path / "shut.json", _iq_meta(["shut.wav"]))
+    target = str(tmp_path / "shut.wav")
 
-    real_open = builtins.open
-
-    def open_that_refuses(target, mode="r", *a, **kw):
-        if "b" in mode and str(target).endswith("shut.wav"):
+    def refuse(path):
+        if path == target:
             raise PermissionError(13, "the file is shut")
-        return real_open(target, mode, *a, **kw)
+        return None
 
-    builtins.open = open_that_refuses
-    try:
+    with _hook_os_open(instead=refuse):
         rec = read_sidecar(str(tmp_path / "shut.json"))
-    finally:
-        builtins.open = real_open
 
     assert rec.problem == ""
     assert rec.missing == ()
@@ -969,3 +967,34 @@ def test_a_handle_that_turns_out_not_to_be_a_plain_file(tmp_path):
     assert rec.missing == ("a.wav",)
     assert rec.complete is False
     assert rec.audio_seconds is None
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="no named pipes here")
+def test_a_named_pipe_does_not_stop_the_scan(tmp_path):
+    # A named pipe opened for reading waits for a writer.  Without
+    # O_NONBLOCK the scan would never come back, so the read runs on
+    # a thread and the join is a watchdog, not a synchronisation: on
+    # the passing path the thread has finished before the join is
+    # reached, and the timeout is only how long a regression is given
+    # before it is called one.  A thread still stuck is released by
+    # opening the write end, so that it does not outlive the test.
+    fifo = str(tmp_path / "pipe.wav")
+    os.mkfifo(fifo)
+    _write_json(tmp_path / "pipe.json", _iq_meta(["pipe.wav"]))
+
+    got = []
+    t = threading.Thread(
+        target=lambda: got.append(read_sidecar(str(tmp_path / "pipe.json"))),
+        daemon=True)
+    t.start()
+    t.join(10.0)
+    if t.is_alive():
+        release = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+        t.join(10.0)
+        os.close(release)
+        pytest.fail("read_sidecar blocked on a named pipe")
+
+    rec = got[0]
+    assert rec.problem == ""
+    assert rec.missing == ("pipe.wav",)
+    assert rec.complete is False
