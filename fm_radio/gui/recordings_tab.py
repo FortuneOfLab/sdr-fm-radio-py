@@ -43,7 +43,7 @@ way the band scan does.
 **Nothing reads it until someone looks.**  Not when the window is
 built - that is already slow enough - and not on the window's refresh,
 which is twenty times a second: the directory is read the first time
-the tab is shown, and again when the Reload button is pressed.
+the tab is chosen, and again when the Reload button is pressed.
 
 **Every recording is counted, whether or not it is shown.**  Most
 sidecars in a directory that has been cleared of audio describe
