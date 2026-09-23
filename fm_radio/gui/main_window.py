@@ -25,20 +25,35 @@
 #
 """The receiver's status window.
 
-The Radio tab is redrawn on a timer, and most of what it shows comes from
-one call to ``controller.get_status()``.  Not all of it.  On the same tick
-it asks the facade whether the device has gone (``device_failure``), for
-the band picture (``get_spectrum()``) and whether each recorder is
-running or finishing; it looks at the requests the facade handed back
-for the writes it asked the SDR for, to see how they went; and whenever
-there is no snapshot it asks for the frequency, the station and the gain
-itself.  The DSP tab reads its settings once, when it is built; the
-Recordings tab reads the disk when it is chosen.  Everything the user
-changes goes back through the controller's facade.
+The Radio tab is redrawn on a timer.  Each tick starts by asking whether
+the device has gone (``device_failure``).  While it has not, most of what
+the tab shows comes from one call to ``controller.get_status()``, but not
+all of it: on the same tick the window asks the facade for the band
+picture (``get_spectrum()``) and whether each recorder is running or
+finishing; it looks at the requests the facade handed back for the
+writes it asked the SDR for, to see how they went; and whenever there is
+no snapshot it asks for the frequency, the station and the gain itself.
 
-The window holds no receiver state of its own, so a refresh that arrives
-while the user is mid-gesture cannot fight them for a widget — except for the
-two controls that would, which say so where they are handled.
+Once the device has gone, the snapshot, the band picture and the
+requests are not read again, and the recorders are asked about once.
+Each tick shows the frequency and the gain the facade gives and says
+"no device" for the station, and the timer runs on only until a
+recording that was running has been closed - see
+``_show_the_device_has_gone``.
+
+The DSP tab reads its settings once, when it is built; the Recordings
+tab reads the disk when it is chosen.  Everything the user changes goes
+back through the controller's facade.
+
+The window holds none of the running receiver's state, so a refresh that
+arrives while the user is mid-gesture cannot fight them for a widget —
+except for the two controls that would, which say so where they are
+handled.  What it does keep is its own: the requests it has made - where
+it asked the tuner to go, the recordings it asked to start, the writes
+it is waiting to hear about.  Of the receiver's state it keeps one thing,
+and only once the device has gone: whether a recording was running at
+that moment, asked once before the release starts, because the
+receiver's own answer changes while the file is still being written.
 
 The spectrum and waterfall are in ``band_view``; the blend bar is here,
 because it reads off the same snapshot as the rest of the Signal group.
