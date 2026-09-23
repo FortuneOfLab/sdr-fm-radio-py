@@ -135,7 +135,7 @@ def test_settling_on_an_area_writes_it_and_names_by_it_now(build_controller,
 @needs_tomllib
 def test_a_recording_is_named_as_the_dial_would_name_it(build_controller,
                                                         no_user_config):
-    """station_at is current_station for a frequency the tuner is not on.
+    """stations_at is current_station for frequencies the tuner is not on.
 
     The recordings tab names each sidecar's frequency with it.  A name
     worked out from anything but the dial's own list - the whole
@@ -143,14 +143,52 @@ def test_a_recording_is_named_as_the_dial_would_name_it(build_controller,
     name a Tokyo station in Hokkaido.
     """
     instance = build_controller(no_user_config)
-    assert instance.get_frequency() != 81.3e6
-    assert instance.station_at(81.3e6).name == "J-WAVE"
-    assert (instance.station_at(instance.get_frequency())
-            == instance.current_station())
+    at = instance.get_frequency()
+    assert at != 81.3e6
 
-    instance.remember_where_this_is("北海道")
+    names = instance.stations_at([81.3e6, at])
 
-    assert instance.station_at(81.3e6) is None, "it is still naming Tokyo"
+    assert names[81.3e6].name == "J-WAVE"
+    assert names[at] == instance.current_station()
+
+    instance.remember_where_this_is("\u5317\u6d77\u9053")
+
+    assert instance.stations_at([81.3e6]) == {81.3e6: None}, (
+        "it is still naming Tokyo")
+
+
+@needs_tomllib
+def test_one_call_names_every_frequency_from_one_view(build_controller,
+                                                      no_user_config,
+                                                      monkeypatch):
+    """An area settled on half way through does not split the answer.
+
+    The area is changed from inside the first lookup, which is the
+    worst moment for it: a call that went back to the receiver's list
+    for each frequency would name 80.0 by Kanto and 81.3 by Hokkaido,
+    where nothing is on 81.3.
+    """
+    from fm_radio import controller as module
+
+    instance = build_controller(no_user_config)
+    hokkaido = module.here(instance.catalogue, "\u5317\u6d77\u9053")
+    real = module.nearest
+    moved = []
+
+    def nearest_then_the_area_changes(stations, freq_hz):
+        found = real(stations, freq_hz)
+        if not moved:
+            moved.append(True)
+            instance._here = hokkaido
+        return found
+
+    monkeypatch.setattr(module, "nearest", nearest_then_the_area_changes)
+
+    names = instance.stations_at([80.0e6, 81.3e6])
+
+    assert moved, "the area never changed"
+    assert names[80.0e6].name == "TOKYO FM"
+    assert names[81.3e6] is not None and names[81.3e6].name == "J-WAVE"
 
 
 @needs_tomllib

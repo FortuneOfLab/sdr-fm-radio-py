@@ -137,9 +137,13 @@ def audio_text(rec: Recording) -> str:
     problem says nothing reliable about its parts; a part that could not
     be confirmed is not a part anyone has; then what is missing.
 
-    "empty" is a complete recording whose headers add up to no audio at
-    all - a 44-byte WAV, header and no frames.  Complete is still true of
-    it, and it is still listed; "yes" would say there is something to
+    Of the complete ones, only a recording whose headers measured some
+    audio is "yes".  "empty" is one whose headers add up to none - a
+    44-byte WAV, header and no frames.  "unknown" is one whose length
+    could not be measured at all: a part that is not a WAV, or is
+    truncated, or would not open, or several parts on a filesystem that
+    cannot tell them apart.  Complete is true of all three and all three
+    are listed; only the first has been shown to hold something to
     listen to.
     """
     if rec.problem:
@@ -149,6 +153,8 @@ def audio_text(rec: Recording) -> str:
     if not rec.parts:
         return "none named"
     if not rec.missing:
+        if rec.audio_seconds is None:
+            return "unknown"
         return "empty" if _is_empty(rec) else "yes"
     have = len(rec.parts) - len(rec.missing)
     if have == 0:
@@ -159,6 +165,11 @@ def audio_text(rec: Recording) -> str:
 def _is_empty(rec: Recording) -> bool:
     """Complete, and the headers measure no audio at all."""
     return rec.complete and rec.audio_seconds == 0
+
+
+def _is_unknown(rec: Recording) -> bool:
+    """Complete, and the headers could not be measured."""
+    return rec.complete and rec.audio_seconds is None
 
 
 def notes_for(rec: Recording) -> str:
@@ -173,6 +184,9 @@ def notes_for(rec: Recording) -> str:
                      + ", ".join(rec.unconfirmed))
     if rec.duration_s is not None and not rec.duration_is_measured:
         lines.append("Length from the start and stop times, not the audio.")
+    if _is_unknown(rec):
+        lines.append("The parts are there, but how much audio they hold "
+                     "could not be measured.")
     return "\n".join(lines)
 
 
@@ -196,14 +210,25 @@ def cells_for(rec: Recording, station: str) -> tuple[str, ...]:
 # Reading the directory, off the thread that draws
 # ----------------------------------------------------------------------
 
+#: Every Scan that has started and not yet been retired.  Held here,
+#: on the GUI thread's side, so that the last reference to a Scan is
+#: never the one its own thread lets go of - see Scan._retire.
+_RUNNING: set = set()
+
+
 class Scan(QObject):
     """Reads the recordings directory on a thread of its own.
 
     Not given a Qt parent, deliberately.  The thread may outlive the
     window - a read stuck on a dead mount does not end - and a parent
     would delete this object from under it when the window closed.
-    With no parent it lives as long as the thread holds it, and a
-    signal it emits after the tab has gone simply has nowhere to go.
+
+    Nor is it left to its thread to keep alive.  The thread holds its
+    target, a bound method of this object, and lets go of it on its way
+    out; were that the last reference, this QObject - which belongs to
+    the GUI thread - would be destroyed on the reading thread.  So a
+    running Scan is also held in :data:`_RUNNING`, and let go of there,
+    on the GUI thread, once its thread has finished.
     """
 
     #: The read has ended: (list of (Recording, station name), why it
@@ -218,7 +243,24 @@ class Scan(QObject):
             target=self._run, name="RecordingsScan", daemon=True)
 
     def go(self) -> None:
+        # After whoever built this has connected to finished, so that
+        # they hear about the result before it is retired.
+        self.finished.connect(self._retire)
+        _RUNNING.add(self)
         self._thread.start()
+
+    def _retire(self, rows, why: str) -> None:
+        """Let go of this Scan, on the GUI thread, after its thread.
+
+        Delivered here, on the thread this object lives on, after the
+        read has emitted.  The join is short: the emit is the last
+        thing the reading thread does, and all that is left of it is
+        returning.  Once it has returned it no longer holds this
+        object, and dropping it from _RUNNING leaves the last reference
+        with this thread.
+        """
+        self._thread.join()
+        _RUNNING.discard(self)
 
     def wait(self) -> None:
         """Block until the read has finished.  For tests."""
@@ -227,16 +269,17 @@ class Scan(QObject):
 
     def _run(self) -> None:
         try:
+            recordings = scan_recordings(self._directory)
+            # Every frequency named in one call, from one naming view: a
+            # call per row would name the first rows by the area as it
+            # was and the rest by an area chosen half way through.
+            freqs = sorted({rec.center_freq_hz for rec in recordings
+                            if rec.center_freq_hz is not None})
+            stations = self._controller.stations_at(freqs) if freqs else {}
             rows = []
-            # A few frequencies, a few hundred recordings: each lookup
-            # walks the naming list, so it is done once per frequency.
-            names: dict[float, str] = {}
-            for rec in scan_recordings(self._directory):
-                freq = rec.center_freq_hz
-                if freq is not None and freq not in names:
-                    station = self._controller.station_at(freq)
-                    names[freq] = station.name if station else ""
-                rows.append((rec, "" if freq is None else names[freq]))
+            for rec in recordings:
+                station = stations.get(rec.center_freq_hz)
+                rows.append((rec, station.name if station else ""))
         except Exception as e:
             logger.error("Reading the recordings failed: %s", e,
                          exc_info=True)
@@ -252,8 +295,8 @@ class Scan(QObject):
 class RecordingsTab(QWidget):
     """The recordings page.
 
-    Uses one facade call, ``station_at``, to name each recording's
-    frequency the way the dial names it.
+    Uses one facade call, ``stations_at``, to name every recording's
+    frequency the way the dial names it, from one naming view.
     """
 
     def __init__(self, controller, directory: str,
@@ -378,9 +421,15 @@ class RecordingsTab(QWidget):
         with_problem = sum(1 for rec, _ in self._rows if rec.problem)
         complete = sum(1 for rec, _ in self._rows if rec.complete)
         empty = sum(1 for rec, _ in self._rows if _is_empty(rec))
+        unknown = sum(1 for rec, _ in self._rows if _is_unknown(rec))
         incomplete = total - complete - with_problem
-        complete_text = (f"{complete} complete ({empty} empty)" if empty
-                         else f"{complete} complete")
+        # The complete ones that are not "yes", said only when there are
+        # any: a line that always read "(0 empty, 0 unknown)" would
+        # teach the eye to skip the brackets.
+        not_yes = [f"{n} {word}" for n, word in
+                   ((empty, "empty"), (unknown, "unknown")) if n]
+        complete_text = (f"{complete} complete ({', '.join(not_yes)})"
+                         if not_yes else f"{complete} complete")
         return (f"{shown} of {total} shown: {complete_text}, "
                 f"{incomplete} incomplete, {with_problem} with a problem")
 

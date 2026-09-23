@@ -154,11 +154,14 @@ class FakeController:
     def current_station(self):
         return self.station
 
-    def station_at(self, freq_hz: float):
-        """What the dial would call *freq_hz*; the recordings tab asks."""
-        self.calls.append(("station_at", freq_hz))
-        name = {80.0e6: "TOKYO FM", 81.3e6: "J-WAVE"}.get(freq_hz)
-        return _Station(name) if name else None
+    def stations_at(self, freqs):
+        """What the dial would call each of *freqs*; the recordings tab
+        asks."""
+        freqs = list(freqs)
+        self.calls.append(("stations_at", freqs))
+        names = {80.0e6: "TOKYO FM", 81.3e6: "J-WAVE"}
+        return {f: _Station(names[f]) if f in names else None
+                for f in freqs}
 
     def get_dsp_defaults(self) -> DspSettings:
         return self.dsp_defaults

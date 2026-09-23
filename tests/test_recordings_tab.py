@@ -15,6 +15,7 @@ import threading
 import time
 import types
 import wave
+import weakref
 
 import pytest
 
@@ -60,14 +61,16 @@ class Namer:
     """The one facade call the tab makes - and which thread made it."""
 
     def __init__(self):
-        self.asked: list[float] = []
+        self.calls: list[list[float]] = []
         self.threads: list[threading.Thread] = []
 
-    def station_at(self, freq_hz):
-        self.asked.append(freq_hz)
+    def stations_at(self, freqs):
+        freqs = list(freqs)
+        self.calls.append(freqs)
         self.threads.append(threading.current_thread())
-        name = {80.0e6: "TOKYO FM", 81.3e6: "J-WAVE"}.get(freq_hz)
-        return types.SimpleNamespace(name=name) if name else None
+        names = {80.0e6: "TOKYO FM", 81.3e6: "J-WAVE"}
+        return {f: types.SimpleNamespace(name=names[f]) if f in names
+                else None for f in freqs}
 
 
 @pytest.fixture
@@ -207,16 +210,20 @@ def test_a_second_reload_while_reading_is_ignored(make_tab, qt_app,
     assert tab.reload_button.isEnabled() is True
 
 
-def test_a_read_that_outlives_the_tab_ends_quietly(qt_app, tmp_path,
-                                                   monkeypatch):
+def test_a_read_that_outlives_the_tab_is_let_go_of_where_it_was_made(
+        qt_app, tmp_path, monkeypatch):
     """A read stuck on a dead mount can outlast the window.
 
-    If the tab owned the reader, closing the window would delete it
-    while its thread still ran, and the signal at the end would be
-    sent from an object that no longer exists - an exception on a
-    thread nobody is watching.  With no owner it finishes, says so to
-    nobody, and is gone.
+    Two ways that goes wrong.  If the tab owned the reader, closing the
+    window would delete it under its own thread.  If nothing but the
+    thread held it, the thread would drop the last reference on its way
+    out, and a QObject that belongs to the GUI thread would be destroyed
+    on the reading one.  So the tab and every local reference to the
+    reader are let go of here before the read finishes, and the test
+    watches which thread frees it.
     """
+    import gc
+
     import shiboken6
 
     hold = threading.Event()
@@ -229,16 +236,28 @@ def test_a_read_that_outlives_the_tab_ends_quietly(qt_app, tmp_path,
     raised = []
     monkeypatch.setattr(threading, "excepthook",
                         lambda args: raised.append(args))
+    freed_on = []
     tab = RecordingsTab(Namer(), str(tmp_path))
     tab.reload()
-    scan = tab._scan
+    watch = weakref.ref(
+        tab._scan,
+        lambda _: freed_on.append(threading.current_thread()))
+    thread = tab._scan._thread
 
-    shiboken6.delete(tab)                 # the window has gone
+    shiboken6.delete(tab)                 # the window has gone ...
+    del tab                               # ... and nothing here holds it
+    gc.collect()
     hold.set()
-    scan.wait()
-    qt_app.processEvents()
+    thread.join()
+    deadline = time.monotonic() + 5.0
+    while watch() is not None and time.monotonic() < deadline:
+        qt_app.processEvents()
 
+    assert watch() is None, "the reader was never let go of"
+    assert freed_on == [threading.main_thread()], (
+        f"freed on {freed_on[0].name if freed_on else 'no thread'}")
     assert raised == [], f"the reader raised: {raised[0].exc_value!r}"
+    assert recordings_tab._RUNNING == set()
 
 
 def test_a_read_that_fails_says_so(make_tab, qt_app, monkeypatch):
@@ -358,7 +377,7 @@ def test_a_row_says_why_in_its_tooltip(make_tab, qt_app, tmp_path):
     assert complete_tip == ""
 
 
-def test_station_names_are_asked_for_once_per_frequency(make_tab, qt_app,
+def test_station_names_are_asked_for_once_per_read(make_tab, qt_app,
                                                         tmp_path):
     for i in range(3):
         _sidecar(tmp_path, f"j{i}", [f"j{i}.wav"], freq=81.3e6)
@@ -369,7 +388,9 @@ def test_station_names_are_asked_for_once_per_frequency(make_tab, qt_app,
     finish(tab, qt_app)
     tab.show_all.setChecked(True)
 
-    assert sorted(namer.asked) == [80.0e6, 81.3e6]
+    # One call for the whole read, every frequency once: one naming
+    # view names every row.
+    assert namer.calls == [[80.0e6, 81.3e6]]
     assert sorted(r["Station"] for r in shown(tab)) == [
         "J-WAVE", "J-WAVE", "J-WAVE", "TOKYO FM"]
 
@@ -431,10 +452,12 @@ def test_the_audio_word_settles_the_question_in_order():
     assert audio_text(_rec(parts=("a.wav", "b.wav"), missing=("b.wav",),
                            unconfirmed=("a.wav",))) == "unconfirmed"
     assert audio_text(_rec(parts=())) == "none named"
-    assert audio_text(_rec()) == "yes"
     assert audio_text(_rec(audio_seconds=1.5)) == "yes"
     # Complete, and nothing in it: a header with no frames.
     assert audio_text(_rec(audio_seconds=0.0)) == "empty"
+    # Complete, and nothing measured: not a WAV, truncated, shut, or
+    # parts that cannot be told apart.  Not "yes".
+    assert audio_text(_rec()) == "unknown"
     assert audio_text(_rec(missing=("a.wav",))) == "gone"
     assert audio_text(_rec(parts=("a.wav", "b.wav", "c.wav"),
                            missing=("c.wav",))) == "2 of 3 parts"
@@ -458,3 +481,26 @@ def test_an_empty_recording_is_listed_and_called_empty(make_tab, qt_app,
         ("full.json", "yes", "0:01"), ("empty.json", "empty", "0:00")]
     assert tab.counts.text() == (
         "2 of 2 shown: 2 complete (1 empty), 0 incomplete, 0 with a problem")
+
+
+def test_a_recording_whose_audio_cannot_be_measured_is_not_yes(
+        make_tab, qt_app, tmp_path):
+    """Every part there, and nothing to measure: a WAV of 0 bytes.
+
+    Complete is true of it; "yes" - there is something to listen to -
+    is not shown by anything, and the length on the clock says nothing
+    about what the file holds.
+    """
+    _sidecar(tmp_path, "bad", ["bad.wav"])
+    (tmp_path / "bad.wav").write_bytes(b"")
+    tab = make_tab()
+    tab.reload()
+    finish(tab, qt_app)
+
+    (row,) = shown(tab)
+    assert (row["Audio"], row["Length"]) == ("unknown", f"{CLOCK_MARK} 2:00")
+    assert tab.counts.text() == (
+        "1 of 1 shown: 1 complete (1 unknown), 0 incomplete, "
+        "0 with a problem")
+    tip = tab.table.item(0, 0).toolTip()
+    assert "could not be measured" in tip
