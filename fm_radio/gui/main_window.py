@@ -25,16 +25,57 @@
 #
 """The receiver's status window.
 
-Everything shown here comes from one call to ``controller.get_status()`` on a
-timer; everything the user changes goes back through the controller's facade.
-The window holds no receiver state of its own, so a refresh that arrives
-while the user is mid-gesture cannot fight them for a widget — except for the
-two controls that would, which say so where they are handled.
+The Radio tab is redrawn on a timer.  Each tick starts by asking whether
+the device has gone (``device_failure``).  While it has not, most of what
+the tab shows comes from one call to ``controller.get_status()``, but not
+all of it: on the same tick the window asks the facade for the band
+picture (``get_spectrum()``) and whether each recorder is running or
+finishing; it looks at the requests the facade handed back for the
+writes it asked the SDR for, to see how they went; and whenever there is
+no snapshot it asks for the frequency, the station and the gain itself.
+
+Once the device has gone, the snapshot, the band picture and the
+requests are not read again, and the recorders are asked about once.
+Each tick asks for the frequency, the station, the gain and whether it
+is manual, as it does when there is no snapshot, then puts "no device"
+where the station was; the timer runs on only until a recording that
+was running has been closed - see ``_show_the_device_has_gone``.
+
+The DSP tab reads its settings once, when it is built; the Recordings
+tab reads the disk the first time it is chosen, and again when its
+Reload button is pressed.
+
+The window and its tabs touch the receiver only through the
+controller's facade, with one exception: closing the window sets the
+controller's ``quit_event`` directly - the event the receiver's threads
+watch, and the one the CLI sets to quit.  When the window's loop has
+ended, ``__main__`` calls ``cleanup()``, which sets it as well.  The band
+scan the window starts is not held to the same rule: ``band_scan``
+tunes and switches the AGC through the facade, but reads the SDR's
+sample rate and tuning, watches its blocks and holds the audio output
+through the controller's ``sdr_receiver`` and ``audio_output``
+directly.
+
+What does not concern the receiver does not change it - which tab is
+in front, and the Recordings tab's filter, Reload and Open folder among
+them: those change what the window shows, read the disk (asking the
+facade only for the station names), or open the file manager.
+
+The window holds none of the running receiver's state, so a refresh that
+arrives while the user is mid-gesture cannot fight them for a widget —
+except for the two controls that would, which say so where they are
+handled.  What it does keep is its own: the requests it has made - where
+it asked the tuner to go, the recordings it asked to start, the writes
+it is waiting to hear about.  Of the receiver's state it keeps one thing,
+and only once the device has gone: whether a recording was running at
+that moment, asked once before the release starts, because the
+receiver's own answer changes while the file is still being written.
 
 The spectrum and waterfall are in ``band_view``; the blend bar is here,
 because it reads off the same snapshot as the rest of the Signal group.
-The DSP settings and the recordings browser are the next step and are
-deliberately not here.
+The DSP settings and the recordings are tabs of their own, in ``dsp_tab``
+and ``recordings_tab``: this module builds them, and tells the recordings
+tab when it is first chosen.
 """
 
 from __future__ import annotations
@@ -55,9 +96,11 @@ from PySide6.QtWidgets import (
 from fm_radio.band_scan import (
     BandScan, CONFIRMED, LIKELY_SKIRT, where_this_is,
 )
+from fm_radio.constants import RECORDINGS_DIR
 from fm_radio.exceptions import SDRDeviceError
 from fm_radio.gui.band_view import BandView
 from fm_radio.gui.dsp_tab import DspTab
+from fm_radio.gui.recordings_tab import RecordingsTab
 from fm_radio.multipath import NOISE_AM_DEPTH
 from fm_radio.stations import WillNotEdit
 from fm_radio.device_worker import TUNE
@@ -297,9 +340,14 @@ class ReceiverWindow(QMainWindow):
         # is the one showing - a control that stopped being updated
         # while it was out of sight would be wrong the moment it
         # came back, and Qt keeps hidden widgets alive and willing.
+        # The third is the exception: it is a list of files, and a
+        # refresh twenty times a second is no reason to read a
+        # directory.  It reads when it is first chosen and when asked.
         self._tabs = QTabWidget(self)
         self._tabs.addTab(self._build_radio_tab(), "Radio")
         self._tabs.addTab(self._build_dsp_tab(), "DSP")
+        self._tabs.addTab(self._build_recordings_tab(), "Recordings")
+        self._tabs.currentChanged.connect(self._tab_shown)
         self.setCentralWidget(self._tabs)
 
         self.setStatusBar(QStatusBar(self))
@@ -382,6 +430,21 @@ class ReceiverWindow(QMainWindow):
         """
         self._dsp = DspTab(self.controller, self)
         return self._dsp
+
+    def _build_recordings_tab(self) -> QWidget:
+        """The recordings on disk, as their sidecars describe them.
+
+        The directory is the one the CLI records into.  See
+        fm_radio.gui.recordings_tab.
+        """
+        self._recordings = RecordingsTab(self.controller, RECORDINGS_DIR,
+                                         self)
+        return self._recordings
+
+    def _tab_shown(self, index: int) -> None:
+        """Read the recordings the first time anyone looks at them."""
+        if self._tabs.widget(index) is self._recordings:
+            self._recordings.first_look()
 
     def _build_tuner(self) -> QGroupBox:
         box = QGroupBox("Tuner", self)

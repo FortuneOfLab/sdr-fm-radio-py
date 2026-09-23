@@ -666,6 +666,25 @@ class FMReceiverController:
         """Return the catalogue entry the tuner is currently sitting on."""
         return nearest(self._here, self.get_frequency())
 
+    def stations_at(self, freqs) -> dict[float, Station | None]:
+        """Name each of *freqs* the way the dial names a frequency.
+
+        :meth:`current_station` for many frequencies at once: the same
+        list, narrowed to the area when there is one, so a recording is
+        called what the dial would call its frequency now.  If the area
+        has changed since a recording was made, that is the new area's
+        name, not the old one's.
+
+        One list for all of them.  The naming list is read once, here,
+        and every frequency is looked up in that one: an area settled on
+        while this is working cannot name some of them by the old list
+        and the rest by the new.  For the same reason it is safe from
+        any thread - the list is replaced by a single rebinding (see
+        :meth:`remember_where_this_is`), never emptied in place.
+        """
+        here = self._here
+        return {freq: nearest(here, freq) for freq in freqs}
+
     def get_spectrum(self) -> "SpectrumFrame | None":
         """The latest picture of the band, or None if there is not one.
 
