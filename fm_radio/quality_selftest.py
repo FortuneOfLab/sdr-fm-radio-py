@@ -637,6 +637,200 @@ def _noise_metrics(left: np.ndarray, right: np.ndarray, fs: int,
     }
 
 
+@dataclass(frozen=True)
+class IqMeasurement:
+    """What the demodulator made of a measured IQ capture, as numbers.
+
+    Worked out by :func:`measure_demodulated` from what
+    :func:`_run_demod_diag_iq` returns, and turned into the command
+    line's text by :func:`iq_report_lines` and :func:`iq_csv_row`.  The
+    numbers and the text are kept apart so that something other than
+    the command line can have the first without the second.
+
+    A value that could not be worked out - no blocks, nothing left
+    after the warmup, no finite pilot SNR - is NaN.  NaN prints as
+    ``nan`` under every format used here, which is what the command
+    line printed in those cases before the two were separated.
+    """
+
+    #: Output samples per channel after the warmup was dropped.
+    samples: int
+    rms_left: float
+    rms_right: float
+    #: RMS of L-R over RMS of L+R.
+    side_over_mono: float
+    #: L/R correlation; NaN unless there are more than 8 samples.
+    correlation: float
+    blend_mean: float
+    blend_min: float
+    blend_max: float
+    #: Over the finite per-block pilot SNRs only.
+    pilot_snr_p10_db: float
+    pilot_snr_median_db: float
+    pilot_snr_mean_db: float
+    pilot_snr_max_db: float
+    #: The band the audio HF noise floor was measured in, (low, high)
+    #: in Hz, or None when it was not measured: not asked for, or
+    #: nothing left after the warmup.  The three below are NaN then.
+    noise_band_hz: tuple[float, float] | None
+    mid_hf_p10_db: float
+    side_hf_p10_db: float
+    #: Stereo listening's HF penalty against mono, dB.
+    listen_penalty_db: float
+
+
+def measure_demodulated(
+    demodulated: dict[str, np.ndarray],
+    *,
+    warmup_s: float,
+    noise_diag: bool,
+    noise_hf_lo_hz: float,
+    noise_hf_hi_hz: float,
+) -> IqMeasurement:
+    """The numbers the ``--iq-wav`` report is made of.
+
+    *demodulated* is what :func:`_run_demod_diag_iq` returns.  The first
+    *warmup_s* seconds of audio are dropped before anything is measured;
+    the blend and pilot SNR histories are per block and are not.  The
+    audio HF noise floor is measured only when *noise_diag* is set and
+    some audio is left after the warmup.
+
+    The arithmetic is the command line's, moved here unchanged and in
+    the same order, so that it prints the same bytes it always has.
+    """
+    left = demodulated["left"]
+    right = demodulated["right"]
+    blend = demodulated["blend"]
+    snr_hist = demodulated["pilot_snr_db"]
+
+    s = int(max(0.0, float(warmup_s)) * AUDIO_OUTPUT_RATE)
+    left_s = left[s:]
+    right_s = right[s:]
+    n = min(left_s.size, right_s.size)
+    left_s = left_s[:n]
+    right_s = right_s[:n]
+    corr = float(np.corrcoef(left_s, right_s)[0, 1]) if n > 8 else float("nan")
+    side = _rms(left_s - right_s)
+    mono = _rms(left_s + right_s)
+
+    nan = float("nan")
+    if blend.size:
+        blend_mean = float(np.mean(blend))
+        blend_min = float(np.min(blend))
+        blend_max = float(np.max(blend))
+    else:
+        blend_mean = blend_min = blend_max = nan
+    finite_snr = snr_hist[np.isfinite(snr_hist)] if snr_hist.size else snr_hist
+    if finite_snr.size:
+        snr_p10 = float(np.percentile(finite_snr, 10))
+        snr_median = float(np.median(finite_snr))
+        snr_mean = float(np.mean(finite_snr))
+        snr_max = float(np.max(finite_snr))
+    else:
+        snr_p10 = snr_median = snr_mean = snr_max = nan
+
+    # --- Audio-side stereo noise diagnostics ---
+    noise_band = None
+    side_hf_p10_db = nan
+    mid_hf_p10_db = nan
+    listen_penalty_db = nan
+    if noise_diag and n > 0:
+        noise_band = (float(noise_hf_lo_hz), float(noise_hf_hi_hz))
+        stereo_metrics = _noise_metrics(
+            left_s, right_s, AUDIO_OUTPUT_RATE,
+            hf_lo_hz=float(noise_hf_lo_hz),
+            hf_hi_hz=float(noise_hf_hi_hz),
+        )
+        mid_hf_p10_db = stereo_metrics.get("mid_hf_p10_db", nan)
+        side_hf_p10_db = stereo_metrics.get("side_hf_p10_db", nan)
+        mid_lin = stereo_metrics.get("mid_hf_p10_lin", nan)
+        side_lin = stereo_metrics.get("side_hf_p10_lin", nan)
+        # HF noise penalty when listening in stereo vs mono.
+        # Mono listening hears mid HF only; stereo listening hears
+        # mid+/-side, so per-speaker HF power is mid^2 + side^2
+        # (assuming side noise is uncorrelated with mid).
+        if (np.isfinite(mid_lin) and np.isfinite(side_lin)
+                and mid_lin > 1e-12):
+            ratio = (side_lin ** 2) / (mid_lin ** 2)
+            listen_penalty_db = 10.0 * np.log10(1.0 + ratio)
+
+    return IqMeasurement(
+        samples=n,
+        rms_left=_rms(left_s),
+        rms_right=_rms(right_s),
+        side_over_mono=side / (mono + EPS),
+        correlation=corr,
+        blend_mean=blend_mean,
+        blend_min=blend_min,
+        blend_max=blend_max,
+        pilot_snr_p10_db=snr_p10,
+        pilot_snr_median_db=snr_median,
+        pilot_snr_mean_db=snr_mean,
+        pilot_snr_max_db=snr_max,
+        noise_band_hz=noise_band,
+        mid_hf_p10_db=mid_hf_p10_db,
+        side_hf_p10_db=side_hf_p10_db,
+        listen_penalty_db=listen_penalty_db,
+    )
+
+
+def iq_report_lines(m: IqMeasurement) -> list[str]:
+    """The ``--iq-wav`` report, a line at a time, as it has always read."""
+    lines = [
+        "FM Quality Self-Test (Measured IQ Diagnostics)",
+        f"Samples(out): {m.samples}",
+        f"RMS L/R: {m.rms_left:.6f} / {m.rms_right:.6f}",
+        f"L-R / L+R RMS ratio: {m.side_over_mono:.4f}",
+        f"L/R correlation: {m.correlation:.4f}",
+        f"Blend avg/min/max: {m.blend_mean:.3f} / "
+        f"{m.blend_min:.3f} / {m.blend_max:.3f}",
+        f"Pilot SNR p10/p50/avg/max [dB]: "
+        f"{m.pilot_snr_p10_db:.2f} / "
+        f"{m.pilot_snr_median_db:.2f} / "
+        f"{m.pilot_snr_mean_db:.2f} / "
+        f"{m.pilot_snr_max_db:.2f}",
+    ]
+    if m.noise_band_hz is not None:
+        lo_hz, hi_hz = m.noise_band_hz
+        lines += [
+            "Audio HF noise floor [dB] (band "
+            f"{lo_hz/1e3:.1f}-{hi_hz/1e3:.1f}kHz, p10):",
+            f"  mid  (L+R)/2 = {m.mid_hf_p10_db:.2f}   "
+            f"side (L-R)/2 = {m.side_hf_p10_db:.2f}   "
+            f"(side - mid = {m.side_hf_p10_db - m.mid_hf_p10_db:+.2f} dB)",
+            f"Stereo listening HF penalty vs mono: "
+            f"{m.listen_penalty_db:+.2f} dB",
+        ]
+    lines.append("Reference metrics (THD+N/SNR/separation) require "
+                 "synthetic or source-wav mode.")
+    return lines
+
+
+#: The first line of a ``--noise-csv`` file.
+IQ_CSV_HEADER = (
+    "tag,duration_s,blend_avg,pilot_snr_p10_db,pilot_snr_med_db,"
+    "side_lr_ratio,mid_hf_p10_db,side_hf_p10_db,listen_penalty_db\n"
+)
+
+
+def iq_csv_row(m: IqMeasurement, tag: str, duration_s: float) -> str:
+    """One ``--noise-csv`` row, newline included.
+
+    *duration_s* is the duration that was asked for, not the one
+    measured: a capture shorter than it is still recorded under the
+    number it was run with.
+    """
+    return (
+        f"{tag},{float(duration_s):.2f},"
+        f"{m.blend_mean:.3f},"
+        f"{m.pilot_snr_p10_db:.2f},"
+        f"{m.pilot_snr_median_db:.2f},"
+        f"{m.side_over_mono:.4f},"
+        f"{m.mid_hf_p10_db:.2f},{m.side_hf_p10_db:.2f},"
+        f"{m.listen_penalty_db:.2f}\n"
+    )
+
+
 def _run_demod_from_composite(
     composite: np.ndarray,
     fixed_blend: float | None = None,
@@ -1627,110 +1821,32 @@ def main() -> None:
         stereo_diag = _run_demod_diag_iq(
             iq, fixed_blend=fixed_blend, **common_overrides,
         )
-        left = stereo_diag["left"]
-        right = stereo_diag["right"]
-        blend = stereo_diag["blend"]
-        snr_hist = stereo_diag["pilot_snr_db"]
-
-        s = int(max(0.0, float(args.warmup_s)) * AUDIO_OUTPUT_RATE)
-        left_s = left[s:]
-        right_s = right[s:]
-        n = min(left_s.size, right_s.size)
-        left_s = left_s[:n]
-        right_s = right_s[:n]
-        corr = float(np.corrcoef(left_s, right_s)[0, 1]) if n > 8 else float("nan")
-        rms_l = _rms(left_s)
-        rms_r = _rms(right_s)
-        side = _rms(left_s - right_s)
-        mono = _rms(left_s + right_s)
-        print("FM Quality Self-Test (Measured IQ Diagnostics)")
-        print(f"Samples(out): {n}")
-        print(f"RMS L/R: {rms_l:.6f} / {rms_r:.6f}")
-        print(f"L-R / L+R RMS ratio: {side/(mono+EPS):.4f}")
-        print(f"L/R correlation: {corr:.4f}")
-        if blend.size:
-            print(
-                f"Blend avg/min/max: {float(np.mean(blend)):.3f} / "
-                f"{float(np.min(blend)):.3f} / {float(np.max(blend)):.3f}"
-            )
-        else:
-            print("Blend avg/min/max: nan / nan / nan")
-        finite_snr = snr_hist[np.isfinite(snr_hist)] if snr_hist.size else snr_hist
-        if finite_snr.size:
-            print(
-                f"Pilot SNR p10/p50/avg/max [dB]: "
-                f"{float(np.percentile(finite_snr, 10)):.2f} / "
-                f"{float(np.median(finite_snr)):.2f} / "
-                f"{float(np.mean(finite_snr)):.2f} / "
-                f"{float(np.max(finite_snr)):.2f}"
-            )
-        else:
-            print("Pilot SNR p10/p50/avg/max [dB]: nan / nan / nan / nan")
-
-        # --- Audio-side stereo noise diagnostics ---
-        side_hf_p10_db = float("nan")
-        mid_hf_p10_db = float("nan")
-        listen_penalty_db = float("nan")
-        if args.noise_diag and n > 0:
-            stereo_metrics = _noise_metrics(
-                left_s, right_s, AUDIO_OUTPUT_RATE,
-                hf_lo_hz=float(args.noise_hf_lo_hz),
-                hf_hi_hz=float(args.noise_hf_hi_hz),
-            )
-            mid_hf_p10_db = stereo_metrics.get("mid_hf_p10_db", float("nan"))
-            side_hf_p10_db = stereo_metrics.get("side_hf_p10_db", float("nan"))
-            mid_lin = stereo_metrics.get("mid_hf_p10_lin", float("nan"))
-            side_lin = stereo_metrics.get("side_hf_p10_lin", float("nan"))
-            # HF noise penalty when listening in stereo vs mono.
-            # Mono listening hears mid HF only; stereo listening hears
-            # mid+/-side, so per-speaker HF power is mid^2 + side^2
-            # (assuming side noise is uncorrelated with mid).
-            if (np.isfinite(mid_lin) and np.isfinite(side_lin)
-                    and mid_lin > 1e-12):
-                ratio = (side_lin ** 2) / (mid_lin ** 2)
-                listen_penalty_db = 10.0 * np.log10(1.0 + ratio)
-            print(
-                "Audio HF noise floor [dB] (band "
-                f"{args.noise_hf_lo_hz/1e3:.1f}-{args.noise_hf_hi_hz/1e3:.1f}kHz, p10):"
-            )
-            print(
-                f"  mid  (L+R)/2 = {mid_hf_p10_db:.2f}   "
-                f"side (L-R)/2 = {side_hf_p10_db:.2f}   "
-                f"(side - mid = {side_hf_p10_db - mid_hf_p10_db:+.2f} dB)"
-            )
-            print(
-                f"Stereo listening HF penalty vs mono: "
-                f"{listen_penalty_db:+.2f} dB"
-            )
-        print("Reference metrics (THD+N/SNR/separation) require synthetic or source-wav mode.")
+        measured = measure_demodulated(
+            stereo_diag,
+            warmup_s=float(args.warmup_s),
+            noise_diag=bool(args.noise_diag),
+            noise_hf_lo_hz=float(args.noise_hf_lo_hz),
+            noise_hf_hi_hz=float(args.noise_hf_hi_hz),
+        )
+        for line in iq_report_lines(measured):
+            print(line)
 
         if args.noise_csv:
             import os as _os
             tag = args.noise_tag if args.noise_tag else _os.path.basename(args.iq_wav)
-            header = (
-                "tag,duration_s,blend_avg,pilot_snr_p10_db,pilot_snr_med_db,"
-                "side_lr_ratio,mid_hf_p10_db,side_hf_p10_db,listen_penalty_db\n"
-            )
-            row = (
-                f"{tag},{float(args.duration):.2f},"
-                f"{(float(np.mean(blend)) if blend.size else float('nan')):.3f},"
-                f"{(float(np.percentile(finite_snr,10)) if finite_snr.size else float('nan')):.2f},"
-                f"{(float(np.median(finite_snr)) if finite_snr.size else float('nan')):.2f},"
-                f"{side/(mono+EPS):.4f},"
-                f"{mid_hf_p10_db:.2f},{side_hf_p10_db:.2f},{listen_penalty_db:.2f}\n"
-            )
             need_header = (not _os.path.exists(args.noise_csv)) or (
                 _os.path.getsize(args.noise_csv) == 0
             )
             with open(args.noise_csv, "a", encoding="utf-8") as f:
                 if need_header:
-                    f.write(header)
-                f.write(row)
+                    f.write(IQ_CSV_HEADER)
+                f.write(iq_csv_row(measured, tag, float(args.duration)))
             print(f"CSV: appended row to {args.noise_csv}")
 
         if args.out_wav or args.play:
             import scipy.io.wavfile as wavfile
-            stereo = np.stack([left, right], axis=-1)
+            stereo = np.stack([stereo_diag["left"], stereo_diag["right"]],
+                              axis=-1)
             peak = float(np.max(np.abs(stereo))) + 1e-10
             stereo_16 = (stereo / peak * 0.9 * 32767).astype(np.int16)
 
@@ -1740,7 +1856,8 @@ def main() -> None:
             print(f"Saved: {play_path}")
 
             if args.play:
-                print(f"Playing {n/AUDIO_OUTPUT_RATE:.1f}s audio ...")
+                seconds = measured.samples / AUDIO_OUTPUT_RATE
+                print(f"Playing {seconds:.1f}s audio ...")
                 subprocess.run(
                     ["cmd", "/c", "start", "", play_path],
                     check=False,
