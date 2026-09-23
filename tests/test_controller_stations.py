@@ -133,6 +133,27 @@ def test_settling_on_an_area_writes_it_and_names_by_it_now(build_controller,
 
 
 @needs_tomllib
+def test_a_recording_is_named_as_the_dial_would_name_it(build_controller,
+                                                        no_user_config):
+    """station_at is current_station for a frequency the tuner is not on.
+
+    The recordings tab names each sidecar's frequency with it.  A name
+    worked out from anything but the dial's own list - the whole
+    catalogue, say - would call one frequency two things, and would
+    name a Tokyo station in Hokkaido.
+    """
+    instance = build_controller(no_user_config)
+    assert instance.get_frequency() != 81.3e6
+    assert instance.station_at(81.3e6).name == "J-WAVE"
+    assert (instance.station_at(instance.get_frequency())
+            == instance.current_station())
+
+    instance.remember_where_this_is("北海道")
+
+    assert instance.station_at(81.3e6) is None, "it is still naming Tokyo"
+
+
+@needs_tomllib
 def test_a_name_worked_out_before_does_not_outlive_the_area(
         build_controller, no_user_config):
     """The snapshot does not name through current_station().

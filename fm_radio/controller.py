@@ -664,7 +664,22 @@ class FMReceiverController:
 
     def current_station(self) -> Station | None:
         """Return the catalogue entry the tuner is currently sitting on."""
-        return nearest(self._here, self.get_frequency())
+        return self.station_at(self.get_frequency())
+
+    def station_at(self, freq_hz: float) -> Station | None:
+        """Return the catalogue entry at *freq_hz*, named as the dial names.
+
+        :meth:`current_station` for any frequency rather than the
+        tuner's: the same list, narrowed to the area when there is one,
+        so a recording is called what the dial would call its frequency
+        now.  If the area has changed since the recording was made,
+        that is the new area's name, not the old one's.
+
+        Safe to call from any thread.  The list is replaced by a single
+        rebinding (see :meth:`remember_where_this_is`) and read once
+        here, so a caller never walks a list that is being emptied.
+        """
+        return nearest(self._here, freq_hz)
 
     def get_spectrum(self) -> "SpectrumFrame | None":
         """The latest picture of the band, or None if there is not one.

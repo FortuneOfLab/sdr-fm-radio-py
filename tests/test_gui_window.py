@@ -154,6 +154,12 @@ class FakeController:
     def current_station(self):
         return self.station
 
+    def station_at(self, freq_hz: float):
+        """What the dial would call *freq_hz*; the recordings tab asks."""
+        self.calls.append(("station_at", freq_hz))
+        name = {80.0e6: "TOKYO FM", 81.3e6: "J-WAVE"}.get(freq_hz)
+        return _Station(name) if name else None
+
     def get_dsp_defaults(self) -> DspSettings:
         return self.dsp_defaults
 
@@ -433,7 +439,7 @@ def test_the_controls_are_on_the_radio_tab(window):
     view, _ = window()
 
     assert [view._tabs.tabText(i) for i in range(view._tabs.count())] == [
-        "Radio", "DSP"]
+        "Radio", "DSP", "Recordings"]
     radio = view._tabs.widget(0)
     for control in (view._frequency, view._down, view._up, view._presets,
                     view._found, view._scan_button, view._band,
@@ -1585,6 +1591,41 @@ def finish(view, qt_app, timeout: float = 5.0) -> None:
     deadline = time.monotonic() + timeout
     while view._sweep is not None and time.monotonic() < deadline:
         qt_app.processEvents()
+
+
+def test_the_recordings_are_read_when_first_looked_at_and_not_before(
+        window, monkeypatch, qt_app):
+    """Not when the window is built, not on a refresh, once on first look.
+
+    A refresh is twenty times a second, and building the window is
+    already the slowest thing it does; a directory of a few hundred
+    sidecars, each part opened, belongs to neither.
+    """
+    from fm_radio.gui import recordings_tab
+
+    reads = []
+    monkeypatch.setattr(recordings_tab, "scan_recordings",
+                        lambda directory: reads.append(directory) or [])
+    view, _ = window(FakeController(snapshot()))
+    for _ in range(3):
+        view.refresh()
+    qt_app.processEvents()
+    assert reads == [], "the directory was read before anyone looked"
+
+    view._tabs.setCurrentWidget(view._recordings)
+    view._recordings._scan.wait()
+    deadline = time.monotonic() + 5.0
+    while view._recordings._scan is not None and time.monotonic() < deadline:
+        qt_app.processEvents()
+
+    view._tabs.setCurrentIndex(0)
+    view._tabs.setCurrentWidget(view._recordings)
+    view.refresh()
+    qt_app.processEvents()
+
+    assert len(reads) == 1
+    assert view._tabs.tabText(view._tabs.indexOf(view._recordings)) == (
+        "Recordings")
 
 
 def test_the_sweep_does_not_run_on_the_thread_that_draws(window,

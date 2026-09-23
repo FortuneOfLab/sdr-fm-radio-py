@@ -55,9 +55,11 @@ from PySide6.QtWidgets import (
 from fm_radio.band_scan import (
     BandScan, CONFIRMED, LIKELY_SKIRT, where_this_is,
 )
+from fm_radio.constants import RECORDINGS_DIR
 from fm_radio.exceptions import SDRDeviceError
 from fm_radio.gui.band_view import BandView
 from fm_radio.gui.dsp_tab import DspTab
+from fm_radio.gui.recordings_tab import RecordingsTab
 from fm_radio.multipath import NOISE_AM_DEPTH
 from fm_radio.stations import WillNotEdit
 from fm_radio.device_worker import TUNE
@@ -297,9 +299,14 @@ class ReceiverWindow(QMainWindow):
         # is the one showing - a control that stopped being updated
         # while it was out of sight would be wrong the moment it
         # came back, and Qt keeps hidden widgets alive and willing.
+        # The third is the exception: it is a list of files, and a
+        # refresh twenty times a second is no reason to read a
+        # directory.  It reads when it is first chosen and when asked.
         self._tabs = QTabWidget(self)
         self._tabs.addTab(self._build_radio_tab(), "Radio")
         self._tabs.addTab(self._build_dsp_tab(), "DSP")
+        self._tabs.addTab(self._build_recordings_tab(), "Recordings")
+        self._tabs.currentChanged.connect(self._tab_shown)
         self.setCentralWidget(self._tabs)
 
         self.setStatusBar(QStatusBar(self))
@@ -382,6 +389,21 @@ class ReceiverWindow(QMainWindow):
         """
         self._dsp = DspTab(self.controller, self)
         return self._dsp
+
+    def _build_recordings_tab(self) -> QWidget:
+        """The recordings on disk, as their sidecars describe them.
+
+        The directory is the one the CLI records into.  See
+        fm_radio.gui.recordings_tab.
+        """
+        self._recordings = RecordingsTab(self.controller, RECORDINGS_DIR,
+                                         self)
+        return self._recordings
+
+    def _tab_shown(self, index: int) -> None:
+        """Read the recordings the first time anyone looks at them."""
+        if self._tabs.widget(index) is self._recordings:
+            self._recordings.first_look()
 
     def _build_tuner(self) -> QGroupBox:
         box = QGroupBox("Tuner", self)
