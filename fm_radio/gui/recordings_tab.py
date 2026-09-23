@@ -275,7 +275,7 @@ class Scan(QObject):
             # was and the rest by an area chosen half way through.
             freqs = sorted({rec.center_freq_hz for rec in recordings
                             if rec.center_freq_hz is not None})
-            stations = self._controller.stations_at(freqs) if freqs else {}
+            stations = self._controller.stations_at(freqs)
             rows = []
             for rec in recordings:
                 station = stations.get(rec.center_freq_hz)

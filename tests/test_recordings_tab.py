@@ -395,6 +395,26 @@ def test_station_names_are_asked_for_once_per_read(make_tab, qt_app,
         "J-WAVE", "J-WAVE", "J-WAVE", "TOKYO FM"]
 
 
+def test_a_read_with_no_frequencies_still_asks_once(make_tab, qt_app,
+                                                    tmp_path):
+    """Once per read, including a read with nothing to name.
+
+    An empty directory, or sidecars that give no frequency: the one call
+    is made with no frequencies in it, rather than skipped - "once per
+    read" is then true of every read, not of the ones with something in
+    them.
+    """
+    _sidecar(tmp_path, "nofreq", ["n.wav"], freq=None)
+    namer = Namer()
+    tab = make_tab(namer)
+    tab.reload()
+    finish(tab, qt_app)
+    tab.show_all.setChecked(True)
+
+    assert namer.calls == [[]]
+    assert [r["Station"] for r in shown(tab)] == [""]
+
+
 def test_the_redecode_button_is_there_and_does_nothing_yet(make_tab):
     tab = make_tab()
     assert tab.redecode_button.isEnabled() is False

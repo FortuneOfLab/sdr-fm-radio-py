@@ -33,8 +33,9 @@ two controls that would, which say so where they are handled.
 
 The spectrum and waterfall are in ``band_view``; the blend bar is here,
 because it reads off the same snapshot as the rest of the Signal group.
-The DSP settings and the recordings browser are the next step and are
-deliberately not here.
+The DSP settings and the recordings are tabs of their own, in ``dsp_tab``
+and ``recordings_tab``: this module builds them, and tells the recordings
+tab when it is first chosen.
 """
 
 from __future__ import annotations
