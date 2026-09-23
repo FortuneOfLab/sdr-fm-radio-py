@@ -57,9 +57,11 @@ through the controller's ``sdr_receiver`` and ``audio_output``
 directly.
 
 What does not concern the receiver does not change it - which tab is
-in front, and the Recordings tab's filter, Reload and Open folder among
-them: those change what the window shows, read the disk (asking the
-facade only for the station names), or open the file manager.
+in front, and the Recordings tab's filter, Reload, Open folder,
+Re-decode and Save CSV among them: those change what the window shows,
+read the disk (asking the facade only for the station names), open the
+file manager, decode a recorded file in a process of its own, or write
+the file the user named.
 
 The window holds none of the running receiver's state, so a refresh that
 arrives while the user is mid-gesture cannot fight them for a widget —
@@ -1208,14 +1210,17 @@ class ReceiverWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt naming
-        """Stop the timer, stop any sweep, and shut the receiver down.
+        """Stop the timer, stop any sweep or re-decode, and shut the
+        receiver down.
 
         A sweep left running would go on retuning a receiver that is
         being taken apart, and would put it back afterwards to a
-        frequency nobody is listening to.
+        frequency nobody is listening to.  A re-decode left running
+        would go on using a core for a result nobody will see.
         """
         self._timer.stop()
         self.stop_any_sweep()
+        self._recordings.shutdown()
         self.controller.quit_event.set()
         super().closeEvent(event)
 
