@@ -25,8 +25,17 @@
 #
 """The receiver's status window.
 
-Everything shown here comes from one call to ``controller.get_status()`` on a
-timer; everything the user changes goes back through the controller's facade.
+The Radio tab is redrawn on a timer, and most of what it shows comes from
+one call to ``controller.get_status()``.  Not all of it.  On the same tick
+it asks the facade whether the device has gone (``device_failure``), for
+the band picture (``get_spectrum()``) and whether each recorder is
+running or finishing; it looks at the requests the facade handed back
+for the writes it asked the SDR for, to see how they went; and whenever
+there is no snapshot it asks for the frequency, the station and the gain
+itself.  The DSP tab reads its settings once, when it is built; the
+Recordings tab reads the disk when it is chosen.  Everything the user
+changes goes back through the controller's facade.
+
 The window holds no receiver state of its own, so a refresh that arrives
 while the user is mid-gesture cannot fight them for a widget — except for the
 two controls that would, which say so where they are handled.
