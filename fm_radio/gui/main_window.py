@@ -42,8 +42,9 @@ where the station was; the timer runs on only until a recording that
 was running has been closed - see ``_show_the_device_has_gone``.
 
 The DSP tab reads its settings once, when it is built; the Recordings
-tab reads the disk when it is chosen.  Everything the user changes goes
-back through the controller's facade.
+tab reads the disk the first time it is chosen, and again when its
+Reload button is pressed.  Everything the user changes goes back
+through the controller's facade.
 
 The window holds none of the running receiver's state, so a refresh that
 arrives while the user is mid-gesture cannot fight them for a widget —
