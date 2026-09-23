@@ -887,3 +887,202 @@ def test_help_prints_on_the_console_it_will_meet():
             f"--help cannot be printed on a cp932 console: "
             f"{bad!r} (U+{ord(bad[0]):04X}) on line {line} of the help. "
             f"Use ASCII in help strings.") from None
+
+
+# ----------------------------------------------------------------------
+# The --iq-wav report: numbers first, words second (P5 PR-C)
+#
+# Byte-for-byte agreement with the report as it was before the split was
+# checked against main's module across real and synthetic captures and
+# every flag the path reads; see the PR.  What is pinned here is the
+# shape: the text a given set of numbers turns into, the numbers a given
+# demodulation turns into, and main() putting the two together.
+# ----------------------------------------------------------------------
+
+from fm_radio.quality_selftest import (                         # noqa: E402
+    IQ_CSV_HEADER, IqMeasurement, iq_csv_row, iq_report_lines,
+    measure_demodulated,
+)
+
+_A_MEASUREMENT = IqMeasurement(
+    samples=72000,
+    rms_left=0.1234564, rms_right=0.2,
+    side_over_mono=0.05432,
+    correlation=0.98761,
+    blend_mean=0.8766, blend_min=0.1, blend_max=1.0,
+    pilot_snr_p10_db=24.126, pilot_snr_median_db=28.5,
+    pilot_snr_mean_db=27.994, pilot_snr_max_db=31.0,
+    noise_band_hz=(10000.0, 14500.0),
+    mid_hf_p10_db=-80.0, side_hf_p10_db=-72.5, listen_penalty_db=0.154,
+)
+
+
+def test_the_report_reads_as_it_always_has():
+    assert iq_report_lines(_A_MEASUREMENT) == [
+        "FM Quality Self-Test (Measured IQ Diagnostics)",
+        "Samples(out): 72000",
+        "RMS L/R: 0.123456 / 0.200000",
+        "L-R / L+R RMS ratio: 0.0543",
+        "L/R correlation: 0.9876",
+        "Blend avg/min/max: 0.877 / 0.100 / 1.000",
+        "Pilot SNR p10/p50/avg/max [dB]: 24.13 / 28.50 / 27.99 / 31.00",
+        "Audio HF noise floor [dB] (band 10.0-14.5kHz, p10):",
+        "  mid  (L+R)/2 = -80.00   side (L-R)/2 = -72.50   "
+        "(side - mid = +7.50 dB)",
+        "Stereo listening HF penalty vs mono: +0.15 dB",
+        "Reference metrics (THD+N/SNR/separation) require synthetic or "
+        "source-wav mode.",
+    ]
+
+
+def test_without_a_noise_band_the_report_skips_the_noise_block():
+    from dataclasses import replace
+    lines = iq_report_lines(replace(_A_MEASUREMENT, noise_band_hz=None))
+    assert not any(line.startswith("Audio HF noise floor") for line in lines)
+    assert not any("listening HF penalty" in line for line in lines)
+    assert lines[-1].startswith("Reference metrics")
+
+
+def test_nothing_to_measure_prints_nan_as_it_always_did():
+    # The literal "nan / nan / nan" the command line used to print for an
+    # empty run is what NaN formats as, so one set of format strings
+    # covers both; this is the pair of them agreeing.
+    empty = np.zeros(0, dtype=np.float32)
+    import warnings
+    with warnings.catch_warnings():
+        # The means of empty slices, which is the point.
+        warnings.simplefilter("ignore", RuntimeWarning)
+        m = measure_demodulated(
+            {"left": empty, "right": empty, "blend": empty,
+             "pilot_snr_db": empty},
+            warmup_s=0.5, noise_diag=True,
+            noise_hf_lo_hz=10000.0, noise_hf_hi_hz=14500.0)
+    assert m.samples == 0
+    assert m.noise_band_hz is None          # nothing left to measure it in
+    lines = iq_report_lines(m)
+    assert "Blend avg/min/max: nan / nan / nan" in lines
+    assert "Pilot SNR p10/p50/avg/max [dB]: nan / nan / nan / nan" in lines
+    assert "L/R correlation: nan" in lines
+
+
+def _demodulated(seconds=2.0, *, amp=0.5, blend=(0.2, 0.6),
+                 snr=(float("nan"), 10.0, 20.0, 60.0)):
+    n = int(seconds * 48000)
+    t = np.arange(n) / 48000.0
+    tone = (amp * np.sin(2 * np.pi * 1000.0 * t)).astype(np.float32)
+    return {"left": tone, "right": tone.copy(),
+            "blend": np.asarray(blend, dtype=np.float32),
+            "pilot_snr_db": np.asarray(snr, dtype=np.float32)}
+
+
+def test_the_numbers_come_from_the_audio_after_the_warmup():
+    m = measure_demodulated(_demodulated(2.0), warmup_s=0.5,
+                            noise_diag=False,
+                            noise_hf_lo_hz=10000.0, noise_hf_hi_hz=14500.0)
+    assert m.samples == int(1.5 * 48000)
+    assert m.correlation == pytest.approx(1.0)
+    # L-R is silent, but _rms floors at sqrt(EPS) = 1e-6: over a mono
+    # RMS of about 0.71 that is 1.4e-6, not zero.
+    assert m.side_over_mono == pytest.approx(0.0, abs=1e-5)
+    assert m.rms_left == pytest.approx(0.5 / np.sqrt(2), rel=1e-3)
+    # Per block, and not trimmed by the warmup.
+    assert (m.blend_mean, m.blend_min, m.blend_max) == pytest.approx(
+        (0.4, 0.2, 0.6))
+    # Over the finite SNRs only: 10, 20, 60 - chosen so that the
+    # median (20) and the mean (30) are not the same number, and one
+    # cannot stand in for the other unnoticed.
+    assert m.pilot_snr_p10_db == pytest.approx(12.0)
+    assert m.pilot_snr_median_db == pytest.approx(20.0)
+    assert m.pilot_snr_mean_db == pytest.approx(30.0)
+    assert m.pilot_snr_max_db == pytest.approx(60.0)
+
+
+def test_the_noise_floor_is_measured_only_when_asked_and_there_is_audio():
+    asked = measure_demodulated(_demodulated(2.0), warmup_s=0.5,
+                                noise_diag=True,
+                                noise_hf_lo_hz=8000.0, noise_hf_hi_hz=12000.0)
+    assert asked.noise_band_hz == (8000.0, 12000.0)
+    assert np.isfinite(asked.mid_hf_p10_db)
+    assert np.isfinite(asked.side_hf_p10_db)
+
+    not_asked = measure_demodulated(_demodulated(2.0), warmup_s=0.5,
+                                    noise_diag=False,
+                                    noise_hf_lo_hz=8000.0,
+                                    noise_hf_hi_hz=12000.0)
+    assert not_asked.noise_band_hz is None
+    assert np.isnan(not_asked.mid_hf_p10_db)
+    assert np.isnan(not_asked.listen_penalty_db)
+
+    # Asked for, but the warmup has eaten all of the audio.
+    import warnings
+    with warnings.catch_warnings():
+        # The RMS of nothing is the mean of an empty slice.
+        warnings.simplefilter("ignore", RuntimeWarning)
+        none_left = measure_demodulated(_demodulated(0.4), warmup_s=0.5,
+                                        noise_diag=True,
+                                        noise_hf_lo_hz=8000.0,
+                                        noise_hf_hi_hz=12000.0)
+    assert none_left.samples == 0
+    assert none_left.noise_band_hz is None
+
+
+def test_the_csv_row_is_the_one_it_always_wrote():
+    assert IQ_CSV_HEADER == (
+        "tag,duration_s,blend_avg,pilot_snr_p10_db,pilot_snr_med_db,"
+        "side_lr_ratio,mid_hf_p10_db,side_hf_p10_db,listen_penalty_db\n")
+    assert iq_csv_row(_A_MEASUREMENT, "t1", 30) == (
+        "t1,30.00,0.877,24.13,28.50,0.0543,-80.00,-72.50,0.15\n")
+
+
+def _run_main_on(monkeypatch, capsys, demodulated, *extra):
+    """main() --iq-wav over a stand-in demodulation; its stdout lines."""
+    import fm_radio.quality_selftest as qs
+
+    monkeypatch.setattr(qs, "_load_iq_wav",
+                        lambda path, fs, duration: np.zeros(8, np.complex64))
+    monkeypatch.setattr(qs, "_run_demod_diag_iq",
+                        lambda iq, **kw: demodulated)
+    monkeypatch.setattr(sys, "argv", [
+        "quality_selftest", "--iq-wav", "capture.wav",
+        "--duration", "2", *extra])
+    qs.main()
+    return capsys.readouterr().out.splitlines()
+
+
+def test_the_command_line_prints_what_was_measured(monkeypatch, capsys):
+    """The flags reach the measurement, and the report is its lines."""
+    demodulated = _demodulated(2.0)
+    out = _run_main_on(monkeypatch, capsys, demodulated,
+                       "--warmup-s", "0.25",
+                       "--noise-hf-lo-hz", "8000",
+                       "--noise-hf-hi-hz", "12000")
+
+    expected = measure_demodulated(
+        demodulated, warmup_s=0.25, noise_diag=True,
+        noise_hf_lo_hz=8000.0, noise_hf_hi_hz=12000.0)
+    assert out == iq_report_lines(expected)
+    assert "Samples(out): 84000" in out            # 1.75 s after 0.25 s
+    assert "Audio HF noise floor [dB] (band 8.0-12.0kHz, p10):" in out
+
+
+def test_no_noise_diag_on_the_command_line_skips_the_floor(monkeypatch,
+                                                          capsys):
+    out = _run_main_on(monkeypatch, capsys, _demodulated(2.0),
+                       "--warmup-s", "0.25", "--no-noise-diag")
+    assert not any(line.startswith("Audio HF noise floor") for line in out)
+
+
+def test_the_command_line_appends_the_csv_row(monkeypatch, capsys, tmp_path):
+    csv = tmp_path / "noise.csv"
+    demodulated = _demodulated(2.0)
+    for tag in ("first", "second"):
+        _run_main_on(monkeypatch, capsys, demodulated, "--warmup-s", "0.25",
+                     "--noise-csv", str(csv), "--noise-tag", tag)
+
+    measured = measure_demodulated(
+        demodulated, warmup_s=0.25, noise_diag=True,
+        noise_hf_lo_hz=10000.0, noise_hf_hi_hz=14500.0)
+    assert csv.read_text(encoding="utf-8") == (
+        IQ_CSV_HEADER
+        + iq_csv_row(measured, "first", 2.0)
+        + iq_csv_row(measured, "second", 2.0))
