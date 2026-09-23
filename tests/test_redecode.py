@@ -152,6 +152,30 @@ def test_a_child_that_dies_without_answering_is_reported(tmp_path):
     assert "exit code 3" in why
 
 
+def test_a_waiting_thread_that_cannot_start_takes_the_child_with_it():
+    """The child is started first.  If the thread that would wait for it
+    cannot be, nothing would ever hear from it: it is ended, and the
+    pipe closed, before the failure is passed on."""
+    with Listener() as listener:
+        job = Job(listener.address, 2,
+                  target=redecode_children.wait_forever)
+
+        def no_threads_left():
+            raise RuntimeError("can't start new thread")
+
+        job._thread.start = no_threads_left
+        try:
+            with pytest.raises(RuntimeError, match="can't start"):
+                job.start(lambda measured, why: None)
+            assert not job.process.is_alive()
+            assert job.process.exitcode is not None
+            assert job._receive.closed
+        finally:
+            if job.process.is_alive():
+                job.process.terminate()
+                job.process.join()
+
+
 def test_cancelling_a_running_child_ends_it():
     with Listener() as listener:
         job = Job(listener.address, 2,

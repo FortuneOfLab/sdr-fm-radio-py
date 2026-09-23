@@ -208,10 +208,24 @@ class Job:
             # of no use here.  (Its going is not how the waiting thread
             # learns the child has gone - see _wait_for_it.)
             send.close()
-        self._thread.start()
+        try:
+            self._thread.start()
+        except BaseException:
+            # With nothing to wait for it, a child left running would
+            # decode for nobody and hold the pipe open until it ended.
+            self._process.terminate()
+            self._process.join()
+            receive.close()
+            raise
 
     def cancel(self) -> None:
-        """End the child.  Its answer, if it had one, is not reported."""
+        """End the child, and report :data:`CANCELLED` instead of an answer.
+
+        Unless the waiting thread has already reported: a cancel that
+        comes after that is too late to change what was said, and a
+        caller that must not act on an answer after cancelling has to
+        set it aside itself (the Recordings tab does).
+        """
         self._cancelled = True
         if self._process is not None:
             self._process.terminate()

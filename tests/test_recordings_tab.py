@@ -756,6 +756,28 @@ def test_cancel_asks_the_job_to_stop_and_says_so(make_tab, qt_app, tmp_path,
     assert tab.save_button.isEnabled() is False
 
 
+def test_an_answer_already_on_its_way_when_cancel_is_pressed_is_set_aside(
+        make_tab, qt_app, tmp_path, stand_in):
+    """The job answered before the Cancel reached it, and the answer is
+    queued for this thread when the button is pressed.  Pressing Cancel
+    means no row, whichever got there first."""
+    three_kinds(tmp_path)
+    tab = make_tab()
+    tab.reload()
+    finish(tab, qt_app)
+    choose(tab, "iq.json")
+    tab.redecode_button.click()
+
+    stand_in[0].answer(_MEASURED)      # sent; not yet delivered here
+    assert tab._job is not None
+    tab.redecode_button.click()        # Cancel
+    decoded(tab, qt_app)
+
+    assert results(tab) == []
+    assert tab.decode_status.text() == "Re-decode of iq.wav stopped."
+    assert tab.save_button.isEnabled() is False
+
+
 def test_a_failed_re_decode_says_why(make_tab, qt_app, tmp_path, stand_in):
     three_kinds(tmp_path)
     tab = make_tab()

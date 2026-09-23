@@ -661,14 +661,21 @@ class RecordingsTab(QWidget):
     def _redecode_ended(self, measured, why: str) -> None:
         path, frequency, station, window = self._decoding
         name = os.path.basename(path)
+        # Asked to stop, it has stopped, whatever the answer says.  The
+        # job can have answered before the Cancel reached it - the
+        # answer was on its way here when the button was pressed - and
+        # a row appearing after Cancel would be a result nobody asked
+        # to keep.
+        stopped = self._cancelling or why == CANCELLED
         self._job = None
         self._decoding = None
         self._cancelling = False
         self.window_box.setEnabled(True)
-        if measured is None:
+        if stopped:
+            self.decode_status.setText(f"Re-decode of {name} stopped.")
+        elif measured is None:
             self.decode_status.setText(
-                f"Re-decode of {name} stopped." if why == CANCELLED
-                else f"Re-decode of {name} failed: {why}")
+                f"Re-decode of {name} failed: {why}")
         else:
             result = Result(path, frequency, station, window, measured)
             self._results.append(result)
