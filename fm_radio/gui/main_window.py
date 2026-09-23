@@ -36,10 +36,10 @@ no snapshot it asks for the frequency, the station and the gain itself.
 
 Once the device has gone, the snapshot, the band picture and the
 requests are not read again, and the recorders are asked about once.
-Each tick shows the frequency and the gain the facade gives and says
-"no device" for the station, and the timer runs on only until a
-recording that was running has been closed - see
-``_show_the_device_has_gone``.
+Each tick asks for the frequency, the station, the gain and whether it
+is manual, as it does when there is no snapshot, then puts "no device"
+where the station was; the timer runs on only until a recording that
+was running has been closed - see ``_show_the_device_has_gone``.
 
 The DSP tab reads its settings once, when it is built; the Recordings
 tab reads the disk when it is chosen.  Everything the user changes goes
