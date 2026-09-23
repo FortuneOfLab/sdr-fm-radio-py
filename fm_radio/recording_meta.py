@@ -367,9 +367,17 @@ def _what_is_there(path: str) -> tuple[bool, tuple | None, float | None]:
     ``there`` is False for no file, or for something that is not a
     plain file, or for a path with a NUL in it.  ``identity`` is None
     when the file is there and cannot be told from another - a
-    filesystem that does not number its files reports inode 0, and a
-    file that will not open cannot be asked at all; the caller
-    decides what that is worth.
+    filesystem that does not number its files reports inode 0, a
+    file that will not open cannot be asked at all, and a descriptor
+    whose fstat fails cannot answer; the caller decides what that is
+    worth.
+
+    Nothing here has a deadline.  O_NONBLOCK keeps a named pipe from
+    waiting for a writer, and that is all it does: an open that a
+    hung network mount or a stuck FUSE filesystem never answers
+    never returns, and a thread cannot be made to give up on a
+    system call.  Callers that must stay responsive - a window - run
+    this off their own thread.
 
     A refused open is either absence or a file that exists and may
     not be read, and which one it is cannot be read off the
@@ -393,7 +401,13 @@ def _what_is_there(path: str) -> tuple[bool, tuple | None, float | None]:
         try:
             held = os.fstat(fd)
         except OSError:
-            return _a_plain_file_is_at(path), None, None
+            # Something opened, and cannot say what.  Going back to the
+            # name to ask would answer about whatever the name points at
+            # now, which is the lookup this function exists not to make:
+            # the descriptor may hold a plain file while the name has
+            # become a directory.  Opened is present; unknown is not
+            # measured.
+            return True, None, None
         if not stat_flags.S_ISREG(held.st_mode):
             return False, None, None
         identity = (held.st_dev, held.st_ino) if held.st_ino else None
@@ -508,18 +522,26 @@ def read_sidecar(path: str) -> Recording:
     by when it was made.  Such a row is never
     :attr:`~Recording.complete` and never carries a measured length.
     """
+    # Opening and decoding are separate steps with separate failures,
+    # and ValueError belongs to both: a NUL in the path is one out of
+    # open(), a malformed document another out of json.load().  One
+    # try around both would call the first one bad JSON.
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        f = open(path, "r", encoding="utf-8")
+    except (OSError, ValueError) as e:
+        return _unusable(path, f"could not be opened: {e}")
+    try:
+        with f:
             meta = json.load(f)
     except OSError as e:
-        return _unusable(path, f"could not be opened: {e}")
+        return _unusable(path, f"could not be read: {e}")
     except (ValueError, RecursionError) as e:
         # ValueError covers JSONDecodeError and UnicodeDecodeError,
-        # and also the integer-digit limit CPython raises on a number
-        # of more than 4300 digits.  RecursionError is what deeply
-        # nested but otherwise valid JSON costs.  BaseException is
-        # left alone on purpose: a KeyboardInterrupt is not something
-        # to turn into a row.
+        # and also the integer-digit limit CPython raises by default
+        # on a number of more than 4300 digits.  RecursionError is
+        # what deeply nested but otherwise valid JSON costs.
+        # BaseException is left alone on purpose: a KeyboardInterrupt
+        # is not something to turn into a row.
         return _unusable(path, f"is not valid JSON: {e}")
     if not isinstance(meta, dict):
         return _unusable(
@@ -626,6 +648,10 @@ def scan_recordings(directory: str) -> list[Recording]:
     A directory that does not exist is not an error; glob finds
     nothing in it and the answer is an empty list, which is what a
     fresh checkout should get.
+
+    Not responsive by construction: every part is opened, and an open
+    on a filesystem that has stopped answering does not come back -
+    see :func:`_what_is_there`.  A window calls this from a worker.
 
     Glob itself can still raise, which is why it is guarded: a
     directory name with a NUL in it reaches os.scandir and comes back

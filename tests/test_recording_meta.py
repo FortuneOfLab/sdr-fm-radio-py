@@ -1030,3 +1030,82 @@ def test_a_named_pipe_does_not_stop_the_scan(tmp_path):
     assert rec.problem == ""
     assert rec.missing == ("pipe.wav",)
     assert rec.complete is False
+
+
+# --- Round 8 ----------------------------------------------------------
+
+
+def test_a_descriptor_whose_fstat_fails_is_not_looked_up_again(tmp_path):
+    # Opened, and fstat fails.  The descriptor holds whatever it
+    # opened; the NAME may point at something else by now - here, a
+    # stat of it says directory.  Asking the name would answer about
+    # the directory, so the answer has to be the descriptor's: there,
+    # unidentified, not measured.
+    _write_wav(tmp_path / "a.wav", 48000)
+    _write_json(tmp_path / "one.json", _iq_meta(["a.wav"]))
+    target = str(tmp_path / "a.wav")
+
+    ours = []
+
+    def remember(path, fd):
+        if path == target:
+            ours.append(fd)
+
+    real_fstat, real_stat = os.fstat, os.stat
+
+    def fstat_fails(fd, **kw):
+        if fd in ours:
+            raise OSError(5, "I/O error on the descriptor")
+        return real_fstat(fd, **kw)
+
+    def the_name_is_a_directory_now(path, **kw):
+        found = real_stat(path, **kw)
+        if str(path) == target:
+            fields = list(found)
+            fields[0] = stat.S_IFDIR | 0o755
+            return os.stat_result(fields)
+        return found
+
+    os.fstat, os.stat = fstat_fails, the_name_is_a_directory_now
+    try:
+        with _hook_os_open(after_open=remember):
+            rec = read_sidecar(str(tmp_path / "one.json"))
+    finally:
+        os.fstat, os.stat = real_fstat, real_stat
+
+    assert ours, "the open hook never fired"
+    assert rec.problem == ""
+    assert rec.missing == ()            # opened is present ...
+    assert rec.audio_seconds is None    # ... and unknown is not measured
+    assert rec.duration_s == pytest.approx(120.0)
+
+
+def test_a_sidecar_path_that_will_not_open_is_not_called_bad_json(tmp_path):
+    # ValueError comes out of open() for a NUL in the path and out of
+    # json.load() for a malformed document; only the second is JSON's
+    # fault.
+    for path in ("\x00", str(tmp_path / "bad\x00name.json")):
+        rec = read_sidecar(path)
+        assert rec.problem.startswith("could not be opened"), rec.problem
+        assert "JSON" not in rec.problem
+
+
+def test_a_long_number_with_the_digit_limit_switched_off(tmp_path):
+    # The 4300-digit limit is CPython's default, not a law: with it
+    # off (PYTHONINTMAXSTRDIGITS=0) the document parses, the number is
+    # an int too large for a float, and the field reads as no number
+    # - an ordinary field that did not convert, not a broken sidecar.
+    before = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(0)
+    try:
+        (tmp_path / "long.json").write_text(
+            '{"type": "iq", "file": "l.wav", "gain_db": ' + "1" * 5000 + "}",
+            encoding="utf-8")
+        rec = read_sidecar(str(tmp_path / "long.json"))
+    finally:
+        sys.set_int_max_str_digits(before)
+
+    assert rec.problem == ""
+    assert rec.kind == "iq"
+    assert rec.parts == ("l.wav",)
+    assert rec.gain_db is None
