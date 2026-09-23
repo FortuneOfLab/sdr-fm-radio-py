@@ -1075,8 +1075,10 @@ def test_a_descriptor_whose_fstat_fails_is_not_looked_up_again(tmp_path):
 
     assert ours, "the open hook never fired"
     assert rec.problem == ""
-    assert rec.missing == ()            # opened is present ...
-    assert rec.audio_seconds is None    # ... and unknown is not measured
+    assert rec.missing == ()            # opened is not absent ...
+    assert rec.unconfirmed == ("a.wav",)  # ... nor shown to be a file,
+    assert rec.complete is False        # so the set is not complete ...
+    assert rec.audio_seconds is None    # ... and nothing is measured
     assert rec.duration_s == pytest.approx(120.0)
 
 
@@ -1109,3 +1111,118 @@ def test_a_long_number_with_the_digit_limit_switched_off(tmp_path):
     assert rec.kind == "iq"
     assert rec.parts == ("l.wav",)
     assert rec.gain_db is None
+
+
+def _os_open_takes_a_directory(path):
+    """Whether this platform's os.open opens a directory read-only."""
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0))
+    except OSError:
+        return False
+    os.close(fd)
+    return True
+
+
+def test_a_directory_whose_fstat_fails_is_not_complete(tmp_path):
+    # Linux opens a directory; if fstat on it then fails, nothing says
+    # it is not a file - and a set of parts that includes it is not
+    # complete.  Windows refuses to open it at all, the path is asked,
+    # and it is missing.  Two routes; neither may end in "complete".
+    (tmp_path / "a.wav").mkdir()
+    _write_json(tmp_path / "one.json", _iq_meta(["a.wav"]))
+    target = str(tmp_path / "a.wav")
+    opens = _os_open_takes_a_directory(target)
+
+    ours = []
+
+    def remember(path, fd):
+        if path == target:
+            ours.append(fd)
+
+    real_fstat = os.fstat
+
+    def fstat_fails(fd, **kw):
+        if fd in ours:
+            raise OSError(5, "I/O error on the descriptor")
+        return real_fstat(fd, **kw)
+
+    os.fstat = fstat_fails
+    try:
+        with _hook_os_open(after_open=remember):
+            rec = read_sidecar(str(tmp_path / "one.json"))
+    finally:
+        os.fstat = real_fstat
+
+    assert rec.complete is False
+    assert rec.audio_seconds is None
+    if opens:
+        assert rec.unconfirmed == ("a.wav",) and rec.missing == ()
+    else:
+        assert rec.missing == ("a.wav",) and rec.unconfirmed == ()
+
+
+class _ClosesBadly:
+    """A file that reads as it should and fails when it is closed.
+
+    *read_error*, if given, is raised by read() instead - so that a
+    test can see which of two failures a caller reports.
+    """
+
+    def __init__(self, inner, read_error=None):
+        self._inner = inner
+        self._read_error = read_error
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    def read(self, *a):
+        if self._read_error is not None:
+            raise self._read_error
+        return self._inner.read(*a)
+
+    def close(self):
+        self._inner.close()
+        raise OSError(5, "the close failed")
+
+
+def _read_with_a_bad_close(path, read_error=None):
+    real_open = builtins.open
+    handed_out = []
+
+    def open_that_closes_badly(target, *a, **kw):
+        handle = real_open(target, *a, **kw)
+        if str(target) == path:
+            handed_out.append(True)
+            return _ClosesBadly(handle, read_error)
+        return handle
+
+    builtins.open = open_that_closes_badly
+    try:
+        rec = read_sidecar(path)
+    finally:
+        builtins.open = real_open
+    assert handed_out, "read_sidecar never opened the sidecar"
+    return rec
+
+
+def test_a_sidecar_whose_close_fails_after_it_parsed(tmp_path):
+    # Parsed, and then the close failed.  The file was only read, so
+    # the close loses nothing - the same as a part's close - and what
+    # the document said stands.
+    _write_json(tmp_path / "s.json", _iq_meta(["s.wav"]))
+    rec = _read_with_a_bad_close(str(tmp_path / "s.json"))
+    assert rec.problem == ""
+    assert rec.center_freq_hz == pytest.approx(91.6e6)
+    assert rec.started_at is not None
+    assert rec.parts == ("s.wav",)
+
+
+def test_a_read_error_is_not_replaced_by_a_close_error(tmp_path):
+    # Both fail.  The read is the one that stopped the sidecar being
+    # read, so it is the one the row reports.
+    _write_json(tmp_path / "s.json", _iq_meta(["s.wav"]))
+    rec = _read_with_a_bad_close(
+        str(tmp_path / "s.json"), read_error=OSError(5, "the read failed"))
+    assert rec.problem.startswith("could not be read")
+    assert "the read failed" in rec.problem
+    assert "the close failed" not in rec.problem

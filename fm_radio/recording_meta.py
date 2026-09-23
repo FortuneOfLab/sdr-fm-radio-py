@@ -147,15 +147,18 @@ _DROPPED_KEYS = ("dropped_blocks", "dropped_chunks")
 class Recording:
     """One sidecar, and how much of what it names is still on disk.
 
-    The fields up to :attr:`dropped` are what the sidecar says, or
-    None where it does not say it: every key is optional here, because
-    a sidecar written at the start of a session and never finalised
-    has no ``stopped_at`` and no ``parts``, and an audio one carries a
-    frequency and a gain only because the controller passes them in.
+    :attr:`kind`, :attr:`parts` and the fields from
+    :attr:`sample_rate_hz` to :attr:`dropped` are what the sidecar says,
+    or None where it does not say it: every key is optional here,
+    because a sidecar written at the start of a session and never
+    finalised has no ``stopped_at`` and no ``parts``, and an audio one
+    carries a frequency and a gain only because the controller passes
+    them in.
 
-    The last three are worked out at read time.  :attr:`missing` is
-    the parts with no file beside the sidecar - the common case in a
-    directory that has been cleared of audio - and
+    :attr:`missing`, :attr:`unconfirmed`, :attr:`audio_seconds` and
+    :attr:`wall_seconds` are worked out at read time.
+    :attr:`missing` is the parts with no file beside the sidecar - the
+    common case in a directory that has been cleared of audio - and
     :attr:`audio_seconds` comes from the WAV headers, which is why it
     is filled in only when every part is there to be measured.
     """
@@ -168,6 +171,10 @@ class Recording:
     parts: tuple[str, ...]
     #: Those of :attr:`parts` with no file beside the sidecar.
     missing: tuple[str, ...]
+    #: Those of :attr:`parts` that opened and could not then say what
+    #: they are.  Not missing - something is there - and not a file
+    #: either, as far as anything here can tell.
+    unconfirmed: tuple[str, ...]
     sample_rate_hz: int | None
     center_freq_hz: float | None
     gain_db: float | None
@@ -188,13 +195,16 @@ class Recording:
 
     @property
     def complete(self) -> bool:
-        """True when every part the sidecar names is on disk.
+        """True when every part the sidecar names is a file on disk.
 
         Never true of a row with a :attr:`problem`: a sidecar whose
         part list could not be believed is not a recording anything
-        has all of.
+        has all of.  Nor of one with an :attr:`unconfirmed` part: a
+        part that could not be shown to be a file - on Linux it may be
+        a directory, which opens there - is not a part anyone has.
         """
-        return bool(self.parts) and not self.missing and not self.problem
+        return (bool(self.parts) and not self.missing
+                and not self.unconfirmed and not self.problem)
 
     @property
     def duration_is_measured(self) -> bool:
@@ -327,6 +337,16 @@ _OPEN_FLAGS = (os.O_RDONLY
                | getattr(os, "O_BINARY", 0))
 
 
+#: What :func:`_what_is_there` found at a part's name.  Three answers,
+#: not two: "opened, and could not then say what it is" is neither of
+#: the others.  Absent would put a part that may well be there into
+#: ``missing``; a file would let a directory - which opens on Linux -
+#: count towards a complete recording.
+_ABSENT = "absent"
+_A_FILE = "a file"
+_UNCONFIRMED = "unconfirmed"
+
+
 def _a_plain_file_is_at(path: str) -> bool:
     """Whether a stat of *path* finds a plain file.  Never raises."""
     try:
@@ -335,7 +355,7 @@ def _a_plain_file_is_at(path: str) -> bool:
         return False
 
 
-def _what_is_there(path: str) -> tuple[bool, tuple | None, float | None]:
+def _what_is_there(path: str) -> tuple[str, tuple | None, float | None]:
     """Whether a plain file is at *path*, which file, and how long.
 
     Identity, not spelling.  Windows matches file names without
@@ -364,13 +384,15 @@ def _what_is_there(path: str) -> tuple[bool, tuple | None, float | None]:
     4 GB capture to another drive and leaving a symlink behind should
     not lose the recording.
 
-    ``there`` is False for no file, or for something that is not a
-    plain file, or for a path with a NUL in it.  ``identity`` is None
-    when the file is there and cannot be told from another - a
-    filesystem that does not number its files reports inode 0, a
-    file that will not open cannot be asked at all, and a descriptor
-    whose fstat fails cannot answer; the caller decides what that is
-    worth.
+    The first answer is one of three.  :data:`_ABSENT` for no file,
+    for something that is not a plain file, or for a path with a NUL
+    in it.  :data:`_UNCONFIRMED` for a descriptor whose fstat fails:
+    something opened and cannot say what.  :data:`_A_FILE` otherwise,
+    including a file that will not open but that a stat of the path
+    shows to be plain.  ``identity`` is None when a file is there and
+    cannot be told from another - a filesystem that does not number
+    its files reports inode 0, and a file that will not open cannot
+    be asked at all; the caller decides what that is worth.
 
     Nothing here has a deadline.  O_NONBLOCK keeps a named pipe from
     waiting for a writer, and that is all it does: an open that a
@@ -394,9 +416,10 @@ def _what_is_there(path: str) -> tuple[bool, tuple | None, float | None]:
     try:
         fd = os.open(path, _OPEN_FLAGS)
     except (FileNotFoundError, NotADirectoryError, IsADirectoryError):
-        return False, None, None
+        return _ABSENT, None, None
     except (OSError, ValueError):
-        return _a_plain_file_is_at(path), None, None
+        found = _A_FILE if _a_plain_file_is_at(path) else _ABSENT
+        return found, None, None
     try:
         try:
             held = os.fstat(fd)
@@ -405,11 +428,10 @@ def _what_is_there(path: str) -> tuple[bool, tuple | None, float | None]:
             # name to ask would answer about whatever the name points at
             # now, which is the lookup this function exists not to make:
             # the descriptor may hold a plain file while the name has
-            # become a directory.  Opened is present; unknown is not
-            # measured.
-            return True, None, None
+            # become a directory.  So neither absent nor a file.
+            return _UNCONFIRMED, None, None
         if not stat_flags.S_ISREG(held.st_mode):
-            return False, None, None
+            return _ABSENT, None, None
         identity = (held.st_dev, held.st_ino) if held.st_ino else None
         # closefd=False keeps the descriptor this function's to close,
         # and only this function's: a file object that closed it too
@@ -421,7 +443,7 @@ def _what_is_there(path: str) -> tuple[bool, tuple | None, float | None]:
                 seconds = _seconds_of_wav(handle)
         except (OSError, ValueError):
             seconds = None
-        return True, identity, seconds
+        return _A_FILE, identity, seconds
     finally:
         try:
             os.close(fd)
@@ -431,8 +453,9 @@ def _what_is_there(path: str) -> tuple[bool, tuple | None, float | None]:
 
 def _look_for_the_parts(
     here: str, parts: tuple[str, ...],
-) -> tuple[tuple[str, ...], tuple[float | None, ...], str]:
-    """Find *parts* beside *here*: (missing, lengths, problem).
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[float | None, ...],
+           str]:
+    """Find *parts* beside *here*: (missing, unconfirmed, lengths, problem).
 
     Parts are looked for beside the sidecar, by base name.  The
     writer only ever puts base names in, and taking the base name
@@ -450,6 +473,7 @@ def _look_for_the_parts(
     the only thing a problem costs, and the caller withholds that.
     """
     missing: list[str] = []
+    unconfirmed: list[str] = []
     lengths: list[float | None] = []
     spellings: set[str] = set()
     files: set[tuple] = set()
@@ -462,9 +486,12 @@ def _look_for_the_parts(
             problem = f"names {base} as more than one part"
         spellings.add(spelling)
         beside = os.path.join(here, base)
-        there, which, seconds = _what_is_there(beside)
-        if not there:
+        found, which, seconds = _what_is_there(beside)
+        if found == _ABSENT:
             missing.append(name)
+            continue
+        if found == _UNCONFIRMED:
+            unconfirmed.append(name)
             continue
         if which is None:
             unnumbered += 1
@@ -483,7 +510,7 @@ def _look_for_the_parts(
     # that might be double is worse than no length at all.
     if unnumbered and len(lengths) > 1:
         lengths = [None] * len(lengths)
-    return tuple(missing), tuple(lengths), problem
+    return tuple(missing), tuple(unconfirmed), tuple(lengths), problem
 
 
 def _unusable(path: str, problem: str) -> Recording:
@@ -496,7 +523,7 @@ def _unusable(path: str, problem: str) -> Recording:
     alongside it - :func:`read_sidecar` builds that row itself.
     """
     return Recording(
-        sidecar=path, kind="", parts=(), missing=(),
+        sidecar=path, kind="", parts=(), missing=(), unconfirmed=(),
         sample_rate_hz=None, center_freq_hz=None, gain_db=None,
         channels=None, started_at=None, stopped_at=None, dropped=None,
         audio_seconds=None, wall_seconds=None, problem=problem,
@@ -531,8 +558,7 @@ def read_sidecar(path: str) -> Recording:
     except (OSError, ValueError) as e:
         return _unusable(path, f"could not be opened: {e}")
     try:
-        with f:
-            meta = json.load(f)
+        meta = json.load(f)
     except OSError as e:
         return _unusable(path, f"could not be read: {e}")
     except (ValueError, RecursionError) as e:
@@ -543,6 +569,18 @@ def read_sidecar(path: str) -> Recording:
         # BaseException is left alone on purpose: a KeyboardInterrupt
         # is not something to turn into a row.
         return _unusable(path, f"is not valid JSON: {e}")
+    finally:
+        # Outside the try that sorts the failures, and ignored, for the
+        # reason a part's close is: the file was only read, so a close
+        # that fails loses nothing, and by now the answer - a parsed
+        # document or the error that stopped it - is already in hand.
+        # A close inside that try would turn a sidecar that parsed
+        # into "could not be read", or replace the read error that
+        # did happen with its own.
+        try:
+            f.close()
+        except OSError:
+            pass
     if not isinstance(meta, dict):
         return _unusable(
             path, f"is not a JSON object but a {type(meta).__name__}",
@@ -550,9 +588,10 @@ def read_sidecar(path: str) -> Recording:
 
     parts, problem = _named_parts(meta)
     missing: tuple[str, ...] = ()
+    unconfirmed: tuple[str, ...] = ()
     lengths: tuple[float | None, ...] = ()
     if not problem:
-        missing, lengths, problem = _look_for_the_parts(
+        missing, unconfirmed, lengths, problem = _look_for_the_parts(
             os.path.dirname(path), parts,
         )
 
@@ -561,7 +600,7 @@ def read_sidecar(path: str) -> Recording:
     # parts have been deleted would report a fraction as though it
     # were the whole, which is worse than saying nothing and falling
     # back to the clock.
-    if (not problem and parts and not missing
+    if (not problem and parts and not missing and not unconfirmed
             and all(s is not None for s in lengths)):
         audio_seconds = float(sum(lengths))
     else:
@@ -589,6 +628,7 @@ def read_sidecar(path: str) -> Recording:
         kind=kind if isinstance(kind, str) else "",
         parts=parts,
         missing=missing,
+        unconfirmed=unconfirmed,
         sample_rate_hz=_a_whole_number(meta.get("sample_rate_hz")),
         center_freq_hz=_a_number(meta.get("center_freq_hz")),
         gain_db=_a_number(meta.get("gain_db")),
