@@ -25,12 +25,11 @@
 #
 """The recordings on disk, as their sidecars describe them.
 
-A list and nothing else yet: what each recording was, whether its
-audio is still there, and how long it is.  Re-decoding one comes
-later, and the button for it is here, disabled, so the place it will
-go is already visible.
+What each recording was, whether its audio is still there, and how
+long it is; and, for an IQ capture, what the demodulator makes of the
+start of it now - see :mod:`fm_radio.redecode`.
 
-Three rules the rest of this follows.
+Three rules the list follows.
 
 **The directory is read off the thread that draws.**  Reading it opens
 every part that is still there, and an open on a filesystem that has
@@ -51,6 +50,12 @@ recordings that are gone, so by default only the complete ones - every
 part there and a file (see ``Recording.complete``) - are listed.  The
 line above the list says how many there are of each kind, so that a
 filter never makes a recording disappear without saying so.
+
+A re-decode runs in a process of its own (see :mod:`fm_radio.redecode`
+for why), one at a time, and adds a row to the table under the list.
+Those rows last as long as the window does; Save CSV writes them in the
+command line's ``--noise-csv`` format, so that a file of them can be
+read alongside one the command line wrote.
 """
 
 from __future__ import annotations
@@ -62,17 +67,32 @@ import threading
 from PySide6.QtCore import QObject, Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QHBoxLayout, QHeaderView, QLabel,
-    QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QAbstractItemView, QCheckBox, QFileDialog, QHBoxLayout, QHeaderView,
+    QLabel, QPushButton, QSpinBox, QTableWidget, QTableWidgetItem,
+    QVBoxLayout, QWidget,
 )
 
+from fm_radio.constants import AUDIO_OUTPUT_RATE
+from fm_radio.quality_selftest import (
+    IQ_CSV_HEADER, IqMeasurement, iq_csv_row, iq_report_lines,
+)
 from fm_radio.recording_meta import Recording, scan_recordings
+from fm_radio.redecode import (
+    CANCELLED, WINDOW_DEFAULT_S, WINDOW_MAX_S, WINDOW_MIN_S, Job,
+    first_part_path, why_not,
+)
 
 logger = logging.getLogger("fm_receiver.gui")
 
 #: The columns, left to right.
 COLUMNS = ("Started", "Kind", "MHz", "Station", "Length", "Rate", "Gain",
            "Dropped", "Audio", "File")
+
+#: The re-decode table's columns, left to right.
+RESULT_COLUMNS = ("File", "MHz", "Station", "Window", "Measured",
+                  "Blend avg", "Pilot SNR p10", "Pilot SNR p50",
+                  "L-R / L+R", "L/R corr", "Mid HF p10", "Side HF p10",
+                  "HF penalty")
 
 #: Shown for a length worked out from the sidecar's timestamps rather
 #: than measured from the WAV headers: wall-clock time, to the second,
@@ -207,6 +227,58 @@ def cells_for(rec: Recording, station: str) -> tuple[str, ...]:
 
 
 # ----------------------------------------------------------------------
+# What a re-decode says
+# ----------------------------------------------------------------------
+
+class Result:
+    """One re-decode: what was asked, of which recording, and the answer."""
+
+    def __init__(self, wav_path: str, frequency: str, station: str,
+                 window_s: int, measured: IqMeasurement) -> None:
+        self.wav_path = wav_path
+        self.frequency = frequency
+        self.station = station
+        self.window_s = window_s
+        self.measured = measured
+
+    @property
+    def tag(self) -> str:
+        """The CSV's tag: the file's name, the command line's default."""
+        return os.path.basename(self.wav_path)
+
+    def csv_row(self) -> str:
+        """The row the command line writes for the same file and window."""
+        return iq_csv_row(self.measured, self.tag, self.window_s)
+
+
+def result_cells(result: Result) -> tuple[str, ...]:
+    """Every column's text for one re-decode, in RESULT_COLUMNS order.
+
+    The numbers in the command line's own formats.  "Measured" is the
+    audio the numbers are over: about the window less the warmup, or
+    less when the recording is shorter than the window.  The noise
+    floor columns are blank when the floor was not measured.
+    """
+    m = result.measured
+    floor = m.noise_band_hz is not None
+    return (
+        result.tag,
+        result.frequency,
+        result.station,
+        f"{result.window_s} s",
+        f"{m.samples / AUDIO_OUTPUT_RATE:.1f} s",
+        f"{m.blend_mean:.3f}",
+        f"{m.pilot_snr_p10_db:.2f} dB",
+        f"{m.pilot_snr_median_db:.2f} dB",
+        f"{m.side_over_mono:.4f}",
+        f"{m.correlation:.4f}",
+        f"{m.mid_hf_p10_db:.2f} dB" if floor else "",
+        f"{m.side_hf_p10_db:.2f} dB" if floor else "",
+        f"{m.listen_penalty_db:+.2f} dB" if floor else "",
+    )
+
+
+# ----------------------------------------------------------------------
 # Reading the directory, off the thread that draws
 # ----------------------------------------------------------------------
 
@@ -288,6 +360,44 @@ class Scan(QObject):
             self.finished.emit(rows, "")
 
 
+class Redecode(QObject):
+    """A :class:`~fm_radio.redecode.Job`, reporting through a signal.
+
+    Kept alive the way :class:`Scan` is, and for the same reason: the
+    thread that waits for the child calls back into this object, and
+    must not hold the last reference to it.
+    """
+
+    #: The re-decode has ended: (IqMeasurement or None, why or "").
+    finished = Signal(object, str)
+
+    def __init__(self, job: Job) -> None:
+        super().__init__()
+        self.job = job
+
+    def go(self) -> None:
+        """Start the job; raises if it cannot be started.
+
+        Held only once it has started: one that could not start has no
+        report coming to let go of it.  Its report cannot arrive before
+        this returns - the signal is delivered on this thread.
+        """
+        self.finished.connect(self._retire)
+        self.job.start(self.finished.emit)
+        _RUNNING.add(self)
+
+    def cancel(self) -> None:
+        self.job.cancel()
+
+    def _retire(self, measured, why: str) -> None:
+        self.job.wait()
+        _RUNNING.discard(self)
+
+    def wait(self) -> None:
+        """Block until the job has reported.  For tests."""
+        self.job.wait()
+
+
 # ----------------------------------------------------------------------
 # The tab
 # ----------------------------------------------------------------------
@@ -310,6 +420,15 @@ class RecordingsTab(QWidget):
         self._rows: list[tuple[Recording, str]] = []
         #: True once the directory has been read or is being read.
         self._looked = False
+        #: The rows the table shows, in its order.
+        self._listed: list[tuple[Recording, str]] = []
+        #: The re-decode under way, what it is of, and whether it has
+        #: been asked to stop.
+        self._job: Redecode | None = None
+        self._decoding: tuple[str, str, str, int] | None = None
+        self._cancelling = False
+        #: Every re-decode that has finished, oldest first.
+        self._results: list[Result] = []
 
         outer = QVBoxLayout(self)
 
@@ -332,13 +451,6 @@ class RecordingsTab(QWidget):
         self.open_button = QPushButton("Open folder", self)
         self.open_button.clicked.connect(self._open_folder)
         controls.addWidget(self.open_button)
-        # Here and disabled: re-decoding a recording is the next step,
-        # and the place it will go is already where people look.
-        self.redecode_button = QPushButton("Re-decode...", self)
-        self.redecode_button.setEnabled(False)
-        self.redecode_button.setToolTip(
-            "Re-decoding a recording offline is not available yet.")
-        controls.addWidget(self.redecode_button)
         outer.addLayout(controls)
 
         self.counts = QLabel("Not read yet.", self)
@@ -356,7 +468,52 @@ class RecordingsTab(QWidget):
         self.table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.ResizeToContents)
         self.table.horizontalHeader().setStretchLastSection(True)
-        outer.addWidget(self.table, 1)
+        self.table.itemSelectionChanged.connect(self._update_redecode)
+        outer.addWidget(self.table, 2)
+
+        decode = QHBoxLayout()
+        decode.addWidget(QLabel("Re-decode the first", self))
+        self.window_box = QSpinBox(self)
+        self.window_box.setRange(WINDOW_MIN_S, WINDOW_MAX_S)
+        self.window_box.setValue(WINDOW_DEFAULT_S)
+        self.window_box.setSuffix(" s")
+        decode.addWidget(self.window_box)
+        decode.addWidget(QLabel(
+            "of the chosen IQ recording, with the default DSP settings",
+            self))
+        decode.addStretch(1)
+        self.redecode_button = QPushButton("Re-decode", self)
+        self.redecode_button.clicked.connect(self._redecode_pressed)
+        decode.addWidget(self.redecode_button)
+        outer.addLayout(decode)
+
+        self.decode_status = QLabel("", self)
+        outer.addWidget(self.decode_status)
+
+        self.results = QTableWidget(0, len(RESULT_COLUMNS), self)
+        self.results.setHorizontalHeaderLabels(RESULT_COLUMNS)
+        self.results.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.results.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows)
+        self.results.verticalHeader().setVisible(False)
+        self.results.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents)
+        self.results.horizontalHeader().setStretchLastSection(True)
+        outer.addWidget(self.results, 1)
+
+        saving = QHBoxLayout()
+        saving.addStretch(1)
+        self.save_button = QPushButton("Save CSV...", self)
+        self.save_button.setToolTip(
+            "Write every re-decode above to a CSV file, in the format "
+            "quality_selftest --noise-csv appends.")
+        self.save_button.clicked.connect(self._save_csv)
+        saving.addWidget(self.save_button)
+        outer.addLayout(saving)
+
+        self._update_redecode()
+        self._update_save()
 
     # --- reading --------------------------------------------------------
 
@@ -400,6 +557,8 @@ class RecordingsTab(QWidget):
 
     def _fill(self) -> None:
         shown = self._shown()
+        self._listed = list(shown)
+        self.table.clearSelection()
         self.table.setRowCount(len(shown))
         for row, (rec, name) in enumerate(shown):
             tip = notes_for(rec)
@@ -410,6 +569,7 @@ class RecordingsTab(QWidget):
                 self.table.setItem(row, column, item)
         if self._looked and self._scan is None:
             self.counts.setText(self._count_line(len(shown)))
+        self._update_redecode()
 
     def _count_line(self, shown: int) -> str:
         """How many there are of each kind; the three add up to the total.
@@ -432,6 +592,139 @@ class RecordingsTab(QWidget):
                          if not_yes else f"{complete} complete")
         return (f"{shown} of {total} shown: {complete_text}, "
                 f"{incomplete} incomplete, {with_problem} with a problem")
+
+    # --- re-decoding ----------------------------------------------------
+
+    def _chosen(self) -> tuple[Recording, str] | None:
+        """The recording chosen in the list, if one is."""
+        rows = self.table.selectionModel().selectedRows()
+        if len(rows) != 1:
+            return None
+        row = rows[0].row()
+        if not 0 <= row < len(self._listed):
+            return None
+        return self._listed[row]
+
+    def _update_redecode(self) -> None:
+        """What the button does now, and whether it can."""
+        button = self.redecode_button
+        if self._job is not None:
+            button.setText("Cancel")
+            button.setEnabled(not self._cancelling)
+            button.setToolTip("Stop the re-decode under way.")
+            return
+        button.setText("Re-decode")
+        chosen = self._chosen()
+        if chosen is None:
+            button.setEnabled(False)
+            button.setToolTip("Choose a recording in the list.")
+            return
+        why = why_not(chosen[0])
+        button.setEnabled(not why)
+        button.setToolTip(why or "Decode the start of it again and measure "
+                                 "what the demodulator makes of it.")
+
+    def _redecode_pressed(self) -> None:
+        if self._job is not None:
+            self._cancelling = True
+            self._job.cancel()
+            self.decode_status.setText("Stopping the re-decode...")
+            self._update_redecode()
+            return
+        chosen = self._chosen()
+        if chosen is None or why_not(chosen[0]):
+            return
+        rec, station = chosen
+        window = self.window_box.value()
+        path = first_part_path(rec)
+        job = Redecode(Job(path, window))
+        job.finished.connect(self._redecode_ended)
+        try:
+            job.go()
+        except Exception as e:
+            # A process that cannot be started - out of memory, or of
+            # handles - is said where the answer would have been.
+            logger.error("Could not start a re-decode: %s", e,
+                         exc_info=True)
+            self.decode_status.setText(
+                f"Could not start the re-decode of "
+                f"{os.path.basename(path)}: {e}")
+            return
+        self._job = job
+        self._decoding = (path, frequency_text(rec), station, window)
+        self.window_box.setEnabled(False)
+        self.decode_status.setText(
+            f"Re-decoding the first {window} s of "
+            f"{os.path.basename(path)}...")
+        self._update_redecode()
+
+    def _redecode_ended(self, measured, why: str) -> None:
+        path, frequency, station, window = self._decoding
+        name = os.path.basename(path)
+        # Asked to stop, it has stopped, whatever the answer says.  The
+        # job can have answered before the Cancel reached it - the
+        # answer was on its way here when the button was pressed - and
+        # a row appearing after Cancel would be a result nobody asked
+        # to keep.
+        stopped = self._cancelling or why == CANCELLED
+        self._job = None
+        self._decoding = None
+        self._cancelling = False
+        self.window_box.setEnabled(True)
+        if stopped:
+            self.decode_status.setText(f"Re-decode of {name} stopped.")
+        elif measured is None:
+            self.decode_status.setText(
+                f"Re-decode of {name} failed: {why}")
+        else:
+            result = Result(path, frequency, station, window, measured)
+            self._results.append(result)
+            self._add_result(result)
+            self.decode_status.setText(
+                f"Re-decoded the first {window} s of {name}.")
+        self._update_redecode()
+        self._update_save()
+
+    def _add_result(self, result: Result) -> None:
+        row = self.results.rowCount()
+        self.results.insertRow(row)
+        # The whole report, as the command line prints it, on every cell.
+        tip = "\n".join(iq_report_lines(result.measured))
+        for column, text in enumerate(result_cells(result)):
+            item = QTableWidgetItem(text)
+            item.setToolTip(tip)
+            self.results.setItem(row, column, item)
+
+    def shutdown(self) -> None:
+        """Stop a re-decode, if one is running.  For the window closing."""
+        if self._job is not None:
+            self._cancelling = True
+            self._job.cancel()
+
+    # --- saving ---------------------------------------------------------
+
+    def _update_save(self) -> None:
+        self.save_button.setEnabled(bool(self._results))
+
+    def _save_csv(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save the re-decodes",
+            os.path.join(self.directory, "redecode.csv"),
+            "CSV files (*.csv)")
+        if not path:
+            return
+        try:
+            # Text mode, as the command line writes it, so that the two
+            # files end their lines the same way.
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(IQ_CSV_HEADER)
+                for result in self._results:
+                    f.write(result.csv_row())
+        except OSError as e:
+            self.decode_status.setText(f"Could not save {path}: {e}")
+            return
+        self.decode_status.setText(
+            f"Saved {len(self._results)} re-decodes to {path}")
 
     # --- the folder -----------------------------------------------------
 

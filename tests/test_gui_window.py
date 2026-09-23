@@ -1119,6 +1119,16 @@ def test_closing_the_window_asks_the_receiver_to_stop(window):
     assert not view._timer.isActive()
 
 
+def test_closing_the_window_stops_a_re_decode(window, monkeypatch):
+    """It would go on using a core for a result nobody will see."""
+    stopped = []
+    view, _ = window()
+    monkeypatch.setattr(view._recordings, "shutdown",
+                        lambda: stopped.append(True))
+    view.close()
+    assert stopped == [True]
+
+
 def test_the_presets_come_from_the_catalogue(window):
     view, _ = window()
     # One label plus the favourites.
