@@ -8,6 +8,7 @@ import json
 import os
 import re
 import stat
+import sys
 import threading
 import wave
 
@@ -524,26 +525,57 @@ def test_numbers_too_large_for_a_float(tmp_path):
     assert rec.dropped is None
 
 
-def test_json_that_parses_but_not_without_raising(tmp_path):
-    # Two ways valid JSON costs an exception that is not a
-    # JSONDecodeError: recursion, and CPython's 4300-digit limit on
-    # turning a number into an int.
-    (tmp_path / "deep.json").write_text(
-        '{"x":' + "[" * 2000 + "0" + "]" * 2000 + "}", encoding="utf-8")
-    (tmp_path / "digits.json").write_text(
-        '{"gain_db":' + "1" * 5000 + "}", encoding="utf-8")
+#: Deep enough that every Python this was measured on gives up:
+#: 3.11 refuses under 1000 levels, 3.12 parses 5000 and refuses 10000,
+#: 3.14 parses 10000 and refuses 20000.  The threshold moves with the
+#: version - the first draft of this test used 2000 and failed on 3.12
+#: - so the test asks the interpreter rather than trusting the number.
+_TOO_DEEP = 100_000
+
+
+def _a_sidecar_beside_the_good_one(tmp_path, name, text):
+    (tmp_path / name).write_text(text, encoding="utf-8")
     _write_json(tmp_path / "ok.json", _iq_meta(["ok.wav"]))
 
-    deep = read_sidecar(str(tmp_path / "deep.json"))
-    assert "recursion" in deep.problem
-    digits = read_sidecar(str(tmp_path / "digits.json"))
-    assert "4300" in digits.problem
 
+def _the_good_one_is_still_there(tmp_path):
     rows = scan_recordings(str(tmp_path))
-    assert len(rows) == 3
+    assert len(rows) == 2
     good = [r for r in rows if not r.problem]
     assert len(good) == 1
     assert good[0].center_freq_hz == pytest.approx(91.6e6)
+
+
+def test_json_nested_deeper_than_this_python_will_go(tmp_path):
+    # Valid JSON that json.load cannot finish: RecursionError, which
+    # is not a JSONDecodeError.
+    text = '{"x":' + "[" * _TOO_DEEP + "0" + "]" * _TOO_DEEP + "}"
+    try:
+        json.loads(text)
+    except RecursionError:
+        pass
+    else:
+        pytest.skip(f"this Python parses {_TOO_DEEP} levels of nesting")
+    _a_sidecar_beside_the_good_one(tmp_path, "deep.json", text)
+
+    deep = read_sidecar(str(tmp_path / "deep.json"))
+    assert "recursion" in deep.problem
+    _the_good_one_is_still_there(tmp_path)
+
+
+def test_a_number_longer_than_this_python_will_convert(tmp_path):
+    # CPython refuses to turn more than 4300 digits into an int, with a
+    # plain ValueError - but the limit is configurable, and 0 turns it
+    # off, so ask for it rather than assume it.
+    limit = sys.get_int_max_str_digits()
+    if not limit:
+        pytest.skip("the integer digit limit is switched off here")
+    _a_sidecar_beside_the_good_one(
+        tmp_path, "digits.json", '{"gain_db":' + "1" * (limit + 700) + "}")
+
+    digits = read_sidecar(str(tmp_path / "digits.json"))
+    assert str(limit) in digits.problem
+    _the_good_one_is_still_there(tmp_path)
 
 
 def test_a_parts_list_holding_something_that_is_not_a_name(tmp_path):
