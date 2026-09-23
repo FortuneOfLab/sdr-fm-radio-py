@@ -43,8 +43,12 @@ was running has been closed - see ``_show_the_device_has_gone``.
 
 The DSP tab reads its settings once, when it is built; the Recordings
 tab reads the disk the first time it is chosen, and again when its
-Reload button is pressed.  Everything the user changes goes back
-through the controller's facade.
+Reload button is pressed.  Everything the user asks of the receiver
+goes through the controller's facade.  What does not concern the
+receiver does not change it - which tab is in front, and the Recordings
+tab's filter, Reload and Open folder among them: those change what the
+window shows, read the disk (asking the facade only for the station
+names), or open the file manager.
 
 The window holds none of the running receiver's state, so a refresh that
 arrives while the user is mid-gesture cannot fight them for a widget —
