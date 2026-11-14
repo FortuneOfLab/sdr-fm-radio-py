@@ -285,11 +285,18 @@ class _Bar(QProgressBar):
     ordinary update().  The bar is then painted later from the event
     loop, not inside a call made from Python, and the processing
     thread and the callback were not held up when it was slow.
+
+    A bar whose updates are already off is left that way: repaint()
+    does nothing on it, so there is nothing to avoid, and switching
+    them back on would undo whoever switched them off.
     """
 
     def setValue(self, value: int) -> None:                 # noqa: N802
         if value == self.value():
             return              # nothing to draw, and no update to ask for
+        if not self.updatesEnabled():
+            super().setValue(value)
+            return
         self.setUpdatesEnabled(False)
         try:
             super().setValue(value)

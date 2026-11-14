@@ -822,6 +822,30 @@ def test_a_refresh_draws_the_bars_later_not_while_it_holds_the_gil(
         bar.removeEventFilter(counter)
 
 
+def test_a_bar_whose_updates_were_switched_off_stays_off(window, qt_app):
+    """Moving a bar does not switch back on what someone switched off.
+
+    A plain QProgressBar keeps its updates off through setValue, and
+    paints nothing.  Turning them on again at the end of every
+    setValue would draw a bar that was meant to stay still.
+    """
+    view, _ = window()
+    view.show()
+    qt_app.processEvents()
+    bar = view._left
+    bar.setUpdatesEnabled(False)
+    counter = _PaintCounter()
+    bar.installEventFilter(counter)
+
+    bar.setValue(0 if bar.value() else 100)
+    qt_app.processEvents()
+
+    assert not bar.updatesEnabled(), "setValue switched updates back on"
+    assert counter.count == 0, "a bar with updates off was painted"
+    bar.removeEventFilter(counter)
+    bar.setUpdatesEnabled(True)
+
+
 @pytest.mark.parametrize("dbfs,expected", [
     (0.0, 100), (METER_FLOOR_DBFS, 0), (METER_FLOOR_DBFS - 10, 0),
     (-30.0, 50), (10.0, 100),
