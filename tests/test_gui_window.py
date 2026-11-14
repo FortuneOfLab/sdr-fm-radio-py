@@ -45,7 +45,7 @@ DSP_DEFAULTS = DspSettings(
 # CI installs those libraries so these actually run.
 pytest.importorskip("PySide6.QtWidgets", reason="the GUI is optional")
 
-from PySide6.QtCore import Qt                                  # noqa: E402
+from PySide6.QtCore import QEvent, QObject, Qt                   # noqa: E402
 
 from fm_radio.device_worker import (                      # noqa: E402
     GAIN, GAIN_MODE, RECORDING, TUNE, DeviceWorker,
@@ -766,6 +766,60 @@ def test_silence_reads_as_unknown_rather_than_a_number(window):
     view, _ = window(FakeController(snapshot(level_left_dbfs=SILENCE_DBFS)))
     assert view._left_db.text() == "--"
     assert view._left.value() == 0
+
+
+class _PaintCounter(QObject):
+    """Counts the paint events a widget is sent."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.count = 0
+
+    def eventFilter(self, watched, event):                  # noqa: N802
+        if event.type() == QEvent.Type.Paint:
+            self.count += 1
+        return False
+
+
+def test_a_refresh_draws_the_bars_later_not_while_it_holds_the_gil(
+        window, qt_app):
+    """The bars change inside refresh() and are painted after it.
+
+    QProgressBar.setValue paints the bar before it returns, and from
+    Python that is done holding the GIL: when painting was slow, it
+    stopped the processing thread and the audio callback with it, for
+    up to 200 ms every thirty seconds.  So a bar whose value changes must get
+    no paint event during the refresh - and must still get one
+    afterwards, or the fix is a meter that never moves.
+    """
+    controller = FakeController(snapshot(
+        level_left_dbfs=-40.0, level_right_dbfs=-40.0, am_depth=0.02,
+        blend_factor=0.2))
+    view, _ = window(controller)
+    view.show()
+    qt_app.processEvents()
+    bars = (view._left, view._right, view._am_depth, view._blend)
+    counters = []
+    for bar in bars:
+        counter = _PaintCounter()
+        bar.installEventFilter(counter)
+        counters.append(counter)
+    before = [bar.value() for bar in bars]
+
+    controller.status = snapshot(
+        level_left_dbfs=-3.0, level_right_dbfs=-9.0, am_depth=0.3,
+        blend_factor=0.8)
+    view.refresh()
+
+    assert all(a != b for a, b in zip(before, [b.value() for b in bars])), (
+        "every bar was meant to move")
+    assert [c.count for c in counters] == [0, 0, 0, 0], (
+        "a bar was painted inside refresh(), with the GIL held")
+    qt_app.processEvents()
+    assert all(c.count > 0 for c in counters), (
+        "a bar that moved was never drawn")
+    for bar, counter in zip(bars, counters):
+        bar.removeEventFilter(counter)
 
 
 @pytest.mark.parametrize("dbfs,expected", [
