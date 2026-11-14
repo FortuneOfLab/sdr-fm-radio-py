@@ -2,5 +2,11 @@ numpy
 scipy
 numba
 pytest
-PySide6
+# Below 6.12: with PySide6/shiboken6 6.12.0 on Python 3.11 under Linux,
+# the interpreter aborts on exit after every test has passed
+# ("Fatal Python error: none_dealloc: deallocating None"), and CI
+# fails with exit code 134.  Not this code: the same commit exits
+# cleanly on 6.11.2 and 6.11.3.
+# Lift the pin once a release is out that exits cleanly.
+PySide6<6.12
 pyqtgraph
