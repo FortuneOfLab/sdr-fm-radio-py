@@ -261,6 +261,49 @@ def _still_going(request):
     return request if request is not None and not request.finished else None
 
 
+class _Bar(QProgressBar):
+    """A progress bar whose new value is drawn later, not inside setValue.
+
+    When the bar has to change, ``QProgressBar::setValue`` calls
+    ``repaint()`` rather than ``update()``: the bar is painted before
+    the call returns.  Called from Python, that happens with the GIL
+    held, so no other Python thread runs until it is done - neither
+    the processing thread nor the PyAudio callback, which is Python
+    too.
+
+    Usually that is a few milliseconds.  But refresh() can move these
+    bars twenty times a second, and on the machine the dropouts were
+    reported from, something outside the process made those calls
+    slow every thirty seconds: one setValue on a level meter took 70
+    to 200 ms, at the same moments in every copy of the window
+    running at the time.  The card holds about 107 ms, so the longer
+    ones were an audible gap.  The same receiver with no window had
+    none.
+
+    With updates switched off for the moment of the call, setValue
+    only stores the value, and switching them back on asks for an
+    ordinary update().  The bar is then painted later from the event
+    loop, not inside a call made from Python, and the processing
+    thread and the callback were not held up when it was slow.
+
+    A bar whose updates are already off is left that way: repaint()
+    does nothing on it, so there is nothing to avoid, and switching
+    them back on would undo whoever switched them off.
+    """
+
+    def setValue(self, value: int) -> None:                 # noqa: N802
+        if value == self.value():
+            return              # nothing to draw, and no update to ask for
+        if not self.updatesEnabled():
+            super().setValue(value)
+            return
+        self.setUpdatesEnabled(False)
+        try:
+            super().setValue(value)
+        finally:
+            self.setUpdatesEnabled(True)
+
+
 class Sweep(QObject):
     """Runs a band scan off the GUI thread and reports back on it.
 
@@ -506,7 +549,7 @@ class ReceiverWindow(QMainWindow):
         # the blend moves continuously with the pilot, and a receiver
         # that is halfway is the interesting case - a word for it can
         # only say STEREO or MONO, both of which would be wrong.
-        self._blend = QProgressBar(box)
+        self._blend = _Bar(box)
         self._blend.setRange(0, 100)
         self._blend.setTextVisible(False)
         self._blend.setToolTip(
@@ -529,7 +572,7 @@ class ReceiverWindow(QMainWindow):
         # channel looks like the worst multipath - so it is here
         # beside the pilot SNR, which says whether there is a
         # station there to be spoiled.
-        self._am_depth = QProgressBar(box)
+        self._am_depth = _Bar(box)
         self._am_depth.setRange(0, 100)
         self._am_depth.setTextVisible(False)
         self._am_depth.setToolTip(
@@ -542,8 +585,8 @@ class ReceiverWindow(QMainWindow):
         grid.addWidget(self._am_depth, 2, 1)
         grid.addWidget(self._am_depth_value, 2, 2)
 
-        self._left = QProgressBar(box)
-        self._right = QProgressBar(box)
+        self._left = _Bar(box)
+        self._right = _Bar(box)
         for meter in (self._left, self._right):
             meter.setRange(0, 100)
             meter.setTextVisible(False)
