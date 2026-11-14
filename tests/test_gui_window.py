@@ -822,28 +822,37 @@ def test_a_refresh_draws_the_bars_later_not_while_it_holds_the_gil(
         bar.removeEventFilter(counter)
 
 
-def test_a_bar_whose_updates_were_switched_off_stays_off(window, qt_app):
+@pytest.mark.parametrize("switched_off_on", ["the bar", "its parent"])
+def test_a_bar_whose_updates_were_switched_off_stays_off(
+        window, qt_app, switched_off_on):
     """Moving a bar does not switch back on what someone switched off.
 
-    A plain QProgressBar keeps its updates off through setValue, and
-    paints nothing.  Turning them on again at the end of every
-    setValue would draw a bar that was meant to stay still.
+    A plain QProgressBar keeps its updates off through setValue, takes
+    the new value, and paints nothing.  Turning them on again at the
+    end of every setValue would draw a bar that was meant to stay
+    still; dropping the value instead would leave it showing an old
+    one once they come back on.  Updates switched off on the parent
+    reach the bar too, and are treated the same.
     """
     view, _ = window()
     view.show()
     qt_app.processEvents()
     bar = view._left
-    bar.setUpdatesEnabled(False)
+    owner = bar if switched_off_on == "the bar" else bar.parentWidget()
+    owner.setUpdatesEnabled(False)
+    assert not bar.updatesEnabled(), "the bar was meant to have updates off"
     counter = _PaintCounter()
     bar.installEventFilter(counter)
+    target = 0 if bar.value() else 100
 
-    bar.setValue(0 if bar.value() else 100)
+    bar.setValue(target)
     qt_app.processEvents()
 
+    assert bar.value() == target, "the bar did not take the new value"
     assert not bar.updatesEnabled(), "setValue switched updates back on"
     assert counter.count == 0, "a bar with updates off was painted"
     bar.removeEventFilter(counter)
-    bar.setUpdatesEnabled(True)
+    owner.setUpdatesEnabled(True)
 
 
 @pytest.mark.parametrize("dbfs,expected", [
