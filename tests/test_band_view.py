@@ -344,6 +344,71 @@ def test_a_later_frame_does_move_the_history(view):
     assert view._history[-1].argmax() == 5
 
 
+def count_the_draws(view, monkeypatch) -> list:
+    """Every setData the curve is given from here on, with its points."""
+    draws = []
+    real = view._curve.setData
+
+    def counted(*args, **kwargs):
+        draws.append(args)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(view._curve, "setData", counted)
+    return draws
+
+
+def test_the_same_frame_shown_again_is_not_drawn_again(view, monkeypatch):
+    """Half the refreshes are of a frame already on screen.
+
+    Redrawing it puts the same line where it already is, and a trace
+    repaint holds the GIL for several milliseconds on the Qt thread -
+    time the demodulator and the card callback wait for.  So nothing
+    goes to the curve for a frame it already shows.
+    """
+    frame = a_frame(bins=8, peak_at=3)
+    view.show_the_frame(frame)
+    draws = count_the_draws(view, monkeypatch)
+
+    for _ in range(20):
+        view.show_the_frame(frame)
+
+    assert draws == [], "a frame already drawn was drawn %d more times" % (
+        len(draws))
+    _x, y = view._curve.getData()
+    assert y.argmax() == 3, "the frame on screen is no longer the one shown"
+
+
+def test_a_new_frame_is_drawn(view, monkeypatch):
+    """The other half: skipping repeats must not skip the next one."""
+    view.show_the_frame(a_frame(bins=8, peak_at=3))
+    draws = count_the_draws(view, monkeypatch)
+
+    view.show_the_frame(a_frame(bins=8, peak_at=5))
+
+    assert len(draws) == 1, "a new frame went to the curve %d times" % (
+        len(draws))
+    _x, y = view._curve.getData()
+    assert y.argmax() == 5, "the curve still shows the old frame"
+
+
+def test_the_same_frame_after_a_gap_is_drawn_again(view, monkeypatch):
+    """A cleared picture is not one that shows the frame.
+
+    After nothing to show - a retune, as it looks from here - the
+    curve is empty, so even a frame with a time already seen has to
+    be put back rather than skipped as a repeat.
+    """
+    frame = a_frame(bins=8, peak_at=3)
+    view.show_the_frame(frame)
+    view.show_the_frame(None)
+    draws = count_the_draws(view, monkeypatch)
+
+    view.show_the_frame(frame)
+
+    assert len(draws) == 1, "the frame was not put back after the gap"
+    assert view._tuned_to.isVisible(), "the tuning marker stayed hidden"
+
+
 # ----------------------------------------------------------------------
 # Without pyqtgraph
 # ----------------------------------------------------------------------

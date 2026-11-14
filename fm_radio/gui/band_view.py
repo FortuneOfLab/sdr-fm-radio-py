@@ -178,9 +178,9 @@ class BandView(QWidget):
         self._bins: int = 0
         self._span_hz: float = 0.0
         self._center_hz: float = 0.0
-        # When the last row went in.  The window refreshes at 50 ms
-        # and frames are made at 100, so most refreshes are of a
-        # frame already drawn; a row for each of those would run the
+        # When the last frame was drawn.  The window refreshes at 50 ms
+        # and frames are made at 100, so about half the refreshes are
+        # of a frame already drawn; a row for each of those would run the
         # history at twice the speed it claims, and a receiver that
         # stopped producing would fill the whole picture with its
         # last reading rather than showing that it had stopped.
@@ -193,13 +193,19 @@ class BandView(QWidget):
 
         Called from the window's refresh, which runs on the Qt thread
         at its own rate: frames it misses are simply not drawn, and
-        frames it asks for twice are drawn twice.
+        frames it asks for twice are drawn once.  The window refreshes
+        at 50 ms and frames are made at 100, so about half the calls
+        are of the frame already on screen; redrawing the trace for
+        those repaints the same line, and the repaint holds the GIL on
+        this thread for several milliseconds each time.
         """
         if self._curve is None:
             return                              # no pyqtgraph, nothing to do
         if frame is None or not frame.dbfs:
             self._nothing_to_show()
             return
+        if self._drawn_at is not None and frame.timestamp <= self._drawn_at:
+            return                  # a frame already in the picture
         dbfs = np.asarray(frame.dbfs, dtype=np.float32)
         self._curve.setData(frame.frequencies_hz() / 1e6, dbfs)
         self._tuned_to.setPos(frame.center_hz / 1e6)
@@ -226,9 +232,11 @@ class BandView(QWidget):
         self._drawn_at = None
 
     def _remember(self, frame, dbfs: np.ndarray) -> None:
-        """Push one row into the waterfall and redraw it."""
-        if self._drawn_at is not None and frame.timestamp <= self._drawn_at:
-            return                  # a frame already in the picture
+        """Push one row into the waterfall and redraw it.
+
+        Only for a frame not yet in the picture; :meth:`show_the_frame`
+        has already turned away the ones that are.
+        """
         self._drawn_at = frame.timestamp
         fresh = (self._history is None or self._bins != dbfs.size
                  or self._span_hz != frame.span_hz
