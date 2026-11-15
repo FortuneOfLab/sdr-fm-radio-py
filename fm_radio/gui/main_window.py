@@ -88,8 +88,8 @@ import threading
 import logging
 import time
 
-from PySide6.QtCore import QObject, Qt, QTimer, Signal
-from PySide6.QtGui import QFont, QFontDatabase
+from PySide6.QtCore import QObject, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QFont, QFontDatabase, QPainter
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QGridLayout, QGroupBox, QHBoxLayout,
     QLabel, QMainWindow, QMessageBox, QProgressBar, QPushButton, QSizePolicy,
@@ -168,6 +168,12 @@ _LEVEL_WORDS = (NOTHING_MEASURED,) + tuple(
 #: How many entries a drop-down list shows before it scrolls.  Qt's
 #: default is ten, one short of the presets for Tokyo.
 _LIST_ROWS = 30
+
+#: The most room a station's name is promised, in characters of the
+#: label's font.  Names come from the catalogue and the user's own
+#: stations.toml, so there is no longest one to measure; past this a
+#: name is cut short on screen rather than allowed to widen the window.
+_STATION_ROOM_CHARS = 16
 
 #: Room for the longest thing the scan list says, so that a sweep
 #: that finds a lot does not push the tuner's own controls about.
@@ -327,6 +333,45 @@ def _still_going(request):
     the recorder's state, or a notice from _show_the_device_worker.
     """
     return request if request is not None and not request.finished else None
+
+
+class _StationLabel(QLabel):
+    """The station's name, which never asks the window to be wider.
+
+    A QLabel's minimum width is its text's, and in the tuner row that
+    is the window's: tuning to "NHK-FM 東京" made the window 15 px
+    wider, and it did not come back when the name got shorter.  This
+    one asks for a width set once (set_room) and draws a name that
+    does not fit cut short with an ellipsis, with the whole of it in
+    the tooltip.  text() is still the whole name.
+    """
+
+    def __init__(self, parent=None) -> None:
+        super().__init__("", parent)
+        self._room = 0
+
+    def set_room(self, width: int) -> None:
+        """Ask the layout for *width* pixels, whatever the name is."""
+        self._room = max(0, int(width))
+        self.updateGeometry()
+
+    def setText(self, text: str) -> None:              # noqa: N802
+        super().setText(text)
+        self.setToolTip(text)
+
+    def minimumSizeHint(self) -> QSize:                # noqa: N802
+        return QSize(self._room, super().minimumSizeHint().height())
+
+    def sizeHint(self) -> QSize:                       # noqa: N802
+        return QSize(self._room, super().sizeHint().height())
+
+    def paintEvent(self, event) -> None:               # noqa: N802
+        area = self.contentsRect()
+        shown = self.fontMetrics().elidedText(
+            self.text(), Qt.TextElideMode.ElideRight, area.width())
+        painter = QPainter(self)
+        painter.setPen(self.palette().color(self.foregroundRole()))
+        painter.drawText(area, int(self.alignment()), shown)
 
 
 class _Bar(QProgressBar):
@@ -585,7 +630,7 @@ class ReceiverWindow(QMainWindow):
         self._up.clicked.connect(lambda: self._step(TUNING_STEP_HZ))
         row.addWidget(self._up)
 
-        self._station = QLabel("", box)
+        self._station = _StationLabel(box)
         row.addWidget(self._station, 1)
 
         self._presets = QComboBox(box)
@@ -737,6 +782,23 @@ class ReceiverWindow(QMainWindow):
         for name, freq_hz in self.controller.get_stations_list():
             self._presets.addItem(f"{freq_hz / 1e6:.1f}  {name}", freq_hz)
         _fit_the_list(self._presets)
+        self._make_room_for_the_presets()
+
+    def _make_room_for_the_presets(self) -> None:
+        """Room in the tuner row for every preset's name, up to a limit.
+
+        So the stations that are tuned most never come out cut short,
+        and a name longer than _STATION_ROOM_CHARS - from the
+        catalogue or a long favourite - cannot take the window with it.
+        """
+        metrics = self._station.fontMetrics()
+        names = [name for name, _ in self.controller.get_stations_list()]
+        widest = max((metrics.horizontalAdvance(name) for name in names),
+                     default=0)
+        limit = metrics.averageCharWidth() * _STATION_ROOM_CHARS
+        margins = self._station.contentsMargins()
+        self._station.set_room(min(widest, limit)
+                               + margins.left() + margins.right())
 
     # ------------------------------------------------------------------
     # Controls — every one of these goes through the facade

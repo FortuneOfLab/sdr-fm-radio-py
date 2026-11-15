@@ -1073,6 +1073,45 @@ def test_every_preset_is_in_the_list_without_scrolling(window):
     assert view._presets.maxVisibleItems() >= view._presets.count()
 
 
+def test_a_station_name_does_not_widen_the_window(window, qt_app):
+    """The window is as wide as its controls, whatever is tuned.
+
+    The name's label set the tuner row's minimum and so the window's:
+    "NHK-FM 東京" took it 15 px wider, and a shorter name did not
+    bring it back.  Past the room it has, a name is cut short.
+    """
+    controller = FakeController(snapshot(station="TOKYO FM"))
+    view, _ = window(controller)
+    view.show()
+    qt_app.processEvents()
+    first = view.minimumSizeHint().width()
+
+    for name in ("NHK-FM 東京", "A community station with a very long "
+                 "name indeed 長い名前", "J-WAVE"):
+        controller.status = snapshot(station=name)
+        view.refresh()
+        qt_app.processEvents()
+        assert view.minimumSizeHint().width() == first, (
+            "%r took the window from %d to %d"
+            % (name, first, view.minimumSizeHint().width()))
+        # The whole name is still there to be read, and hovered for.
+        assert view._station.text() == name
+        assert view._station.toolTip() == name
+
+
+def test_every_preset_name_has_room_in_the_tuner_row(window):
+    """The stations tuned most are the ones that are never cut short."""
+    controller = FakeController(snapshot())
+    controller.presets = [("TOKYO FM", 80.0e6), ("NHK-FM 東京", 82.5e6),
+                          ("ニッポン放送", 93.0e6)]
+    view, _ = window(controller)
+    metrics = view._station.fontMetrics()
+    widest = max(metrics.horizontalAdvance(name)
+                 for name, _ in controller.presets)
+
+    assert view._station.minimumSizeHint().width() >= widest
+
+
 def test_the_preset_label_itself_tunes_nothing(window):
     view, controller = window()
     view._presets.activated.emit(0)
