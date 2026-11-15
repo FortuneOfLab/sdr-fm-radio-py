@@ -89,6 +89,7 @@ import logging
 import time
 
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
+from PySide6.QtGui import QFont, QFontDatabase
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QGridLayout, QGroupBox, QHBoxLayout,
     QLabel, QMainWindow, QMessageBox, QProgressBar, QPushButton, QSizePolicy,
@@ -155,6 +156,19 @@ AM_DEPTH_FULL_SCALE = NOISE_AM_DEPTH
 _BLEND_WORDS = ("--", "MONO", "STEREO") + tuple(
     "%.2f" % (hundredths / 100.0) for hundredths in range(100))
 
+#: Everything a level line can say.  A peak level runs from just above
+#: silence - anything at or below it reads "--" - to above full scale on
+#: a block that clips, and "-119.9 dBFS" is two characters wider than
+#: "-6.1 dBFS": sized by whatever it happened to be showing, the column
+#: took the bars with it every time a level gained or lost a digit.
+_LEVEL_WORDS = (NOTHING_MEASURED,) + tuple(
+    "%.1f dBFS" % (tenths / 10.0)
+    for tenths in range(int(SILENCE_DBFS * 10) + 1, 201))
+
+#: How many entries a drop-down list shows before it scrolls.  Qt's
+#: default is ten, one short of the presets for Tokyo.
+_LIST_ROWS = 30
+
 #: Room for the longest thing the scan list says, so that a sweep
 #: that finds a lot does not push the tuner's own controls about.
 _FOUND_WIDTH = 230
@@ -164,8 +178,8 @@ _GAIN_SCALE = 10.0
 _GAIN_MAX_DB = 49.6
 
 
-def _room_for_the_widest(label: QLabel) -> int:
-    """How wide *label* has to be to hold any of _BLEND_WORDS.
+def _room_for_the_widest(label: QLabel, words=_BLEND_WORDS) -> int:
+    """How wide *label* has to be to hold any of *words*.
 
     Measured rather than guessed.  A minimum width only holds until
     the text is wider than it, so a number picked by eye is not a
@@ -177,12 +191,65 @@ def _room_for_the_widest(label: QLabel) -> int:
     was = label.text()
     try:
         widest = 0
-        for word in _BLEND_WORDS:
+        for word in words:
             label.setText(word)
             widest = max(widest, label.sizeHint().width())
         return widest
     finally:
         label.setText(was)
+
+
+def _fit_the_list(combo: QComboBox) -> None:
+    """Let *combo*'s drop-down be as wide as its longest entry.
+
+    Qt opens the list at the width of the box, and elides anything
+    longer in the middle: "82.5  NHK-FM 東京" came out as
+    "82.... 東京", which hides the very frequency it is there to
+    show.  The box itself stays the size it was - it only has to
+    say which list it is - and the list gets the room when it opens.
+    """
+    view = combo.view()
+    combo.setMaxVisibleItems(_LIST_ROWS)
+    widest = view.sizeHintForColumn(0)
+    if widest > 0:
+        view.setMinimumWidth(widest + 2 * view.frameWidth()
+                             + view.verticalScrollBar().sizeHint().width())
+
+
+def _fixed_pitch(like: QFont) -> QFont:
+    """A fixed-pitch font the size of *like*.
+
+    The system's own first choice on Windows is Courier New, which
+    beside Segoe UI reads as a typewriter; Consolas and Cascadia Mono
+    sit with it, and the system's choice is there for where neither is.
+    """
+    font = QFont(like)
+    system = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
+    font.setFamilies(["Consolas", "Cascadia Mono", system.family()])
+    font.setStyleHint(QFont.StyleHint.TypeWriter)
+    font.setFixedPitch(True)
+    return font
+
+
+def _health_line(status: StatusSnapshot) -> str:
+    """The status bar's line, every figure in a field of its own width.
+
+    The line is set in a fixed-pitch font and each figure padded to
+    the width it can reach, so a figure gaining a digit - 9.8 ms to
+    10.1 ms, a queue going from 9 to 10 - moves nothing but itself.
+    In a proportional font with bare figures the whole line slid
+    sideways every time one did.  A counter that outgrows its field
+    still pushes the rest along, once per order of magnitude.
+    """
+    state = "healthy" if status.healthy else "loaded"
+    queue_digits = len(str(status.sdr_queue_max))
+    return (f"{state:<7}  block {status.block_ms:5.1f}/"
+            f"{status.block_budget_ms:.0f} ms  "
+            f"sdr q {status.sdr_queue:>{queue_digits}}/"
+            f"{status.sdr_queue_max}  "
+            f"drops {status.iq_drops:>3}/{status.audio_drops:<3}  "
+            f"underruns {status.audio_underruns:>3}  "
+            f"up {status.uptime_sec / 60:4.0f} min")
 
 
 def _blend_percent(blend: float, stereo: bool) -> int:
@@ -404,6 +471,9 @@ class ReceiverWindow(QMainWindow):
         # does not fit is elided rather than allowed to push the edge out.
         self._health.setSizePolicy(QSizePolicy.Policy.Ignored,
                                    QSizePolicy.Policy.Preferred)
+        # Fixed pitch, so the padded figures in _health_line hold the
+        # rest of the line still.
+        self._health.setFont(_fixed_pitch(self._health.font()))
         self.statusBar().addWidget(self._health, 1)
 
         # Before the first refresh, which may already find that the device
@@ -601,6 +671,19 @@ class ReceiverWindow(QMainWindow):
         grid.addWidget(self._right, 4, 1)
         grid.addWidget(self._right_db, 4, 2)
         grid.setColumnStretch(1, 1)
+
+        # One width for the readings column, whatever it is showing.
+        # The bars share the row with it, so a column sized by its
+        # current text made every bar shorter when a level reached
+        # three digits and longer when it came back.  Right-aligned so
+        # the figures keep their decimal points under one another.
+        grid.setColumnMinimumWidth(2, max(
+            _room_for_the_widest(self._mode),
+            _room_for_the_widest(self._left_db, _LEVEL_WORDS)))
+        for label in (self._mode, self._am_depth_value,
+                      self._left_db, self._right_db):
+            label.setAlignment(Qt.AlignmentFlag.AlignRight
+                               | Qt.AlignmentFlag.AlignVCenter)
         return box
 
     def _build_gain(self) -> QGroupBox:
@@ -653,6 +736,7 @@ class ReceiverWindow(QMainWindow):
         self._presets.addItem("Presets", None)
         for name, freq_hz in self.controller.get_stations_list():
             self._presets.addItem(f"{freq_hz / 1e6:.1f}  {name}", freq_hz)
+        _fit_the_list(self._presets)
 
     # ------------------------------------------------------------------
     # Controls — every one of these goes through the facade
@@ -859,6 +943,7 @@ class ReceiverWindow(QMainWindow):
         for signal in found:
             self._found.addItem(_what_was_found(signal), signal.freq_hz)
         self._found.setCurrentIndex(0)
+        _fit_the_list(self._found)
 
     def _auto_gain_toggled(self, checked: bool) -> None:
         self._watch(self.controller.set_agc_mode(checked))
@@ -1146,7 +1231,7 @@ class ReceiverWindow(QMainWindow):
 
         self._show_gain(status.gain_db, status.auto_gain)
         self._iq_peak.setText(f"peak {status.iq_peak:.2f}")
-        self._health.setText(self._health_text(status))
+        self._health.setText(_health_line(status))
 
     def _show_blend(self, status: StatusSnapshot) -> None:
         """The bar, and a word for what the bar amounts to.
@@ -1191,16 +1276,6 @@ class ReceiverWindow(QMainWindow):
             self._gain_slider.blockSignals(True)
             self._gain_slider.setValue(int(round(gain_db * _GAIN_SCALE)))
             self._gain_slider.blockSignals(False)
-
-    @staticmethod
-    def _health_text(status: StatusSnapshot) -> str:
-        state = "healthy" if status.healthy else "loaded"
-        return (f"{state}   block {status.block_ms:.1f}/"
-                f"{status.block_budget_ms:.0f} ms   "
-                f"sdr q {status.sdr_queue}/{status.sdr_queue_max}   "
-                f"drops {status.iq_drops}/{status.audio_drops}   "
-                f"underruns {status.audio_underruns}   "
-                f"up {status.uptime_sec / 60:.0f} min")
 
     def _show_recording(self) -> None:
         """Follow the receiver's recording state, including rotation stops.

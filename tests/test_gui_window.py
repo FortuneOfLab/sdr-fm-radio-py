@@ -779,6 +779,53 @@ def test_silence_reads_as_unknown_rather_than_a_number(window):
     assert view._left.value() == 0
 
 
+def test_the_meters_do_not_change_width_as_the_levels_do(window, qt_app):
+    """Or every bar in the box shrinks when a level reaches three digits.
+
+    The readings share a column, and a column sized by whatever it
+    is showing is as wide as the widest text in it right now: from
+    "-6.1 dBFS" to "-119.9 dBFS" took the bars in with it.
+    """
+    controller = FakeController(snapshot(level_left_dbfs=-6.1,
+                                         level_right_dbfs=-6.1))
+    view, _ = window(controller)
+    view.resize(800, 600)
+    view.show()
+    qt_app.processEvents()
+    first = (view._left.width(), view._blend.width())
+
+    for level in (SILENCE_DBFS, -119.9, -45.0, 0.0, 12.0):
+        controller.status = snapshot(level_left_dbfs=level,
+                                     level_right_dbfs=level)
+        view.refresh()
+        qt_app.processEvents()
+        assert (view._left.width(), view._blend.width()) == first, (
+            "the bars went from %r to %r showing %r"
+            % (first, (view._left.width(), view._blend.width()),
+               view._left_db.text()))
+
+
+def test_every_level_the_line_can_print_was_measured(window):
+    """The column is sized from _LEVEL_WORDS, so what is shown has to be in it.
+
+    From the first figure above silence to a block that clips.
+    """
+    from fm_radio.gui import main_window
+
+    controller = FakeController(snapshot())
+    view, _ = window(controller)
+    said = set()
+    for level in (SILENCE_DBFS, SILENCE_DBFS + 0.06, -99.95, -6.1,
+                  0.0, 19.9):
+        controller.status = snapshot(level_left_dbfs=level)
+        view.refresh()
+        said.add(view._left_db.text())
+
+    unmeasured = said - set(main_window._LEVEL_WORDS)
+    assert not unmeasured, (
+        "the line can say %s, which nothing measured" % sorted(unmeasured))
+
+
 class _PaintCounter(QObject):
     """Counts the paint events a widget is sent."""
 
@@ -880,6 +927,56 @@ def test_the_health_line_reports_the_block_budget(window):
     assert "healthy" in text and "4.2/16 ms" in text
 
 
+def test_the_health_line_holds_still_as_its_figures_change(window):
+    """Each figure in a field of its own, in a font where that means width.
+
+    A figure gaining a digit slid the whole line sideways.  Measured
+    in pixels, which is what moves on screen: the same number of
+    characters in a proportional font would not be the same width.
+    """
+    controller = FakeController(snapshot())
+    view, _ = window(controller)
+    metrics = view._health.fontMetrics()
+    widths = {}
+    for kw in (dict(block_ms=4.2, sdr_queue=1, uptime_sec=60.0),
+               dict(block_ms=12.3, sdr_queue=12, uptime_sec=6000.0),
+               dict(block_ms=99.9, sdr_queue=80, uptime_sec=0.0,
+                    iq_drops=12, audio_drops=7, audio_underruns=40)):
+        controller.status = snapshot(**kw)
+        view.refresh()
+        text = view._health.text()
+        widths[text] = metrics.horizontalAdvance(text)
+        # Where each word starts, so that a field cannot shrink by as
+        # much as its neighbour grows and pass on the total.
+        starts = [text.index(word) for word in
+                  ("block", "sdr q", "drops", "underruns", "up ")]
+        widths.setdefault("starts", starts)
+        assert starts == widths["starts"], text
+
+    assert len(set(v for k, v in widths.items() if k != "starts")) == 1, (
+        widths)
+
+
+def test_the_health_line_is_set_where_a_space_is_as_wide_as_a_digit(
+        window):
+    """The padding in the line only holds it still in a fixed-pitch font.
+
+    Skipped where the platform cannot tell: the offscreen one CI uses
+    draws every glyph the same width, so the test above passes there
+    in any font at all.  Run with QT_QPA_PLATFORM=windows (or xcb) to
+    have it mean something.
+    """
+    from PySide6.QtWidgets import QLabel
+
+    plain = QLabel().fontMetrics()
+    if plain.horizontalAdvance("W") == plain.horizontalAdvance("i"):
+        pytest.skip("this platform draws every glyph the same width")
+    view, _ = window()
+    metrics = view._health.fontMetrics()
+    assert (metrics.horizontalAdvance(" ") == metrics.horizontalAdvance("0")
+            == metrics.horizontalAdvance("W"))
+
+
 def test_the_health_line_says_so_when_blocks_run_long(window):
     view, _ = window(FakeController(snapshot(block_ms=20.0)))
     assert "loaded" in view._health.text()
@@ -943,6 +1040,37 @@ def test_a_preset_tunes_to_its_frequency(window):
     assert ("tune", 81.3e6) in controller.calls
     # The list goes back to its label rather than pretending to be a display.
     assert view._presets.currentIndex() == 0
+
+
+def test_a_long_preset_name_is_not_cut_short_in_the_list(window, qt_app):
+    """The list opens as wide as its longest entry, not as the box.
+
+    At the box's width Qt elided entries in the middle, and
+    "82.5  NHK-FM 東京" read "82.... 東京" - the frequency gone.
+    """
+    controller = FakeController(snapshot())
+    controller.presets = [("TOKYO FM", 80.0e6),
+                          ("NHK-FM 東京 a long name for a station", 82.5e6)]
+    view, _ = window(controller)
+    view.show()
+    qt_app.processEvents()
+    list_view = view._presets.view()
+    widest = list_view.sizeHintForColumn(0)
+
+    # Not compared with the box: how wide the box comes out depends
+    # on the platform - offscreen it is wider than the entry, on
+    # Windows it was 89 px against an entry of 114, which is where
+    # the eliding was seen.
+    assert list_view.minimumWidth() > widest
+
+
+def test_every_preset_is_in_the_list_without_scrolling(window):
+    """Qt shows ten and scrolls the rest; Tokyo has ten presets."""
+    controller = FakeController(snapshot())
+    controller.presets = [("S%d" % n, (76.0 + n / 10) * 1e6)
+                          for n in range(12)]
+    view, _ = window(controller)
+    assert view._presets.maxVisibleItems() >= view._presets.count()
 
 
 def test_the_preset_label_itself_tunes_nothing(window):
