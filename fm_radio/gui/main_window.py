@@ -132,6 +132,11 @@ METER_FLOOR_DBFS = -60.0
 #: tried would be gone in 50 ms - faster than they can read it.
 NOTICE_SECONDS = 5.0
 
+#: How long the health line says "loaded" after a drop or an underrun.
+#: Long enough to be read: one drop is one moment, and a word that is
+#: there for a single 50 ms refresh is a flicker, not a message.
+HEALTH_HOLD_SECONDS = 5.0
+
 #: What the window shows for a reading there is not.  Every
 #: diagnostic here can come back unmeasurable - a pilot SNR before
 #: the first pilot, an AM depth of a block that was not finite - and
@@ -244,7 +249,41 @@ def _fixed_pitch(like: QFont) -> QFont:
     return font
 
 
-def _health_line(status: StatusSnapshot) -> str:
+class _HealthWatch:
+    """Decides whether the health line says healthy or loaded.
+
+    Two things count, and the time of one block is neither:
+
+    - the SDR queue backing up (``StatusSnapshot.falling_behind``),
+      which is what being unable to keep up looks like; and
+    - an IQ drop, an audio drop or an underrun since the last
+      snapshot, held for :data:`HEALTH_HOLD_SECONDS`.
+
+    The counters are for the life of the receiver, so they are
+    watched for going up rather than read: judged by their values, a
+    single drop at startup left the line saying "loaded" for good.
+    """
+
+    def __init__(self) -> None:
+        # Zero, not the first snapshot's counts: a drop before the
+        # window had its first look is still a drop worth seeing.
+        self._seen: tuple[int, int, int] = (0, 0, 0)
+        self._loaded_until: float | None = None
+
+    def loaded(self, status: StatusSnapshot, now: float) -> bool:
+        counts = (status.iq_drops, status.audio_drops,
+                  status.audio_underruns)
+        if any(c > s for c, s in zip(counts, self._seen)):
+            self._loaded_until = now + HEALTH_HOLD_SECONDS
+        # Taken as they are even when one went down: a counter that
+        # starts again is a new baseline, not a negative drop.
+        self._seen = counts
+        if status.falling_behind:
+            return True
+        return self._loaded_until is not None and now < self._loaded_until
+
+
+def _health_line(status: StatusSnapshot, loaded: bool) -> str:
     """The status bar's line, every figure in a field of its own width.
 
     The line is set in a fixed-pitch font and each figure padded to
@@ -254,7 +293,7 @@ def _health_line(status: StatusSnapshot) -> str:
     sideways every time one did.  A counter that outgrows its field
     still pushes the rest along, once per order of magnitude.
     """
-    state = "healthy" if status.healthy else "loaded"
+    state = "loaded" if loaded else "healthy"
     queue_digits = len(str(status.sdr_queue_max))
     return (f"{state:<7}  block {status.block_ms:5.1f}/"
             f"{status.block_budget_ms:.0f} ms  "
@@ -502,6 +541,7 @@ class ReceiverWindow(QMainWindow):
         self.setWindowTitle("SDR FM Receiver")
         # (message, expiry, sort); see NOTICE_SECONDS and _set_notice.
         self._notice: tuple[str, float, str] | None = None
+        self._health_watch = _HealthWatch()
         #: The band scan now running, or None.
         self._sweep: "Sweep | None" = None
         #: True between asking a sweep to stop and its saying it has.
@@ -1450,7 +1490,8 @@ class ReceiverWindow(QMainWindow):
 
         self._show_gain(status.gain_db, status.auto_gain)
         self._iq_peak.setText(f"peak {status.iq_peak:.2f}")
-        self._health.setText(_health_line(status))
+        self._health.setText(_health_line(
+            status, self._health_watch.loaded(status, time.monotonic())))
 
     def _show_blend(self, status: StatusSnapshot) -> None:
         """The bar, and a word for what the bar amounts to.

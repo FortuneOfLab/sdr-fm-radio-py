@@ -156,11 +156,21 @@ class StatusSnapshot:
     timestamp: float                    # time.perf_counter() at capture
 
     @property
-    def healthy(self) -> bool:
-        """True while the block time is inside its budget and nothing dropped."""
-        return (self.block_ms <= self.block_budget_ms
-                and self.iq_drops == 0
-                and self.audio_drops == 0)
+    def falling_behind(self) -> bool:
+        """True when the SDR queue has backed up: blocks arrive faster
+        than they are processed.
+
+        The queue, not the time of the block this snapshot came from.
+        A block takes 10 ms on average against a 16 ms interval, and
+        one in ten runs past 16 while the queue never holds more than
+        two: that is jitter, and absorbing it is what the queue is for.
+        Judged on a single block, the window's health line flipped
+        between healthy and loaded several times a second on a
+        receiver that was keeping up perfectly.  Same depth as the
+        processing thread's own "falling behind" line; see
+        :func:`backlog_depth`.
+        """
+        return self.sdr_queue >= backlog_depth(self.sdr_queue_max)
 
     @property
     def stereo_locked(self) -> bool:
@@ -176,6 +186,21 @@ class StatusSnapshot:
     def as_dict(self) -> dict[str, Any]:
         """Return the snapshot as plain values, for logging or serialising."""
         return {f.name: getattr(self, f.name) for f in fields(self)}
+
+
+#: Queue depth, as a share of its capacity, at which the receiver is
+#: no longer keeping up rather than merely being jittery.  See the
+#: comment at fm_radio.controller._QUEUE_BACKLOG_SHARE for why a share.
+QUEUE_BACKLOG_SHARE: float = 0.25
+
+
+def backlog_depth(capacity: int) -> int:
+    """How deep a queue of *capacity* blocks is when it has backed up.
+
+    Never less than two: one block waiting is the ordinary state of a
+    queue that is being served, not a backlog.
+    """
+    return max(2, int(capacity * QUEUE_BACKLOG_SHARE))
 
 
 class TelemetryPublisher:

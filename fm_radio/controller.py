@@ -60,7 +60,10 @@ from fm_radio import multipath
 from fm_radio.spectrum import (
     DEFAULT_SPECTRUM_INTERVAL_SEC, SpectrumFrame, SpectrumMaker,
 )
-from fm_radio.telemetry import StatusSnapshot, TelemetryPublisher, peak_dbfs
+from fm_radio.telemetry import (
+    QUEUE_BACKLOG_SHARE, StatusSnapshot, TelemetryPublisher, backlog_depth,
+    peak_dbfs,
+)
 from fm_radio.constants import (
     SDR_SAMPLE_RATE, SDR_SAMPLE_RATE_LIGHT, SDR_CENTER_FREQ_DEFAULT,
     AUDIO_OUTPUT_RATE, AUDIO_FRAMES_PER_BUFFER,
@@ -91,7 +94,10 @@ _SLOW_BLOCK_LOG_INTERVAL_SEC: float = 5.0
 # is 0.32 s of standard mode and 1.31 s of light mode, whose blocks
 # are four times as long - which is the right way round: light mode
 # has four times as much time in the same queue.
-_QUEUE_BACKLOG_SHARE: float = 0.25
+#
+# Defined in fm_radio.telemetry, because the window's health line
+# judges by the same depth and the two must not drift apart.
+_QUEUE_BACKLOG_SHARE: float = QUEUE_BACKLOG_SHARE
 # Least time between "falling behind" lines.  Shorter than the
 # slow-block one: this is the line worth having, and a backlog that
 # lasts is worth a line a second.
@@ -156,8 +162,7 @@ class _BlockProfiler:
         #: line to be due, or for the summary if none comes.
         self._worst: "tuple | None" = None
         #: Depth at which the queue counts as backing up.
-        self._backlog_at: int = max(
-            2, int(q_max_capacity * _QUEUE_BACKLOG_SHARE))
+        self._backlog_at: int = backlog_depth(q_max_capacity)
         # Window stats (reset every summary)
         self._win_blocks = 0
         self._win_sum_dt = 0.0
