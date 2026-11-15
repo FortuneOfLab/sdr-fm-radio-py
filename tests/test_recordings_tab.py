@@ -719,7 +719,8 @@ def test_a_finished_re_decode_is_a_row_with_the_report_behind_it(
     assert tab.results.item(0, 4).toolTip() == "\n".join(
         [command, "", *iq_report_lines(_MEASURED)])
     assert command.startswith("python -m fm_radio.quality_selftest --iq-wav")
-    assert command.endswith("--duration 30.0")
+    assert command.endswith("--duration 30.0 --noise-csv redecode.csv")
+    assert "--noise-tag" not in command      # the default tag is the name
     assert tab.decode_status.text() == "Re-decoded the first 30 s of iq.wav."
     assert tab.redecode_button.text() == "Re-decode"
     assert tab.redecode_button.isEnabled() is True     # still chosen
@@ -1085,9 +1086,10 @@ def test_a_slot_goes_to_the_job_as_the_command_lines_flags(
     (row,) = results(tab)
     assert (row["File"], row["DSP"]) == ("iq.wav", "B")
     (result,) = tab._results
-    assert result.tag == "iq.wav --lr-high-max-gain=0.5 --side-nr-beta=2.0"
+    assert result.tag == (
+        "iq.wav slot B --lr-high-max-gain=0.5 --side-nr-beta=2.0")
     assert result.csv_row() == iq_csv_row(_MEASURED, result.tag, 30)
-    assert "--noise-tag" in result.command()
+    assert result.command_words()[-2:] == ["--noise-tag", result.tag]
     assert tab.dsp_box.isEnabled() is True
     assert tab.decode_status.text() == (
         "Re-decoded the first 30 s of iq.wav under slot B.")
@@ -1108,7 +1110,31 @@ def test_a_slot_at_the_defaults_says_so(make_tab, qt_app, tmp_path,
     decoded(tab, qt_app)
 
     assert results(tab)[0]["DSP"] == "A (= defaults)"
-    assert tab._results[0].tag == "iq.wav"
+    assert tab._results[0].tag == "iq.wav slot A"
+
+
+def test_a_and_b_holding_the_same_settings_are_told_apart(
+        make_tab, qt_app, tmp_path, stand_in):
+    """In a saved file, by the tag: the settings alone would not say
+    which slot a row came from."""
+    three_kinds(tmp_path)
+    same = replace(_DEFAULTS, side_nr_beta=2.0)
+    tab = make_tab(dsp=StandInDsp(A=same, B=same))
+    tab.reload()
+    finish(tab, qt_app)
+    choose(tab, "iq.json")
+    for which in ("A", "B"):
+        choose_dsp(tab, which)
+        tab.redecode_button.click()
+        stand_in[-1].answer(_MEASURED)
+        decoded(tab, qt_app)
+
+    assert [job.arguments for job in stand_in] == [
+        ("--side-nr-beta=2.0",)] * 2
+    assert [r.tag for r in tab._results] == [
+        "iq.wav slot A --side-nr-beta=2.0",
+        "iq.wav slot B --side-nr-beta=2.0"]
+    assert tab._results[0].csv_row() != tab._results[1].csv_row()
 
 
 def test_a_slot_is_read_when_the_button_is_pressed(make_tab, qt_app,
@@ -1136,8 +1162,9 @@ def test_a_slot_is_read_when_the_button_is_pressed(make_tab, qt_app,
 def test_a_b_through_the_tab_saves_what_the_command_line_writes(
         make_tab, qt_app, tmp_path, monkeypatch, capsys):
     """Defaults, then slot B, from the button to the saved file, against
-    the command line run twice into one --noise-csv with the flags the
-    row's command gives: the same bytes, and two rows that differ."""
+    the command line run twice into one --noise-csv: once as written out
+    here by hand, once as each row's tooltip command says.  The same
+    bytes all three ways, and two rows that differ."""
     import fm_radio.quality_selftest as qs
 
     _a_real_capture(tmp_path)
@@ -1165,10 +1192,23 @@ def test_a_b_through_the_tab_saves_what_the_command_line_writes(
     written = tmp_path / "cli.csv"
     wav = str(tmp_path / "real.wav")
     for flags in ([], ["--fixed-blend=0.0",
-                       "--noise-tag", "real.wav --fixed-blend=0.0"]):
+                       "--noise-tag", "real.wav slot B --fixed-blend=0.0"]):
         monkeypatch.setattr(sys, "argv", [
             "quality_selftest", "--iq-wav", wav, "--duration", "2",
             *flags, "--noise-csv", str(written)])
         qs.main()
     capsys.readouterr()
     assert saved.read_bytes() == written.read_bytes()
+
+    # The tooltip's commands, as they would be run: python -m <module>
+    # leaves the module in argv[0] and the rest as given.
+    pasted = tmp_path / "pasted"
+    pasted.mkdir()
+    monkeypatch.chdir(pasted)
+    for result in tab._results:
+        words = result.command_words()
+        assert words[:3] == ["python", "-m", "fm_radio.quality_selftest"]
+        monkeypatch.setattr(sys, "argv", words[2:])
+        qs.main()
+    capsys.readouterr()
+    assert saved.read_bytes() == (pasted / "redecode.csv").read_bytes()

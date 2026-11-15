@@ -62,8 +62,8 @@ of the DSP tab, as it stands when the button is pressed, so that a
 recording can be measured under A and under B and the two rows set
 side by side.  A slot reaches the decoder as the command line's flags
 (see :func:`fm_radio.redecode.dsp_arguments`), and the row's CSV tag
-carries them, so that a saved file says which row was decoded under
-what.
+carries the slot's name and those flags, so that a saved file says
+which row was decoded under what.
 """
 
 from __future__ import annotations
@@ -266,17 +266,21 @@ class Result:
 
     @property
     def tag(self) -> str:
-        """The CSV's tag: the file's name, then the DSP flags if any.
+        """The CSV's tag: the file's name, then the slot and its flags.
 
-        The file's name alone is the command line's default tag; with
-        flags, it is what ``--noise-tag`` would have to be given for
-        the command line to write the same row, and it is what tells
-        an A row from a B row in a saved file.  Neither can hold a
-        comma: a file name with one would already break the command
-        line's own CSV, and no flag's value has one.
+        Under the defaults it is the file's name alone, the command
+        line's default tag.  Under a slot it is ``x.wav slot B`` and
+        then the flags the slot came to, if any: the slot's name so
+        that a saved file tells an A row from a B row even when the two
+        held the same settings, the flags so that it says what those
+        were.  That is what ``--noise-tag`` is given in
+        :meth:`command_words`.  It holds no comma that the file's name
+        does not: no slot name or flag value has one.
         """
-        name = os.path.basename(self.wav_path)
-        return " ".join((name, *self.arguments))
+        words = [os.path.basename(self.wav_path)]
+        if self.dsp != DEFAULTS:
+            words += ["slot", self.dsp, *self.arguments]
+        return " ".join(words)
 
     @property
     def dsp_text(self) -> str:
@@ -286,20 +290,30 @@ class Result:
             return f"{self.dsp} (= {DEFAULTS})"
         return self.dsp
 
-    def command(self) -> str:
-        """The command line that measures the same row, to be pasted."""
+    def command_words(self) -> list[str]:
+        """The command line that appends this row to ``redecode.csv``
+        in the directory it is run from (the header too, if the file
+        is new): the report it prints is the tooltip's, and the row it
+        appends is :meth:`csv_row`."""
         words = ["python", "-m", "fm_radio.quality_selftest",
                  *command_line(self.wav_path, self.window_s,
-                               self.arguments)]
-        if self.arguments:
+                               self.arguments),
+                 "--noise-csv", "redecode.csv"]
+        if self.dsp != DEFAULTS:
             words += ["--noise-tag", self.tag]
+        return words
+
+    def command(self) -> str:
+        """:meth:`command_words` as one line, to be pasted into this
+        platform's shell."""
+        words = self.command_words()
         if os.name == "nt":
             return subprocess.list2cmdline(words)
         return shlex.join(words)
 
     def csv_row(self) -> str:
-        """The row the command line writes for the same file, window
-        and flags."""
+        """The row the command line writes for the same file, window,
+        flags and tag."""
         return iq_csv_row(self.measured, self.tag, self.window_s)
 
 
@@ -781,7 +795,7 @@ class RecordingsTab(QWidget):
         row = self.results.rowCount()
         self.results.insertRow(row)
         # The whole report, as the command line prints it, on every
-        # cell, under the command that prints it.
+        # cell, under the command that prints it and appends the row.
         tip = "\n".join([result.command(), "",
                          *iq_report_lines(result.measured)])
         for column, text in enumerate(result_cells(result)):
