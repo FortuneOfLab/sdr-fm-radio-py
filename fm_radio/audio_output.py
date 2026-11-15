@@ -404,6 +404,14 @@ class AudioOutput(AudioOutputInterface):
                         requested_samples - filled, requested_samples, since)
 
             self._turn_to_the_volume(out, frame_count)
+            if filled < requested_samples:
+                # The padding went through the volume, but zeros scaled
+                # are zeros: this buffer ends in silence like any other,
+                # and the next one must not ramp from a gain nobody is
+                # hearing.  Set after the volume, not before - the flag
+                # is for the buffer after this, and this one's audible
+                # head follows heard audio and ramps as usual.
+                self._after_silence = True
             return (out.tobytes(), pyaudio.paContinue)
         except Exception as e:
             self.logger.error(f"Error in audio callback: {e}", exc_info=True)

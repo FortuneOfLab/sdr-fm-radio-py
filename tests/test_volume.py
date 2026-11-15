@@ -660,3 +660,63 @@ def test_a_refill_that_played_no_silence_still_ramps(audio_output):
     gain = np.frombuffer(out, dtype=np.float32)[0::2] / AMPLITUDE
     steps = np.diff(np.concatenate([[1.0], gain]))
     assert np.max(np.abs(steps)) == pytest.approx(1.0 / FRAMES, rel=1e-3)
+
+
+
+# ----------------------------------------------------------------------
+# Coming out of an underrun
+# ----------------------------------------------------------------------
+
+def _heard_then_underrun(audio_output, fill: int) -> None:
+    """A buffer heard at full volume, then one with only *fill* frames.
+
+    The rest of that second buffer is padded with silence, and so is
+    the whole of it when *fill* is 0: either way what the card played
+    last is silence.
+    """
+    audio_output.enqueue_audio(_dc(FRAMES), _dc(FRAMES))
+    audio_output.callback(None, FRAMES, {}, 0)           # heard at 100 %
+    if fill:
+        audio_output.enqueue_audio(_dc(fill), _dc(fill))
+    before = audio_output.underruns
+    audio_output.callback(None, FRAMES, {}, 0)
+    assert audio_output.underruns == before + 1, "meant to be an underrun"
+
+
+@pytest.mark.parametrize("fill", [0, FRAMES // 2],
+                         ids=["all padded", "tail padded"])
+def test_muting_after_an_underrun_stays_silent(audio_output, fill):
+    _heard_then_underrun(audio_output, fill)
+    audio_output.set_muted(True)
+    audio_output.enqueue_audio(_dc(FRAMES), _dc(FRAMES))
+    out, _ = audio_output.callback(None, FRAMES, {}, 0)
+    left = np.frombuffer(out, dtype=np.float32)[0::2]
+    assert not np.any(left), (
+        "muted, yet the first frame after the underrun was %.4f" % left[0])
+
+
+@pytest.mark.parametrize("fill", [0, FRAMES // 2],
+                         ids=["all padded", "tail padded"])
+def test_a_volume_set_after_an_underrun_is_where_the_audio_comes_back(
+        audio_output, fill):
+    _heard_then_underrun(audio_output, fill)
+    audio_output.set_volume(20)
+    audio_output.enqueue_audio(_dc(FRAMES), _dc(FRAMES))
+    out, _ = audio_output.callback(None, FRAMES, {}, 0)
+    left = np.frombuffer(out, dtype=np.float32)[0::2]
+    np.testing.assert_allclose(left, AMPLITUDE * volume_gain(20), rtol=1e-5)
+
+
+def test_the_audible_head_of_a_padded_buffer_still_ramps(audio_output):
+    """The part of an underrun buffer that is audio follows heard audio,
+    so a change made before it ramps there like anywhere else."""
+    audio_output.enqueue_audio(_dc(FRAMES), _dc(FRAMES))
+    audio_output.callback(None, FRAMES, {}, 0)           # heard at 100 %
+    audio_output.set_volume(0)
+    half = FRAMES // 2
+    audio_output.enqueue_audio(_dc(half), _dc(half))
+    out, _ = audio_output.callback(None, FRAMES, {}, 0)
+    gain = np.frombuffer(out, dtype=np.float32)[0::2][:half] / AMPLITUDE
+    steps = np.diff(np.concatenate([[1.0], gain]))
+    assert np.all(steps < 0)
+    assert np.max(np.abs(steps)) == pytest.approx(1.0 / FRAMES, rel=1e-3)
