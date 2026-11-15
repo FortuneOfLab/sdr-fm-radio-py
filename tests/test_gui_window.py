@@ -2027,14 +2027,15 @@ def test_the_tuner_is_the_sweeps_while_it_runs(window, monkeypatch, qt_app):
 
     try:
         for widget in (view._down, view._up, view._presets, view._found,
-                       view._auto_gain, view._gain_slider):
+                       view._auto_gain, view._gain_slider, view._area):
             assert not widget.isEnabled(), "%s was left live" % widget
         assert view._scan_button.text() == "Stop"
     finally:
         let_it_go.set()
         finish(view, qt_app)
 
-    for widget in (view._down, view._up, view._presets, view._found):
+    for widget in (view._down, view._up, view._presets, view._found,
+                   view._area):
         assert widget.isEnabled(), "%s was not given back" % widget
     assert view._scan_button.text() == "Scan"
 
@@ -2204,7 +2205,8 @@ def test_a_device_that_goes_mid_sweep_keeps_the_controls_shut(
     qt_app.processEvents()
 
     for widget in (view._down, view._up, view._presets, view._found,
-                   view._auto_gain, view._gain_slider, view._scan_button):
+                   view._auto_gain, view._gain_slider, view._scan_button,
+                   view._area):
         assert not widget.isEnabled(), "%s still offers to work" % widget
 
 
@@ -3011,28 +3013,3 @@ def test_choosing_an_area_names_the_scan_list_again(window, monkeypatch,
     choose_the_area(view, "関東")
 
     assert "TOKYO FM" in view._found.itemText(1)
-
-
-def test_an_area_saved_during_a_scan_is_not_overwritten_by_its_progress(
-        window, monkeypatch):
-    """The sweep reports many times a second; the notice gets its time.
-
-    Then the progress is back: holding it off for good would leave a
-    running scan saying nothing about where it has got to.
-    """
-    from fm_radio.gui import main_window
-
-    view, controller = window()
-    view._scanning("scanning 78.0 MHz")
-    assert "78.0" in view._health.text(), "the test meant to start here"
-
-    choose_the_area(view, "関東")
-    view._scanning("scanning 80.0 MHz")
-    view.refresh()
-
-    assert "関東" in view._health.text(), view._health.text()
-
-    clock = [main_window.time.monotonic() + main_window.NOTICE_SECONDS + 1]
-    monkeypatch.setattr(main_window.time, "monotonic", lambda: clock[0])
-    view._scanning("scanning 82.0 MHz")
-    assert "82.0" in view._health.text(), view._health.text()

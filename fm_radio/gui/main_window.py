@@ -884,18 +884,7 @@ class ReceiverWindow(QMainWindow):
         self._sweep.go()
 
     def _scanning(self, line: str) -> None:
-        """On the GUI thread: where the sweep has got to.
-
-        Not over news the user has yet to read.  The sweep reports
-        many times a second, and the area list stays usable while it
-        runs, so without this an area saved mid-scan is announced and
-        overwritten before it can be read - and a save that failed
-        loses its line the moment its box is closed.  The progress
-        comes back on the first report after that notice has had its
-        time.
-        """
-        if self._showing(_FAILURE):
-            return
+        """On the GUI thread: where the sweep has got to."""
         self._set_notice(line, _SCANNING)
 
     def _scan_ended(self, found, why: str) -> None:
@@ -1047,6 +1036,11 @@ class ReceiverWindow(QMainWindow):
         for widget in (self._down, self._up, self._presets, self._found,
                        self._auto_gain):
             widget.setEnabled(usable)
+        # The area too.  It renames the finds, and a sweep is still
+        # making them; and the sweep reports onto the status line
+        # many times a second, so what saving it said would be gone
+        # before it could be read.
+        self._area.setEnabled(usable)
         # The slider is the one control with a third say in it.
         self._gain_slider.setEnabled(usable
                                      and not self._auto_gain.isChecked())
