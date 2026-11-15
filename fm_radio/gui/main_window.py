@@ -271,19 +271,27 @@ def _blend_percent(blend: float, stereo: bool) -> int:
     return int(round(min(100.0, max(0.0, float(blend) * 100.0))))
 
 
-def _what_was_found(signal) -> str:
+def _what_was_found(signal, station=None) -> str:
     """One line for a thing the scan found.
 
-    The frequency, how loud, and what the scan made of it.  A pilot
-    is the only evidence a sweep has that a peak is a broadcast, and
-    it is not proof that the peak is a station of its own - a strong
-    station's skirt carries its pilot - so the word is the scan's
-    own reading rather than a verdict.
+    The frequency, the station the dial would call it, how loud, and
+    what the scan made of it.  A pilot is the only evidence a sweep
+    has that a peak is a broadcast, and it is not proof that the peak
+    is a station of its own - a strong station's skirt carries its
+    pilot - so the word is the scan's own reading rather than a
+    verdict.
+
+    The name is the catalogue's for the frequency, looked up the way
+    the dial looks one up (see ReceiverWindow._show_what_was_found),
+    so it is a guess from where the radio is, not something the
+    signal said.  A frequency the catalogue has nothing for gets no
+    name rather than a near one.
     """
     said = {CONFIRMED: "stereo", LIKELY_SKIRT: "spill?"}.get(
         signal.sort, "no pilot")
-    return "%.1f MHz  %+.0f dB  %s" % (
-        signal.freq_mhz, signal.power_dbfs, said)
+    named = "  %s" % station.name if station is not None else ""
+    return "%.1f MHz%s  %+.0f dB  %s" % (
+        signal.freq_mhz, named, signal.power_dbfs, said)
 
 
 def _reading(value: "float | None", pattern: str) -> str:
@@ -928,6 +936,9 @@ class ReceiverWindow(QMainWindow):
                 QMessageBox.Warning)
             self._set_notice("the area was not saved")
             return
+        # The list was named by the old area; a find that was
+        # RKKラジオ a moment ago is TOKYO FM now.
+        self._show_what_was_found(self._found_signals)
         self._set_notice("stations are named from %s now (saved in %s)"
                          % (area, path))
 
@@ -998,12 +1009,30 @@ class ReceiverWindow(QMainWindow):
         self._dsp.set_usable(usable)
 
     def _show_what_was_found(self, found) -> None:
-        """Fill the list of what is on the band, newest sweep only."""
+        """Fill the list of what is on the band, newest sweep only.
+
+        Each find is named through the facade's stations_at, the
+        lookup the dial and the recordings tab use: the catalogue,
+        narrowed to the area when one is set.  So 80.0 MHz is TOKYO
+        FM in 関東 and not RKKラジオ, and a find reads the same as the
+        dial will once it is tuned to.  Kept, so that the list can be
+        named again when the area changes (_offer_to_keep_the_area).
+
+        In order of frequency, the way the band is read.  The sweep
+        hands them back loudest first, which is its own order for its
+        own reasons; a list to pick a station from reads like a dial.
+        """
+        found = sorted(found, key=lambda signal: signal.freq_hz)
+        self._found_signals = found
+        stations = (self.controller.stations_at(
+            [signal.freq_hz for signal in found]) if found else {})
         self._found.clear()
         self._found.addItem(
             "%d found" % len(found) if found else "nothing found yet", None)
         for signal in found:
-            self._found.addItem(_what_was_found(signal), signal.freq_hz)
+            self._found.addItem(
+                _what_was_found(signal, stations.get(signal.freq_hz)),
+                signal.freq_hz)
         self._found.setCurrentIndex(0)
         _fit_the_list(self._found)
 

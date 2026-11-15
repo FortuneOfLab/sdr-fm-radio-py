@@ -1947,8 +1947,8 @@ def test_what_the_sweep_found_can_be_tuned_to(window, monkeypatch, qt_app):
     finish(view, qt_app)
 
     assert view._found.count() == 3, "a heading and two finds"
-    view._found.setCurrentIndex(1)
-    view._found_chosen(1)
+    view._found.setCurrentIndex(2)
+    view._found_chosen(2)
 
     assert [freq for what, freq in controller.calls if what == "tune"] == [
         pytest.approx(89.7e6)]
@@ -1968,9 +1968,51 @@ def test_each_find_says_where_it_is_and_what_it_is(window, monkeypatch,
     finish(view, qt_app)
 
     lines = [view._found.itemText(i) for i in range(1, view._found.count())]
-    assert "89.7 MHz" in lines[0] and "stereo" in lines[0]
-    assert "spill?" in lines[1]
-    assert "no pilot" in lines[2]
+    assert "82.1 MHz" in lines[0] and "spill?" in lines[0]
+    assert "89.7 MHz" in lines[1] and "stereo" in lines[1]
+    assert "90.5 MHz" in lines[2] and "no pilot" in lines[2]
+
+
+def test_each_find_is_named_as_the_dial_would_name_it(window, monkeypatch,
+                                                      qt_app):
+    """The catalogue's name for the frequency, through the facade.
+
+    The same lookup the dial uses, so the list and the dial agree;
+    and a frequency the catalogue has nothing for is left unnamed
+    rather than given a near one.
+    """
+    view, controller, _ = a_scan(window, monkeypatch, found=[
+        a_find(80.0), a_find(81.3), a_find(89.1)])
+
+    view._scan_button.click()
+    finish(view, qt_app)
+
+    lines = [view._found.itemText(i) for i in range(1, view._found.count())]
+    assert lines[0].startswith("80.0 MHz  TOKYO FM  "), lines[0]
+    assert lines[1].startswith("81.3 MHz  J-WAVE  "), lines[1]
+    assert lines[2] == "89.1 MHz  -10 dB  stereo", lines[2]
+    assert ("stations_at", [pytest.approx(80.0e6), pytest.approx(81.3e6),
+                            pytest.approx(89.1e6)]) in controller.calls
+
+
+def test_the_finds_are_listed_up_the_band(window, monkeypatch, qt_app):
+    """Like a dial, whatever order the sweep handed them back in.
+
+    The sweep returns them loudest first; every entry has to still
+    tune to its own frequency once they are reordered.
+    """
+    view, controller, _ = a_scan(window, monkeypatch, found=[
+        a_find(90.5, -5.0), a_find(78.0, -9.0), a_find(84.7, -20.0)])
+
+    view._scan_button.click()
+    finish(view, qt_app)
+
+    listed = [view._found.itemData(i) for i in range(1, view._found.count())]
+    assert listed == [pytest.approx(78.0e6), pytest.approx(84.7e6),
+                      pytest.approx(90.5e6)]
+    for i in range(1, view._found.count()):
+        assert view._found.itemText(i).startswith(
+            "%.1f MHz" % (view._found.itemData(i) / 1e6))
 
 
 def test_the_tuner_is_the_sweeps_while_it_runs(window, monkeypatch, qt_app):
@@ -2348,6 +2390,35 @@ def test_a_sweep_that_places_the_radio_offers_to_keep_it(window,
     assert "関東" in said, said
     assert controller.saved == ["関東"]
     assert "関東" in view._health.text()
+
+
+def test_the_finds_are_named_again_by_the_area_that_was_kept(
+        window, monkeypatch, qt_app):
+    """80.0 MHz is RKKラジオ with no area, and TOKYO FM in 関東.
+
+    The list was named before the question was asked, so keeping the
+    area has to name it again, or it goes on calling the station
+    after a transmitter on the other side of the country.
+    """
+    view, controller, _ = a_scan(window, monkeypatch,
+                                 found=[a_find(80.0), a_find(81.3)])
+    controller.catalogue = one_place()
+
+    def by_area(freqs):
+        names = ({80.0e6: "TOKYO FM", 81.3e6: "J-WAVE"}
+                 if controller.area == "関東" else {80.0e6: "RKKラジオ"})
+        return {f: _Station(names[f]) if f in names else None
+                for f in freqs}
+
+    controller.stations_at = by_area
+    watch_the_boxes(monkeypatch)
+
+    view._scan_button.click()
+    finish(view, qt_app)
+
+    assert controller.saved == ["関東"], "the area was meant to be kept"
+    first = view._found.itemText(1)
+    assert "TOKYO FM" in first and "RKK" not in first, first
 
 
 def test_it_asks_before_it_writes(window, monkeypatch, qt_app):
