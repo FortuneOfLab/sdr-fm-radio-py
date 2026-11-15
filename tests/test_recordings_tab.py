@@ -1212,3 +1212,86 @@ def test_a_b_through_the_tab_saves_what_the_command_line_writes(
         qs.main()
     capsys.readouterr()
     assert saved.read_bytes() == (pasted / "redecode.csv").read_bytes()
+
+
+# ----------------------------------------------------------------------
+# The tooltip's command, pasted into the shell
+# ----------------------------------------------------------------------
+
+#: A directory name with what shells read as their own: an ampersand, a
+#: semicolon, a dollar, a single quote, a typographic one, a space,
+#: brackets and letters outside ASCII.  Each is allowed in a file name
+#: on Windows and on POSIX.
+_AWKWARD = "Radio&A;b $x 'q' \u2019t (1) 録音"
+
+
+def _run_in_the_shell(command: str, where, monkeypatch):
+    """Run *command* as the platform's shell would, from *where*.
+
+    ``python`` is looked up on PATH, as it would be for whoever pastes
+    the line, so the interpreter running the tests is put first on it;
+    the package is found through PYTHONPATH, since *where* is not the
+    checkout.
+    """
+    import base64
+    import os
+    import subprocess
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env = dict(os.environ)
+    env["PATH"] = os.path.dirname(sys.executable) + os.pathsep + env["PATH"]
+    env["PYTHONPATH"] = root
+    if os.name == "nt":
+        # As typed: the line goes to PowerShell untouched, in UTF-16.
+        encoded = base64.b64encode(command.encode("utf-16-le")).decode()
+        argv = ["powershell", "-NoProfile", "-NonInteractive",
+                "-EncodedCommand", encoded]
+    else:
+        argv = ["sh", "-c", command]
+    return subprocess.run(argv, cwd=str(where), env=env,
+                          capture_output=True, timeout=120)
+
+
+# The capture is shorter than the warmup: the row's averages are of
+# nothing, and say nan.
+@pytest.mark.filterwarnings("ignore:Mean of empty slice:RuntimeWarning")
+@pytest.mark.filterwarnings("ignore:invalid value encountered:RuntimeWarning")
+@pytest.mark.parametrize("dsp, flags", [
+    ("defaults", ()),
+    ("B", ("--fixed-blend=0.0", "--side-nr-beta=2.0")),
+])
+def test_the_tooltips_command_run_in_the_shell_writes_the_row(
+        dsp, flags, tmp_path, monkeypatch):
+    """The string the tooltip shows, through the shell it is meant
+    for, from a directory whose name the shell would otherwise take
+    apart: the CSV it appends is the row Save CSV writes."""
+    from fm_radio.redecode import decode_file
+    from iq_capture import write_stereo_iq_wav
+
+    awkward = tmp_path / _AWKWARD
+    awkward.mkdir()
+    wav = write_stereo_iq_wav(awkward / "it's & $x.wav", 0.05)
+    measured = decode_file(wav, 1, flags)
+    result = recordings_tab.Result(wav, "80.0", "", 1, measured,
+                                   dsp=dsp, arguments=flags)
+    run_from = tmp_path / "run here"
+    run_from.mkdir()
+
+    done = _run_in_the_shell(result.command(), run_from, monkeypatch)
+
+    assert done.returncode == 0, (
+        done.stdout.decode(errors="replace")
+        + done.stderr.decode(errors="replace"))
+    # Written as Save CSV writes it - text mode, so the same line ends.
+    expected = tmp_path / "saved.csv"
+    with open(expected, "w", encoding="utf-8") as f:
+        f.write(IQ_CSV_HEADER + result.csv_row())
+    assert (run_from / "redecode.csv").read_bytes() == expected.read_bytes()
+
+
+def test_powershell_quoting_leaves_nothing_bare_that_it_would_read():
+    words = ["python", "--iq-wav", r"C:\Radio&A\x.wav", "a;b", "$x",
+             "it's", "\u2019", "--fixed-blend=-0.5", "", "@x"]
+    assert recordings_tab.for_powershell(words) == (
+        "python --iq-wav 'C:\\Radio&A\\x.wav' 'a;b' '$x' 'it''s' "
+        "'\u2019\u2019' --fixed-blend=-0.5 '' '@x'")

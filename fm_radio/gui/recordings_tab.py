@@ -70,8 +70,8 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shlex
-import subprocess
 import threading
 
 from PySide6.QtCore import QObject, Qt, QUrl, Signal
@@ -305,16 +305,51 @@ class Result:
 
     def command(self) -> str:
         """:meth:`command_words` as one line, to be pasted into this
-        platform's shell."""
+        platform's shell: PowerShell on Windows (see
+        :func:`for_powershell`), a POSIX shell elsewhere."""
         words = self.command_words()
         if os.name == "nt":
-            return subprocess.list2cmdline(words)
+            return for_powershell(words)
         return shlex.join(words)
 
     def csv_row(self) -> str:
         """The row the command line writes for the same file, window,
         flags and tag."""
         return iq_csv_row(self.measured, self.tag, self.window_s)
+
+
+#: A word PowerShell reads as itself when it is left bare.  Anything
+#: else - a space, ``&``, ``;``, ``$``, a quote, a bracket, a letter
+#: outside ASCII - is put in single quotes.
+_BARE = re.compile(r"[A-Za-z0-9_.:=\\/+-]+")
+#: What PowerShell takes as a single quote, inside a single-quoted
+#: string as well as around it: the ASCII one and four typographic
+#: ones.  Each is written twice to stand for itself.
+_PS_QUOTES = "'‘’‚‛"
+
+
+def for_powershell(words) -> str:
+    """*words* as one PowerShell command line.
+
+    Not ``subprocess.list2cmdline``: that quotes for the C runtime's
+    argument parser, only around spaces and tabs, and leaves ``&``,
+    ``;`` and ``$`` bare, which PowerShell reads as its own.  Here every
+    word that is not plainly safe is single-quoted, where PowerShell
+    expands nothing; its quote characters inside are doubled.  The
+    words never hold a double quote (Windows refuses one in a file
+    name, and no flag or tag has one), which is the one character
+    Windows PowerShell 5.1 does not pass on to a program intact.  The
+    first word is ``python``, bare, so the line needs no ``&`` in front.
+    cmd.exe reads single quotes as letters, so this is not for it.
+    """
+    def one(word: str) -> str:
+        if _BARE.fullmatch(word):
+            return word
+        for quote in _PS_QUOTES:
+            word = word.replace(quote, quote * 2)
+        return f"'{word}'"
+
+    return " ".join(one(word) for word in words)
 
 
 def result_cells(result: Result) -> tuple[str, ...]:
