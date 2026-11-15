@@ -776,7 +776,12 @@ class FMReceiverController:
         the tuning would wait for it.  The seven seconds of ordinary
         listening after a scan in that same run had no underruns at
         all, so the cushion a retune loses is not one the receiver
-        was found to need.
+        was found to need - after one retune.  After several it was:
+        each costs 21 ms that nothing gave back, until the stream ran
+        with nothing in hand.  So the processing thread has the output
+        rebuild its cushion, without stopping the card, when it resets
+        the demodulator for the new station; see
+        AudioOutput.rebuild_cushion.
         """
         shut = RecordingsShut(self.audio_output, self.sdr_receiver,
                               self.logger)
@@ -1415,6 +1420,9 @@ class FMReceiverController:
         if generation != self._generation_in_hand:
             self.fm_demodulator.reset()
             self._generation_in_hand = generation
+            # The reset costs the output 21 ms it would otherwise never
+            # get back; see AudioOutput.rebuild_cushion.
+            self.audio_output.rebuild_cushion()
             self.logger.debug("Demodulator reset for tuning %d", generation)
         return True
 

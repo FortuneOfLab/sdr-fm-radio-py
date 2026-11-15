@@ -441,6 +441,159 @@ def test_the_card_is_never_left_short_in_either_mode(name, interval):
         ao.cleanup()
 
 
+#: Audio a retune costs, measured: the demodulator's first block after
+#: its reset comes out empty and the second carries 512 of its 768.
+RETUNE_LOSS_FRAMES = 1024
+
+
+def _on_hand(audio_output):
+    """Frames waiting for the card: what the callback has, plus the queue."""
+    return (audio_output._buffer_len // 2
+            + sum(left.size for left, _ in list(
+                audio_output.audio_buffer_queue.queue)))
+
+
+def _play_through_retunes(audio_output, retunes, late, seconds,
+                          interval=MODES[0][1], card_sec=0.1067, extra=0):
+    """_play_out, with retunes in it and one block that comes late.
+
+    ``retunes`` are times at which the receiver resets its
+    demodulator - calling ``rebuild_cushion`` as the controller does -
+    after which it owes ``RETUNE_LOSS_FRAMES``, taken out of the
+    blocks that follow.  ``late`` is ``(time, seconds)``: the first
+    block due at or after that time arrives that much later, and the
+    blocks behind it on time, as a slow block on the processing thread
+    does when the SDR queue holds the IQ meanwhile.  ``extra`` frames
+    go in with the first block after the stream starts, for a stream that has more in hand
+    than it started on - as one does after a refill that overshot.
+
+    Returns ``(t, frames on hand)`` at the entry to every callback.
+    """
+    rate = float(AUDIO_OUTPUT_RATE)
+    callback_sec = AUDIO_FRAMES_PER_BUFFER / rate
+    block, produced, owed = 0, 0, 0
+    t_block, t_callback = 0.0, None
+    pending = sorted(retunes)
+    late_at, late_by = late
+    levels = []
+    while True:
+        due = t_block + (late_by if late_at is not None
+                         and t_block >= late_at else 0.0)
+        if t_callback is not None and t_callback <= due:
+            if t_callback > seconds:
+                break
+            levels.append((t_callback, _on_hand(audio_output)))
+            audio_output.callback(None, AUDIO_FRAMES_PER_BUFFER, {}, 0)
+            t_callback += callback_sec
+            continue
+        if t_block > seconds:
+            break
+        if late_at is not None and t_block >= late_at:
+            late_at = None
+        while pending and pending[0] <= t_block:
+            pending.pop(0)
+            audio_output.rebuild_cushion()
+            owed += RETUNE_LOSS_FRAMES
+        block += 1
+        want = int(round(block * interval * rate))
+        n = want - produced
+        if extra and t_callback is not None:
+            n, extra = n + extra, 0
+        produced = want
+        paid = min(owed, n)
+        owed -= paid
+        one = np.zeros(n - paid, dtype=np.float32)
+        audio_output.enqueue_audio(one, one)
+        if t_callback is None and audio_output._playing:
+            for _ in range(int(round(card_sec * rate))
+                           // AUDIO_FRAMES_PER_BUFFER):
+                audio_output.callback(None, AUDIO_FRAMES_PER_BUFFER, {}, 0)
+            t_callback = t_block
+        t_block += interval
+    return levels
+
+
+def test_a_late_block_after_a_burst_of_retunes_is_no_gap():
+    """The hardware runs: none before the first retune, then gaps.
+
+    Each retune costs 21 ms the receiver never makes up, because it
+    produces at exactly the rate the card consumes.  Two of them run
+    the startup cushion dry, and after that a block 12 ms late - one
+    the stream absorbs without a sound before any retune - is a gap.
+    The output has to put back what a retune took.
+    """
+    ao = ao_mod.AudioOutput()
+    try:
+        before = _play_through_retunes(
+            ao, retunes=[], late=(1.0, 0.012), seconds=2.0)
+        assert ao._playing and ao.underruns == 0, (
+            "a 12 ms late block was a gap even before any retune")
+    finally:
+        ao.cleanup()
+
+    ao = ao_mod.AudioOutput()
+    try:
+        levels = _play_through_retunes(
+            ao, retunes=[1.0, 1.5, 2.0, 2.5, 3.0], late=(4.0, 0.012),
+            seconds=5.0)
+
+        assert ao.underruns == 0, (
+            "%d gaps after five retunes and one block 12 ms late"
+            % ao.underruns)
+        start = min(n for t, n in before if 0.5 <= t < 1.0)
+        end = min(n for t, n in levels if 4.5 <= t < 5.0)
+        assert end >= start, (
+            "the stream has %d frames at its lowest after the retunes, "
+            "against %d before them" % (end, start))
+    finally:
+        ao.cleanup()
+
+
+@pytest.mark.parametrize("offset_ms", range(0, 64, 4))
+def test_a_retune_is_put_back_wherever_it_falls_against_the_card(offset_ms):
+    """The loss shows up over two blocks after the reset, not at it.
+
+    The level the card finds swings by more than a callback over the
+    64 ms in which blocks and callbacks line up again.  A stream with
+    1280 frames more in hand than it started on - where a refill that
+    overshot leaves it - sits right at the refill's target, so the
+    first callback after the reset can find the target met, because
+    the empty block has not been missed yet.  A refill that stopped
+    there would leave the 21 ms lost after all: 768 frames below where
+    it was, measured, at half the phases.  Every phase, then.
+    """
+    ao = ao_mod.AudioOutput()
+    try:
+        retune = 1.0 + offset_ms / 1000.0
+        levels = _play_through_retunes(
+            ao, retunes=[retune], late=(None, 0.0), seconds=2.0,
+            extra=1280)
+
+        start = min(n for t, n in levels if 0.5 <= t < 1.0)
+        end = min(n for t, n in levels if 1.5 <= t < 2.0)
+        assert ao.underruns == 0
+        assert end >= start, (
+            "retune at %.3f s: %d frames at the lowest after it, %d "
+            "before" % (retune, end, start))
+    finally:
+        ao.cleanup()
+
+
+def test_a_refill_gives_way_when_nothing_is_arriving(audio_output):
+    """Silence by choice is bounded: a dead feed still counts as gaps."""
+    _feed(audio_output, audio_output._preroll_frames)
+    while audio_output.audio_buffer_queue.qsize() or audio_output._buffer_len:
+        audio_output.callback(None, AUDIO_FRAMES_PER_BUFFER, {}, 0)
+    audio_output.rebuild_cushion()
+    before = audio_output.underruns
+
+    for _ in range(int(0.5 * AUDIO_OUTPUT_RATE) // AUDIO_FRAMES_PER_BUFFER):
+        audio_output.callback(None, AUDIO_FRAMES_PER_BUFFER, {}, 0)
+
+    assert audio_output._refilling is False
+    assert audio_output.underruns > before
+
+
 def _the_stream_class():
     """The stream class the output will really be handed.
 

@@ -662,6 +662,36 @@ def test_the_blocks_after_the_first_are_not_reset_again(receiver):
     assert watched.kinds == ["process"] * 4, watched.kinds
 
 
+def test_a_new_tuning_has_the_output_rebuild_its_cushion(receiver):
+    """Once per tuning, after the reset that costs the audio.
+
+    The reset loses 21 ms that the receiver never makes up, and a few
+    retunes in a row left the output with nothing in hand; see
+    AudioOutput.rebuild_cushion.  Asked for on the processing thread,
+    before the first block of the new station is demodulated, and not
+    again for the blocks after it.
+    """
+    tuned(receiver, 80.0e6)
+    watched = WatchedDemodulator(receiver.fm_demodulator)
+    receiver.audio_output.rebuild_cushion = (
+        lambda: watched._note("rebuild"))
+
+    with the_loop_running(receiver):
+        watched.expect(2)
+        enqueue(receiver, iq_block(receiver))
+        watched.wait()
+
+        tuned(receiver, 81.3e6)
+        watched.expect(5)
+        for _ in range(3):
+            enqueue(receiver, iq_block(receiver))
+        watched.wait()
+
+    assert watched.kinds == ["reset", "rebuild", "process", "process",
+                             "process"], watched.kinds
+    assert watched.threads == {"Processing"}, watched.threads
+
+
 def test_a_stale_block_is_dropped_before_the_new_tuning_is_started(receiver):
     """The order, and what asking the other question first would cost.
 
