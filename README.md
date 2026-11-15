@@ -73,6 +73,7 @@ python fm_receiver.py --volume 40
 
 0 to 100, default 100 (full level, as before). It works with `--gui` too. The
 volume only affects what you hear. Recordings are always made at full level.
+Add `--mute` to start muted.
 
 ### Interactive Commands (while running)
 
@@ -87,6 +88,8 @@ volume only affects what you hear. Recordings are always made at full level.
 - `agc off` → Enable manual gain control
 - `gain <value>` → Set manual gain level
 - `vol <0-100>` / `vol +` / `vol -` → Listening volume (`vol` alone shows it)
+- `mute` / `unmute` → Silence the output and bring it back at the same volume
+  (`mute` alone toggles; setting a volume also unmutes)
 - `<station_num>` or `<freq_MHz>` → Tune to a station
 - `q` → Quit the program
 

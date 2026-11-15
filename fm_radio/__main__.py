@@ -44,6 +44,8 @@ Usage Examples:
       $ python fm_receiver.py --log-file fm_receiver.log
   - Start at a lower listening volume (0-100, default 100):
       $ python fm_receiver.py --volume 40
+  - Start muted (unmute with 'unmute', or from the window):
+      $ python fm_receiver.py --mute
   - Combine options:
       $ python fm_receiver.py --light --debug --log-file debug.log
 
@@ -59,6 +61,7 @@ Command Examples (during execution):
   'agc off'           : Disable auto gain (manual mode)
   'gain <value>'      : Set manual gain in dB (when auto gain is off)
   'vol <0-100>'       : Set the listening volume ('vol +' / 'vol -' step it)
+  'mute' / 'unmute'   : Silence the listening output and bring it back
   '<station_num>' or '<freq_MHz>' : Tune to the specified station
   'q'                 : Quit the program
 """
@@ -138,6 +141,7 @@ def main() -> None:
     stations_path: str | None = None
     use_gui: bool = False
     volume: float | None = None
+    muted: bool = False
 
     for i, arg in enumerate(sys.argv[1:], 1):
         if arg == '--light':
@@ -146,6 +150,8 @@ def main() -> None:
             use_gui = True
         elif arg == '--stations' and i + 1 < len(sys.argv):
             stations_path = sys.argv[i + 1]
+        elif arg == '--mute':
+            muted = True
         elif arg == '--volume':
             volume = _volume_argument(sys.argv[i + 1]
                                       if i + 1 < len(sys.argv) else None)
@@ -178,6 +184,10 @@ def main() -> None:
             # Before anything starts, so the first block out is already
             # at this level: nothing has been played yet to jump from.
             controller.set_volume(volume)
+        if muted:
+            # After the volume, which unmutes: '--volume 40 --mute' is
+            # muted at 40, whichever order they were typed in.
+            controller.set_muted(True)
         if use_gui:
             # The window owns the main loop, so the receiver is started in
             # the background and shut down when the window closes.

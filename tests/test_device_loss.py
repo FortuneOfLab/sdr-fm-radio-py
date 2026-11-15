@@ -215,6 +215,12 @@ class _FakeController:
     def set_volume(self, percent) -> int:
         return int(percent)
 
+    def is_muted(self) -> bool:
+        return False
+
+    def set_muted(self, muted) -> bool:
+        return bool(muted)
+
     def is_recording(self) -> bool:
         return self.recording
 

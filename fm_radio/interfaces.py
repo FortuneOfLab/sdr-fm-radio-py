@@ -170,5 +170,13 @@ class AudioOutputInterface(ABC):
         """
 
     @abstractmethod
+    def set_muted(self, muted: bool) -> bool:
+        """Mute or unmute what is played; the volume is kept.
+
+        Returns:
+            Whether it is now muted.
+        """
+
+    @abstractmethod
     def cleanup(self) -> None:
         """Stop audio streams and release resources."""

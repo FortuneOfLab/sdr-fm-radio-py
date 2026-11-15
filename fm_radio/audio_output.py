@@ -237,6 +237,9 @@ class AudioOutput(AudioOutputInterface):
         # ramps from that to the wanted one over a single buffer, so a
         # change is never a step in the waveform - a step is a click.
         self._volume_percent: int = VOLUME_DEFAULT_PERCENT
+        # Muting is a state of its own rather than a volume of 0, so the
+        # volume is still there to come back to.
+        self._muted: bool = False
         self._gain_wanted: float = volume_gain(VOLUME_DEFAULT_PERCENT)
         self._gain_applied: float = self._gain_wanted
         # Set for as long as a recording is being closed: the flag above
@@ -433,6 +436,10 @@ class AudioOutput(AudioOutputInterface):
         """
         percent = clamp_volume(percent)
         self._volume_percent = percent
+        # Setting a volume is asking to hear it: a muted output that
+        # took a new volume and stayed silent would look like a knob
+        # that does nothing.
+        self._muted = False
         self._gain_wanted = volume_gain(percent)
         return percent
 
@@ -440,6 +447,22 @@ class AudioOutput(AudioOutputInterface):
     def volume(self) -> int:
         """The listening volume in percent; see :meth:`set_volume`."""
         return self._volume_percent
+
+    def set_muted(self, muted: bool) -> bool:
+        """Silence the output, or bring it back at the volume it had.
+
+        Ramped like any other change, so neither way is a click.
+        Recording is not affected.  Returns the new state.
+        """
+        self._muted = bool(muted)
+        self._gain_wanted = (0.0 if self._muted
+                             else volume_gain(self._volume_percent))
+        return self._muted
+
+    @property
+    def muted(self) -> bool:
+        """Whether the output is muted; see :meth:`set_muted`."""
+        return self._muted
 
     @property
     def closed(self) -> bool:

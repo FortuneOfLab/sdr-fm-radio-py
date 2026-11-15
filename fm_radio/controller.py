@@ -1225,7 +1225,7 @@ class FMReceiverController:
         nothing to the recordings, the level meters or the telemetry:
         those are of the broadcast, and this is the listener's setting.
         Two assignments and no device, so a slider may call it on every
-        step of a drag.
+        step of a drag.  Unmutes: a volume set is a volume to be heard.
 
         Args:
             percent: 0 (silence) to 100 (full level, the default).
@@ -1235,6 +1235,19 @@ class FMReceiverController:
             ValueError: *percent* is not a number.
         """
         return self.audio_output.set_volume(percent)
+
+    def is_muted(self) -> bool:
+        """Return True while the listening output is muted."""
+        return self.audio_output.muted
+
+    def set_muted(self, muted: bool) -> bool:
+        """Mute or unmute the listening output; returns the new state.
+
+        The volume is kept, and unmuting goes back to it.  Setting a
+        volume unmutes as well.  Like the volume, this is the
+        listener's alone: recordings carry on at full level.
+        """
+        return self.audio_output.set_muted(muted)
 
     # ------------------------------------------------------------------
     # Internal methods

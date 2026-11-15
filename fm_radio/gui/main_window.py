@@ -788,7 +788,7 @@ class ReceiverWindow(QMainWindow):
         return box
 
     def _build_audio(self) -> QGroupBox:
-        """Recording, and how loud the radio plays.
+        """Recording, and how loud the radio plays - or whether it does.
 
         In one row because the recording row had room to spare: the
         tuner row is what sets the window's width, and this one stays
@@ -838,12 +838,41 @@ class ReceiverWindow(QMainWindow):
                                         | Qt.AlignmentFlag.AlignVCenter)
         self._volume_value.setText(f"{self._volume.value()}%")
         row.addWidget(self._volume_value)
+
+        # Pressed in while muted; the label never changes, so the
+        # button is never a different width.  The slider keeps
+        # showing the volume that unmuting goes back to.
+        self._mute = QPushButton("Mute", box)
+        self._mute.setCheckable(True)
+        self._mute.setToolTip(
+            "Silence the radio without losing the volume.  Recordings "
+            "carry on at full level.")
+        self._mute.setChecked(bool(self.controller.is_muted()))
+        self._mute.toggled.connect(self._mute_toggled)
+        row.addWidget(self._mute)
         return box
 
     def _volume_moved(self, value: int) -> None:
-        """Hand the receiver the volume, and show what it settled on."""
+        """Hand the receiver the volume, and show what it settled on.
+
+        Setting a volume unmutes, in the receiver, so the button is
+        brought into line with what the receiver says now.
+        """
         applied = self.controller.set_volume(value)
         self._volume_value.setText(f"{applied}%")
+        self._show_muted()
+
+    def _mute_toggled(self, checked: bool) -> None:
+        self.controller.set_muted(checked)
+        self._show_muted()
+
+    def _show_muted(self) -> None:
+        """Press or release the button to match the receiver."""
+        muted = bool(self.controller.is_muted())
+        if self._mute.isChecked() != muted:
+            self._mute.blockSignals(True)
+            self._mute.setChecked(muted)
+            self._mute.blockSignals(False)
 
     def _load_presets(self) -> None:
         """Fill the preset list from the catalogue's favourites."""

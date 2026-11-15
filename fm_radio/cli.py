@@ -219,6 +219,8 @@ class CommandLineInterface(threading.Thread):
             return self._cmd_search(cmd)
         if verb in ('vol', 'volume'):
             return self._cmd_volume(cmd.lower())
+        if verb in ('mute', 'unmute'):
+            return self._cmd_mute(cmd.lower())
 
         # 3. Numeric / frequency input -> tune
         return self._cmd_tune(cmd)
@@ -244,6 +246,7 @@ class CommandLineInterface(threading.Thread):
         print("  'gain <value>' -> set manual gain in dB (when auto gain is off)")
         print("  'vol <0-100>', 'vol +' or 'vol -' -> listening volume "
               "(recordings stay at full level)")
+        print("  'mute' / 'unmute' -> silence the output and bring it back")
         print("  <station_num> or <freq_MHz> -> tune")
         print("  'q' -> quit")
 
@@ -427,7 +430,7 @@ class CommandLineInterface(threading.Thread):
         """
         tokens = cmd.split()
         if len(tokens) == 1:
-            print(f"Volume: {self.controller.get_volume()}%")
+            self._say_the_volume()
             return True
         if len(tokens) != 2:
             print("Usage: vol <0-100>, vol + or vol -")
@@ -447,8 +450,33 @@ class CommandLineInterface(threading.Thread):
                 # typo than a wish for full level.
                 print("The volume goes from 0 to 100.")
                 return True
-        print(f"Volume: {self.controller.set_volume(wanted)}%")
+        self.controller.set_volume(wanted)
+        self._say_the_volume()
         return True
+
+    def _cmd_mute(self, cmd: str) -> bool:
+        """Handle 'mute' (a toggle), 'mute on', 'mute off' and 'unmute'."""
+        tokens = cmd.split()
+        if tokens == ['unmute'] or tokens == ['mute', 'off']:
+            wanted = False
+        elif tokens == ['mute', 'on']:
+            wanted = True
+        elif tokens == ['mute']:
+            wanted = not self.controller.is_muted()
+        else:
+            print("Usage: mute, mute on, mute off or unmute")
+            return True
+        self.controller.set_muted(wanted)
+        self._say_the_volume()
+        return True
+
+    def _say_the_volume(self) -> None:
+        """One line for where the volume stands, muted or not."""
+        volume = self.controller.get_volume()
+        if self.controller.is_muted():
+            print(f"Muted (volume {volume}% when unmuted).")
+        else:
+            print(f"Volume: {volume}%")
 
     def _cmd_tune(self, cmd: str) -> bool:
         """Handle station number or frequency input — tune to station."""

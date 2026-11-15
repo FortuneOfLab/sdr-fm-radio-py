@@ -153,6 +153,73 @@ def test_an_underrun_is_still_counted_and_still_silent_at_any_volume(
 
 
 # ----------------------------------------------------------------------
+# Mute
+# ----------------------------------------------------------------------
+
+def test_mute_plays_silence(audio_output):
+    audio_output.set_volume(70)
+    assert audio_output.set_muted(True) is True
+    out = _settled(audio_output)
+    assert not np.any(out)
+    assert audio_output.muted
+    assert audio_output.volume == 70, "the volume is kept to come back to"
+
+
+def test_unmute_comes_back_at_the_volume_it_had(audio_output):
+    audio_output.set_volume(50)
+    audio_output.set_muted(True)
+    _settled(audio_output)
+    assert audio_output.set_muted(False) is False
+    out = _settled(audio_output)
+    assert _rms_db(out[:, 0]) == pytest.approx(REFERENCE_DB - 18.06,
+                                               abs=0.01)
+
+
+def test_muting_is_ramped_not_stepped(audio_output):
+    """Muting is a fall to zero, and a step to zero is the loudest click."""
+    dc = np.full(FRAMES, AMPLITUDE, dtype=np.float32)
+    audio_output.enqueue_audio(dc, dc)
+    audio_output.callback(None, FRAMES, {}, 0)
+    audio_output.set_muted(True)
+    audio_output.enqueue_audio(dc, dc)
+    out, _ = audio_output.callback(None, FRAMES, {}, 0)
+    gain = np.frombuffer(out, dtype=np.float32)[0::2] / AMPLITUDE
+    steps = np.diff(np.concatenate([[1.0], gain]))
+    assert np.max(np.abs(steps)) == pytest.approx(1.0 / FRAMES, rel=1e-3)
+    assert gain[-1] == pytest.approx(0.0, abs=1e-6)
+
+
+def test_setting_a_volume_while_muted_unmutes_at_it(audio_output):
+    audio_output.set_muted(True)
+    _settled(audio_output)
+    audio_output.set_volume(20)
+    assert not audio_output.muted
+    out = _settled(audio_output)
+    assert _rms_db(out[:, 0]) == pytest.approx(REFERENCE_DB - 41.94,
+                                               abs=0.01)
+
+
+def test_a_recording_stays_at_full_level_while_muted(audio_output, tmp_path):
+    path = tmp_path / "muted.wav"
+    audio_output.set_muted(True)
+    _settled(audio_output)
+    audio_output.start_recording(str(path))
+    tone = _tone()
+    stereo = np.empty(FRAMES * 2, dtype=np.float32)
+    stereo[0::2] = tone
+    stereo[1::2] = tone
+    audio_output.record(stereo)
+    out = _played(audio_output)
+    audio_output.stop_recording()
+
+    with wave.open(str(path), "rb") as r:
+        frames = np.frombuffer(r.readframes(r.getnframes()), dtype=np.int16)
+    written = frames.astype(np.float64).reshape(-1, 2) / RECORD_MAX_INT16
+    assert _rms_db(written[:, 0]) == pytest.approx(REFERENCE_DB, abs=0.01)
+    assert not np.any(out)
+
+
+# ----------------------------------------------------------------------
 # What is not touched
 # ----------------------------------------------------------------------
 
@@ -206,6 +273,18 @@ def test_the_controller_sets_what_the_card_plays(receiver):
     assert receiver.get_volume() == 100
     assert receiver.set_volume(50) == 50
     assert receiver.get_volume() == 50
+    out = _settled(receiver.audio_output)
+    assert _rms_db(out[:, 0]) == pytest.approx(REFERENCE_DB - 18.06,
+                                               abs=0.01)
+
+
+def test_the_controller_mutes_what_the_card_plays(receiver):
+    receiver.set_volume(50)
+    assert receiver.is_muted() is False
+    assert receiver.set_muted(True) is True
+    assert receiver.is_muted() is True
+    assert not np.any(_settled(receiver.audio_output))
+    receiver.set_muted(False)
     out = _settled(receiver.audio_output)
     assert _rms_db(out[:, 0]) == pytest.approx(REFERENCE_DB - 18.06,
                                                abs=0.01)
@@ -271,6 +350,59 @@ def test_a_bad_vol_changes_nothing(cli, receiver, line):
         REFERENCE_DB + 20 * np.log10(volume_gain(60)), abs=0.01)
 
 
+def test_mute_on_the_command_line_silences_and_unmute_restores(cli,
+                                                               receiver):
+    _, say = cli
+    say("vol 50")
+    assert "Muted (volume 50% when unmuted)." in say("mute")
+    assert not np.any(_settled(receiver.audio_output))
+    assert "Volume: 50%" in say("unmute")
+    out = _settled(receiver.audio_output)
+    assert _rms_db(out[:, 0]) == pytest.approx(REFERENCE_DB - 18.06,
+                                               abs=0.01)
+
+
+def test_bare_mute_toggles(cli, receiver):
+    _, say = cli
+    say("mute")
+    assert receiver.is_muted()
+    say("mute")
+    assert not receiver.is_muted()
+
+
+def test_mute_on_and_off_say_which(cli, receiver):
+    _, say = cli
+    say("mute on")
+    say("mute on")
+    assert receiver.is_muted(), "mute on twice is still muted"
+    say("mute off")
+    say("mute off")
+    assert not receiver.is_muted()
+
+
+def test_bare_vol_says_it_is_muted(cli, receiver):
+    _, say = cli
+    say("vol 35")
+    say("mute")
+    assert "Muted (volume 35% when unmuted)." in say("vol")
+
+
+def test_vol_while_muted_unmutes_at_the_new_level(cli, receiver):
+    _, say = cli
+    say("mute")
+    assert "Volume: 20%" in say("vol 20")
+    out = _settled(receiver.audio_output)
+    assert _rms_db(out[:, 0]) == pytest.approx(REFERENCE_DB - 41.94,
+                                               abs=0.01)
+
+
+@pytest.mark.parametrize("line", ["mute please", "unmute now", "mute 1"])
+def test_a_bad_mute_changes_nothing(cli, receiver, line):
+    _, say = cli
+    assert "Usage: mute" in say(line)
+    assert not receiver.is_muted()
+
+
 def test_vol_is_a_word_not_a_prefix(cli, receiver):
     """'volt' is not 'vol t' - the same rule as 'searchlight'."""
     _, say = cli
@@ -288,6 +420,7 @@ class _EntryController:
         self.quit_event = threading.Event()
         self.device_failure = None
         self.volumes: list[float] = []
+        self.muted: list[bool] = []
         self.calls: list[str] = []
         _EntryController.built.append(self)
 
@@ -295,6 +428,11 @@ class _EntryController:
         self.calls.append("set_volume")
         self.volumes.append(percent)
         return int(percent)
+
+    def set_muted(self, muted):
+        self.calls.append("set_muted")
+        self.muted.append(muted)
+        return muted
 
     def start(self) -> None:
         self.calls.append("start")
@@ -328,6 +466,17 @@ def test_without_the_flag_the_volume_is_left_alone(run_main):
     run_main("--light")
     (controller,) = _EntryController.built
     assert controller.volumes == []
+    assert controller.muted == []
+
+
+@pytest.mark.parametrize("argv", [("--mute", "--volume", "40"),
+                                  ("--volume", "40", "--mute")])
+def test_mute_flag_wins_over_the_volume_whatever_the_order(run_main, argv):
+    """The volume unmutes, so it has to go first to leave the radio muted."""
+    run_main(*argv)
+    (controller,) = _EntryController.built
+    assert controller.calls == ["set_volume", "set_muted", "start"]
+    assert controller.muted == [True]
 
 
 @pytest.mark.parametrize("argv", [

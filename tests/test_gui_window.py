@@ -78,6 +78,7 @@ class FakeController:
         self.auto_gain = True
         # The listening volume, in percent, as the real one keeps it.
         self.volume = 100
+        self.muted = False
         self.recording = False
         self.iq_recording = False
         # Stopped but still being written, as the real one is between
@@ -144,7 +145,16 @@ class FakeController:
         # receiver settled on rather than what it asked for.
         self.calls.append(("set_volume", percent))
         self.volume = int(round(min(max(float(percent), 0.0), 100.0)))
+        self.muted = False          # as the real one: a volume unmutes
         return self.volume
+
+    def is_muted(self):
+        return self.muted
+
+    def set_muted(self, muted):
+        self.calls.append(("set_muted", muted))
+        self.muted = bool(muted)
+        return self.muted
 
     def is_recording(self):
         return self.recording
@@ -3143,3 +3153,68 @@ def test_the_volume_figure_has_room_for_its_widest(window):
     label = view._volume_value
     assert (label.fontMetrics().horizontalAdvance("100%")
             <= label.contentsRect().width())
+
+
+def test_the_mute_button_starts_where_the_receiver_is(window):
+    controller = FakeController(snapshot())
+    controller.muted = True
+    view, _ = window(controller)
+    assert view._mute.isChecked()
+    assert ("set_muted", True) not in controller.calls
+
+
+def test_mute_in_the_window_silences_the_card_and_unmute_restores(
+        window, audio_output):
+    """From the button to the samples, as the slider test does."""
+    import numpy as np
+
+    class Wired(FakeController):
+        def get_volume(self):
+            return audio_output.volume
+
+        def set_volume(self, percent):
+            return audio_output.set_volume(percent)
+
+        def is_muted(self):
+            return audio_output.muted
+
+        def set_muted(self, muted):
+            return audio_output.set_muted(muted)
+
+    frames = 1024
+    tone = (0.5 * np.sin(2 * np.pi * 1000.0 * np.arange(frames) / 48000.0)
+            ).astype(np.float32)
+
+    def played():
+        for _ in range(2):              # the change ramps over the first
+            audio_output.enqueue_audio(tone, tone)
+            out, _ = audio_output.callback(None, frames, {}, 0)
+        return np.frombuffer(out, dtype=np.float32)[0::2]
+
+    view, _ = window(Wired(snapshot()))
+    view._volume.setValue(50)
+    view._mute.click()
+    assert view._mute.isChecked()
+    assert not np.any(played())
+    assert view._volume.value() == 50, "the slider keeps the volume"
+    view._mute.click()
+    level = played()
+    ratio_db = 20 * np.log10(np.sqrt(np.mean(level.astype(np.float64) ** 2))
+                             / np.sqrt(np.mean(tone.astype(np.float64) ** 2)))
+    assert ratio_db == pytest.approx(-18.06, abs=0.01)
+
+
+def test_moving_the_volume_while_muted_lets_the_button_out(window):
+    view, controller = window()
+    view._mute.click()
+    assert controller.muted
+    view._volume.setValue(40)
+    assert not controller.muted
+    assert not view._mute.isChecked()
+
+
+def test_the_mute_button_is_the_same_width_pressed_or_not(window):
+    view, _ = window()
+    before = view._mute.sizeHint().width()
+    view._mute.click()
+    assert view._mute.sizeHint().width() == before
