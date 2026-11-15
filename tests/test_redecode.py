@@ -63,7 +63,8 @@ def test_a_complete_standard_rate_iq_capture_can_be_re_decoded():
     (dict(audio_seconds=None), "could not be measured"),
     (dict(audio_seconds=0.0), "no samples"),
     (dict(sample_rate_hz=None), "does not say"),
-    (dict(sample_rate_hz=250000), "250 kHz"),
+    (dict(sample_rate_hz=2048000), "2048 kHz"),
+    (dict(sample_rate_hz=48000), "48 kHz"),
 ])
 def test_what_cannot_be_re_decoded_says_why(fields, word):
     why = why_not(_rec(**fields))
@@ -239,11 +240,16 @@ def test_cancelling_before_the_child_has_started_ends_the_wait(tmp_path):
 
 from dataclasses import fields, replace                         # noqa: E402
 
-from fm_radio.demodulator import FMDemodulator                  # noqa: E402
+from fm_radio.demodulator import (                             # noqa: E402
+    FMDemodulator, FMDemodulatorLight,
+)
 from fm_radio.dsp_settings import (                             # noqa: E402
     DspSettings, MAX_MONO_DELAY_SAMPLES, capture as dsp_capture,
 )
-from fm_radio.redecode import DSP_FLAGS, dsp_arguments          # noqa: E402
+from fm_radio.redecode import (                                # noqa: E402
+    DSP_FLAGS, dsp_arguments, is_light,
+)
+from iq_capture import write_light_iq_wav                       # noqa: E402
 
 #: What a case expects when the command line turns its flags down.
 REFUSED = "refused"
@@ -255,6 +261,15 @@ FIELDS = [f.name for f in fields(DspSettings)]
 def defaults() -> DspSettings:
     """The standard chain's own defaults: what a re-decode starts from."""
     return dsp_capture(FMDemodulator(stereo=True))
+
+
+@pytest.fixture(scope="module")
+def light_defaults() -> DspSettings:
+    """The light chain's: another subcarrier phase, the rest the same."""
+    return dsp_capture(FMDemodulatorLight(stereo=True))
+
+
+CHAINS = ("standard", "light")
 
 
 #: The short capture holds less than the warmup, so nothing is left to
@@ -272,16 +287,37 @@ def short_capture(tmp_path_factory):
         tmp_path_factory.mktemp("short") / "s.wav", 0.05)
 
 
+@pytest.fixture(scope="module")
+def short_light_capture(tmp_path_factory):
+    return write_light_iq_wav(
+        tmp_path_factory.mktemp("short") / "l.wav", 0.2)
+
+
+class _Asked(list):
+    """capture() of each demodulator set up, and which class it was."""
+
+    def __init__(self):
+        super().__init__()
+        self.chains: list[str] = []
+
+    def clear(self):
+        super().clear()
+        self.chains.clear()
+
+
 @pytest.fixture
 def asked(monkeypatch):
     """Every demodulator set up for a decode, as capture() reads it
-    once the overrides are on - one entry per demodulator built."""
-    seen = []
+    once the overrides are on - one entry per demodulator built - and
+    in ``asked.chains`` which chain it was."""
+    seen = _Asked()
     real = qs._set_up_the_demod
 
     def watching(demod, **overrides):
         real(demod, **overrides)
         seen.append(dsp_capture(demod))
+        seen.chains.append("light" if isinstance(demod, FMDemodulatorLight)
+                           else "standard")
 
     monkeypatch.setattr(qs, "_set_up_the_demod", watching)
     return seen
@@ -389,17 +425,23 @@ def test_every_setting_has_its_four_cases(defaults):
         assert four["non-default"][1] != defaults, field
 
 
+@pytest.mark.parametrize("chain", CHAINS)
 @pytest.mark.parametrize("case", CASES)
 @pytest.mark.parametrize("field", FIELDS)
 def test_a_re_decode_asks_what_the_command_line_asks(
-        field, case, defaults, short_capture, asked, monkeypatch, capsys,
-        tmp_path):
+        field, case, chain, defaults, light_defaults, short_capture,
+        short_light_capture, asked, monkeypatch, capsys, tmp_path):
     """The roadmap's comparison: each of the nine, in each of the four
-    cases, through the re-decode and through the command line."""
-    flags, expected = _cases(defaults)[field][case]
+    cases, through the re-decode and through the command line - for
+    each chain, each against its own defaults."""
+    light = chain == "light"
+    wav = short_light_capture if light else short_capture
+    flags, expected = _cases(light_defaults if light else defaults)[
+        field][case]
     csv = tmp_path / "cli.csv"
     monkeypatch.setattr(sys, "argv", [
-        "quality_selftest", "--iq-wav", short_capture, "--duration", "1",
+        "quality_selftest", "--iq-wav", wav, "--duration", "1",
+        *(["--light"] if light else []),
         *flags, "--noise-csv", str(csv), "--noise-tag", "T"])
     try:
         qs.main()
@@ -412,7 +454,7 @@ def test_a_re_decode_asks_what_the_command_line_asks(
     asked.clear()
 
     try:
-        measured = decode_file(short_capture, 1, flags)
+        measured = decode_file(wav, 1, flags, light)
     except ValueError as e:
         gui_refused = e
     else:
@@ -434,6 +476,7 @@ def test_a_re_decode_asks_what_the_command_line_asks(
     assert gui_refused is None, str(gui_refused)
     assert len(asked) == len(cli_asked) == 1
     assert asked == cli_asked
+    assert asked.chains == [chain]
     _same(asked[0], expected)
     assert csv.read_text(encoding="utf-8") == (
         IQ_CSV_HEADER + iq_csv_row(measured, "T", 1))
@@ -503,16 +546,34 @@ def test_a_slot_cannot_hold_what_is_out_of_range(field, wrong, defaults):
         replace(defaults, **{field: wrong})
 
 
+def test_the_two_chains_have_different_phase_defaults(defaults,
+                                                     light_defaults):
+    """What the tests below rely on to tell one chain's default from
+    the other's."""
+    assert light_defaults != defaults
+    assert replace(light_defaults, subcarrier_phase_offset_rad=0.0) == \
+        replace(defaults, subcarrier_phase_offset_rad=0.0)
+
+
+@pytest.mark.parametrize("receiver, chain", [("light", "standard"),
+                                             ("standard", "light")])
 def test_a_setting_at_the_receivers_default_is_left_to_the_decoder(
-        defaults, short_capture, asked):
-    """A receiver running the light chain has another phase default.
-    Left alone, it is not said, and the standard chain decodes with
-    its own."""
-    light = replace(defaults, subcarrier_phase_offset_rad=(
-        defaults.subcarrier_phase_offset_rad - math.radians(0.7)))
-    assert dsp_arguments(light, light) == ()
-    decode_file(short_capture, 1, dsp_arguments(light, light))
-    assert asked == [defaults]
+        receiver, chain, defaults, light_defaults, short_capture,
+        short_light_capture, asked):
+    """The receiver runs one chain and the capture is decoded by the
+    other.  A setting the slot left at the receiver's default is not
+    said, and the decoding chain uses its own; one the slot changed
+    reaches it as changed."""
+    theirs = light_defaults if receiver == "light" else defaults
+    ours = light_defaults if chain == "light" else defaults
+    slot = replace(theirs, lr_high_max_gain=0.5)
+    flags = dsp_arguments(slot, theirs)
+    assert flags == ("--lr-high-max-gain=0.5",)
+    light = chain == "light"
+    decode_file(short_light_capture if light else short_capture, 1,
+                flags, light)
+    assert asked == [replace(ours, lr_high_max_gain=0.5)]
+    assert asked.chains == [chain]
 
 
 def test_what_the_command_line_cannot_say_is_not_said(defaults):
@@ -530,6 +591,67 @@ def test_only_dsp_flags_are_taken(flag, short_capture, asked):
     with pytest.raises(ValueError, match="not one of the DSP"):
         decode_file(short_capture, 1, [flag])
     assert asked == []
+
+
+# ----------------------------------------------------------------------
+# The light chain (P5 PR-F)
+# ----------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def light_capture(tmp_path_factory):
+    return write_light_iq_wav(tmp_path_factory.mktemp("light") / "l.wav")
+
+
+def test_a_light_capture_is_measured_as_the_command_line_measures_it(
+        monkeypatch, capsys, light_capture, asked, tmp_path):
+    """The report and the CSV row, against --light, and through the
+    light demodulator - with something in it to measure."""
+    csv = tmp_path / "cli.csv"
+    printed = _command_line(monkeypatch, capsys, "--iq-wav", light_capture,
+                            "--duration", "2", "--light",
+                            "--noise-csv", str(csv))
+    asked.clear()
+    measured = decode_file(light_capture, 2, light=True)
+
+    assert asked.chains == ["light"]
+    assert printed.splitlines()[:-1] == iq_report_lines(measured)
+    assert csv.read_text(encoding="utf-8") == (
+        IQ_CSV_HEADER + iq_csv_row(measured, "l.wav", 2))
+    assert measured.blend_mean > 0.5
+    assert measured.pilot_snr_median_db > 20
+    assert measured.noise_band_hz is not None
+
+
+def test_the_light_flag_is_for_measured_captures_only(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["quality_selftest", "--light"])
+    with pytest.raises(SystemExit, match="--light applies to --iq-wav"):
+        qs.main()
+
+
+def test_a_capture_is_refused_by_the_chain_it_was_not_made_for(
+        capture, light_capture, asked):
+    """The chain comes from the sidecar; a header that disagrees is not
+    the recording the row describes."""
+    with pytest.raises(ValueError, match="250 kHz, not 1024 kHz"):
+        decode_file(light_capture, 2)
+    with pytest.raises(ValueError, match="1024 kHz, not 250 kHz"):
+        decode_file(capture, 2, light=True)
+    assert asked == []
+
+
+def test_a_light_rate_recording_is_decoded_by_the_light_chain():
+    rec = _rec(sample_rate_hz=250000)
+    assert why_not(rec) == ""
+    assert is_light(rec) is True
+    assert is_light(_rec()) is False
+
+
+def test_the_child_decodes_a_light_capture_with_the_light_chain(
+        light_capture):
+    measured, why = _run(Job(light_capture, 2, (), True))
+    assert why == ""
+    assert iq_report_lines(measured) == iq_report_lines(
+        decode_file(light_capture, 2, light=True))
 
 
 def test_the_child_decodes_under_the_flags_it_is_given(capture, monkeypatch,

@@ -90,7 +90,7 @@ from fm_radio.quality_selftest import (
 from fm_radio.recording_meta import Recording, scan_recordings
 from fm_radio.redecode import (
     CANCELLED, WINDOW_DEFAULT_S, WINDOW_MAX_S, WINDOW_MIN_S, Job,
-    command_line, dsp_arguments, first_part_path, why_not,
+    command_line, dsp_arguments, first_part_path, is_light, why_not,
 )
 
 logger = logging.getLogger("fm_receiver.gui")
@@ -100,7 +100,8 @@ COLUMNS = ("Started", "Kind", "MHz", "Station", "Length", "Rate", "Gain",
            "Dropped", "Audio", "File")
 
 #: The re-decode table's columns, left to right.
-RESULT_COLUMNS = ("File", "MHz", "Station", "Window", "DSP", "Measured",
+RESULT_COLUMNS = ("File", "MHz", "Station", "Window", "Chain", "DSP",
+                  "Measured",
                   "Blend avg", "Pilot SNR p10", "Pilot SNR p50",
                   "L-R / L+R", "L/R corr", "Mid HF p10", "Side HF p10",
                   "HF penalty")
@@ -250,12 +251,13 @@ class Result:
 
     *dsp* is :data:`DEFAULTS` or the slot's name; *arguments* are the
     command line's flags the slot came to (none when it is at the
-    defaults).
+    defaults); *light* is whether the light chain decoded it.
     """
 
     def __init__(self, wav_path: str, frequency: str, station: str,
                  window_s: int, measured: IqMeasurement, *,
-                 dsp: str = DEFAULTS, arguments: tuple = ()) -> None:
+                 dsp: str = DEFAULTS, arguments: tuple = (),
+                 light: bool = False) -> None:
         self.wav_path = wav_path
         self.frequency = frequency
         self.station = station
@@ -263,6 +265,7 @@ class Result:
         self.measured = measured
         self.dsp = dsp
         self.arguments = tuple(arguments)
+        self.light = bool(light)
 
     @property
     def tag(self) -> str:
@@ -297,7 +300,7 @@ class Result:
         appends is :meth:`csv_row`."""
         words = ["python", "-m", "fm_radio.quality_selftest",
                  *command_line(self.wav_path, self.window_s,
-                               self.arguments),
+                               self.arguments, self.light),
                  "--noise-csv", "redecode.csv"]
         if self.dsp != DEFAULTS:
             words += ["--noise-tag", self.tag]
@@ -367,6 +370,7 @@ def result_cells(result: Result) -> tuple[str, ...]:
         result.frequency,
         result.station,
         f"{result.window_s} s",
+        "light" if result.light else "standard",
         result.dsp_text,
         f"{m.samples / AUDIO_OUTPUT_RATE:.1f} s",
         f"{m.blend_mean:.3f}",
@@ -532,7 +536,7 @@ class RecordingsTab(QWidget):
         #: The re-decode under way, what it is of, and whether it has
         #: been asked to stop.
         self._job: Redecode | None = None
-        self._decoding: tuple[str, str, str, int, str, tuple] | None = None
+        self._decoding: tuple | None = None
         self._cancelling = False
         #: Every re-decode that has finished, oldest first.
         self._results: list[Result] = []
@@ -760,7 +764,8 @@ class RecordingsTab(QWidget):
             self.decode_status.setText(
                 f"Could not decode under slot {dsp}: {e}")
             return
-        job = Redecode(Job(path, window, arguments))
+        light = is_light(rec)
+        job = Redecode(Job(path, window, arguments, light))
         job.finished.connect(self._redecode_ended)
         try:
             job.go()
@@ -775,7 +780,7 @@ class RecordingsTab(QWidget):
             return
         self._job = job
         self._decoding = (path, frequency_text(rec), station, window,
-                          dsp, arguments)
+                          dsp, arguments, light)
         self.window_box.setEnabled(False)
         self.dsp_box.setEnabled(False)
         under = "" if dsp == DEFAULTS else f" under slot {dsp}"
@@ -797,7 +802,8 @@ class RecordingsTab(QWidget):
                              self._dsp.defaults())
 
     def _redecode_ended(self, measured, why: str) -> None:
-        path, frequency, station, window, dsp, arguments = self._decoding
+        (path, frequency, station, window, dsp, arguments,
+         light) = self._decoding
         name = os.path.basename(path)
         # Asked to stop, it has stopped, whatever the answer says.  The
         # job can have answered before the Cancel reached it - the
@@ -817,7 +823,7 @@ class RecordingsTab(QWidget):
                 f"Re-decode of {name} failed: {why}")
         else:
             result = Result(path, frequency, station, window, measured,
-                            dsp=dsp, arguments=arguments)
+                            dsp=dsp, arguments=arguments, light=light)
             self._results.append(result)
             self._add_result(result)
             under = "" if dsp == DEFAULTS else f" under slot {dsp}"
