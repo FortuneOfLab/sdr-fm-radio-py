@@ -54,12 +54,13 @@ from fm_radio.constants import (
     COMPOSITE_RATE,
     SDR_BLOCK_SIZE,
     SDR_SAMPLE_RATE,
+    SDR_SAMPLE_RATE_LIGHT,
     SIDE_NR_ENABLE,
     STEREO_SUBCARRIER_PHASE_OFFSET_DEG,
     STEREO_SUBCARRIER_PHASE_OFFSET_DEG_PLL,
 )
 import fm_radio.demodulator as _demod_mod
-from fm_radio.demodulator import FMDemodulator
+from fm_radio.demodulator import FMDemodulator, FMDemodulatorLight
 from fm_radio.dsp_settings import (
     MAX_MONO_DELAY_SAMPLES, apply as dsp_apply, capture as dsp_capture,
 )
@@ -522,6 +523,7 @@ def _run_demod_from_iq(
 def _run_demod_diag_iq(
     iq: np.ndarray,
     fixed_blend: float | None = None,
+    light: bool = False,
     disable_iq_phase_correction: bool = False,
     mono_delay_samples: int | None = None,
     subcarrier_phase_offset_deg: float | None = None,
@@ -535,8 +537,15 @@ def _run_demod_diag_iq(
 
     Returns a dict with keys ``left``, ``right``, ``blend``, ``pilot_snr_db``
     where blend / pilot_snr_db are one entry per processed block.
+
+    *light* runs the light chain (``FMDemodulatorLight``, the one
+    ``fm_receiver.py --light`` runs) instead of the standard one; *iq*
+    must then be at ``SDR_SAMPLE_RATE_LIGHT``.  Both in stereo, and
+    both fed ``SDR_BLOCK_SIZE`` samples at a time, as the receiver
+    reads them in either mode.
     """
-    demod = FMDemodulator(stereo=True)
+    demod = (FMDemodulatorLight(stereo=True) if light
+             else FMDemodulator(stereo=True))
     _set_up_the_demod(
         demod,
         fixed_blend=fixed_blend,
@@ -1593,6 +1602,12 @@ def _parser() -> argparse.ArgumentParser:
         help="Save demodulated audio to WAV file (IQ WAV mode)",
     )
     p.add_argument(
+        "--light", action="store_true",
+        help="(IQ WAV mode) Decode with the light chain at 250 kHz, the "
+             "one fm_receiver.py --light runs, in stereo.  The WAV is "
+             "resampled to 250 kHz rather than to 1.024 MHz.",
+    )
+    p.add_argument(
         "--noise-diag", dest="noise_diag", action="store_true", default=True,
         help="(IQ WAV mode) Run stereo + forced-mono demod, report excess "
              "stereo noise (default: on)",
@@ -1730,11 +1745,18 @@ def _check_the_ranges(args) -> None:
             f"not {phase}.  NaN means the variant's default.")
 
 
+def _iq_rate(args) -> int:
+    """The rate an ``--iq-wav`` capture is resampled to: the one the
+    chain ``--light`` chooses runs at."""
+    return int(SDR_SAMPLE_RATE_LIGHT if args.light else SDR_SAMPLE_RATE)
+
+
 def _iq_demod_overrides(args) -> dict:
     """What an ``--iq-wav`` run asks the demodulator for.
 
     The parsed command line turned into :func:`_run_demod_diag_iq`'s
-    keywords: where an argument spells "not asked for" as NaN or as a
+    keywords - which chain (``--light``), and the nine DSP overrides:
+    where an argument spells "not asked for" as NaN or as a
     negative number, that becomes None; ``--side-nr`` left out is
     already None, and ``--disable-iq-phase-correction`` left out is
     False.  Call :func:`_check_the_ranges` on *args* first.
@@ -1750,6 +1772,7 @@ def _iq_demod_overrides(args) -> dict:
         return None if math.isnan(value) else value
 
     return dict(
+        light=bool(args.light),
         fixed_blend=(None if float(args.fixed_blend) < 0.0
                      else float(args.fixed_blend)),
         disable_iq_phase_correction=bool(args.disable_iq_phase_correction),
@@ -1778,6 +1801,11 @@ def main() -> None:
     fixed_blend = None if args.fixed_blend < 0.0 else float(args.fixed_blend)
 
     _check_the_ranges(args)
+    if args.light and not args.iq_wav:
+        raise SystemExit(
+            "--light applies to --iq-wav only: it chooses the chain a "
+            "measured capture is decoded with.  The synthetic paths "
+            "build their signal at the standard rate.")
 
     # Reject configurations that would produce zero post-warmup samples.
     # ``evaluate_quality`` and the IQ-WAV diagnostics path otherwise emit
@@ -1825,7 +1853,7 @@ def main() -> None:
                 level=logging.INFO,
                 format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
             )
-        iq = _load_iq_wav(args.iq_wav, int(SDR_SAMPLE_RATE), float(args.duration))
+        iq = _load_iq_wav(args.iq_wav, _iq_rate(args), float(args.duration))
         stereo_diag = _run_demod_diag_iq(iq, **_iq_demod_overrides(args))
         measured = measure_demodulated(
             stereo_diag,

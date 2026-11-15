@@ -29,7 +29,16 @@ What ``quality_selftest --iq-wav FILE --duration SECONDS`` measures,
 worked out in a process of its own and handed back as an
 :class:`~fm_radio.quality_selftest.IqMeasurement` - with every other
 option at its default, or with the command line's flags for some of the
-nine DSP settings added (see :func:`dsp_arguments`).
+nine DSP settings added (see :func:`dsp_arguments`), and with
+``--light`` for a capture made at the light chain's 250 kHz.
+
+**A capture is decoded by the chain that made it.**  The rate in the
+sidecar says which: 1.024 Msps is the standard chain's, 250 kHz the
+light chain's (``fm_receiver.py --light``), and nothing else is either.
+The light one is decoded with ``quality_selftest --light`` - the light
+demodulator, at 250 kHz, in stereo, as ``stereo on`` runs it - and not
+resampled up to the standard chain, which would measure it through a
+chain the receiver never ran it through.
 
 **A process, not a thread.**  The demodulator is Python between its
 numpy calls, and a second one running in the receiver's process takes
@@ -45,7 +54,8 @@ about 5 s before it can answer - 4.8-5.6 s for one that does nothing,
 
 **The window is the start of the first part.**  A recording is split
 into parts only when one reaches ``IQ_RECORD_ROTATE_THRESHOLD_BYTES``,
-about 16 minutes at 1.024 Msps, so a window of at most
+about 16 minutes at 1.024 Msps and four times that at 250 kHz, so a
+window of at most
 :data:`WINDOW_MAX_S` from the start never reaches a second part.  The
 window is normalised to its own peak, as the command line does: the
 same seconds of a recording measure the same whichever tool asks, but a
@@ -60,10 +70,11 @@ and the command line given the same flags cannot differ in what they
 ask the demodulator for, and the flags are a command anyone can run to
 get the same row.  Only the settings that differ from the receiver's
 defaults are said: a setting left at its default is left to the
-decoding demodulator's own default, which is the standard chain's -
-the one a 1.024 Msps capture is decoded with - even when the receiver
-is running the light chain, whose subcarrier phase default is not the
-same.
+decoding demodulator's own default - that of the chain the capture is
+decoded with, whichever chain the receiver is running.  The two chains'
+subcarrier phase defaults are not the same (85.0 against 84.3 degrees,
+the hardware trim included), and a phase left alone must not carry one
+chain's default into the other.
 """
 
 from __future__ import annotations
@@ -79,7 +90,7 @@ from typing import Callable, Sequence
 from scipy.io import wavfile
 
 from fm_radio import quality_selftest as qs
-from fm_radio.constants import SDR_SAMPLE_RATE
+from fm_radio.constants import SDR_SAMPLE_RATE, SDR_SAMPLE_RATE_LIGHT
 from fm_radio.dsp_settings import DspSettings
 from fm_radio.recording_meta import Recording
 
@@ -91,6 +102,10 @@ WINDOW_MAX_S = 120
 #: The shortest.  Above the command line's warmup (0.8 s), which it
 #: refuses to be at or under.
 WINDOW_MIN_S = 1
+
+#: The rates a capture can be re-decoded at, and whether each is the
+#: light chain's.
+LIGHT_AT = {int(SDR_SAMPLE_RATE): False, int(SDR_SAMPLE_RATE_LIGHT): True}
 
 #: What :meth:`Job.cancel` reports.
 CANCELLED = "Cancelled."
@@ -177,11 +192,13 @@ def dsp_arguments(settings: DspSettings,
 
 
 def command_line(wav_path: str, window_s: float,
-                 arguments: Sequence[str] = ()) -> list[str]:
+                 arguments: Sequence[str] = (),
+                 light: bool = False) -> list[str]:
     """The ``quality_selftest`` arguments that measure what
-    :func:`decode_file` does with the same three things."""
+    :func:`decode_file` does with the same four things."""
+    chain = ["--light"] if light else []
     return ["--iq-wav", wav_path, "--duration", repr(float(window_s)),
-            *arguments]
+            *chain, *arguments]
 
 
 def why_not(rec: Recording) -> str:
@@ -190,7 +207,8 @@ def why_not(rec: Recording) -> str:
     In the order the questions settle it: only an IQ capture has
     anything to demodulate; only a complete one has all its parts; only
     one whose headers measured some audio has a window to take; and
-    only the standard rate is what the demodulator was measured at.
+    only a rate one of the two chains runs at says which chain to
+    decode it with (see :func:`is_light`).
     """
     if rec.kind != "iq":
         return "Only IQ recordings can be re-decoded."
@@ -202,10 +220,19 @@ def why_not(rec: Recording) -> str:
         return "This recording holds no samples."
     if rec.sample_rate_hz is None:
         return "The sidecar does not say what rate it was recorded at."
-    if rec.sample_rate_hz != int(SDR_SAMPLE_RATE):
+    if rec.sample_rate_hz not in LIGHT_AT:
         return (f"Recorded at {rec.sample_rate_hz / 1e3:g} kHz; only "
-                f"{SDR_SAMPLE_RATE / 1e3:g} kHz IQ can be re-decoded yet.")
+                f"{SDR_SAMPLE_RATE / 1e3:g} kHz (standard) and "
+                f"{SDR_SAMPLE_RATE_LIGHT / 1e3:g} kHz (light) IQ can be "
+                f"re-decoded.")
     return ""
+
+
+def is_light(rec: Recording) -> bool:
+    """Whether *rec* is decoded with the light chain.  Ask
+    :func:`why_not` first: a rate neither chain runs at raises KeyError.
+    """
+    return LIGHT_AT[rec.sample_rate_hz]
 
 
 def first_part_path(rec: Recording) -> str:
@@ -220,7 +247,7 @@ def first_part_path(rec: Recording) -> str:
 
 
 def decode_file(wav_path: str, window_s: float,
-                arguments: Sequence[str] = ()):
+                arguments: Sequence[str] = (), light: bool = False):
     """Measure the first *window_s* seconds of an IQ WAV.
 
     The command line's ``--iq-wav`` path given ``--duration`` and
@@ -229,13 +256,15 @@ def decode_file(wav_path: str, window_s: float,
     own range check, turned into the demodulator's overrides by its own
     function, and measured with the warmup and noise band it defaults
     to, so that the two cannot drift apart.  With no arguments, the
-    demodulator runs with none of its settings overridden.
+    demodulator runs with none of its settings overridden.  *light*
+    adds ``--light``: the light chain, at 250 kHz.
 
-    The file's own rate is checked first.  The command line resamples
-    whatever it is given to the standard rate; a file whose sidecar
-    says 1.024 Msps and whose header says otherwise is not what the row
-    in the list claims it is, and a measurement of it would be filed
-    under the wrong recording.
+    The file's own rate is checked before it is read: it must be the
+    rate of the chain asked for, which the caller takes from the
+    sidecar.  The command line resamples whatever it is given to its
+    chain's rate; a file whose sidecar says one rate and whose header
+    says another is not what the row in the list claims it is, and a
+    measurement of it would be filed under the wrong recording.
 
     Raises:
         ValueError: for an argument that is not a DSP flag, and for one
@@ -250,7 +279,7 @@ def decode_file(wav_path: str, window_s: float,
                 f"{argument!r} is not one of the DSP settings' flags")
     try:
         args = qs._parser().parse_args(
-            command_line(wav_path, window_s, arguments))
+            command_line(wav_path, window_s, arguments, light))
         qs._check_the_ranges(args)
     except SystemExit as refused:
         if isinstance(refused.code, str):
@@ -258,13 +287,13 @@ def decode_file(wav_path: str, window_s: float,
         raise ValueError(
             "the command line does not take " + " ".join(arguments)
         ) from None
+    rate = qs._iq_rate(args)
     fs, _ = wavfile.read(wav_path, mmap=True)
-    if int(fs) != int(SDR_SAMPLE_RATE):
+    if int(fs) != rate:
         raise ValueError(
             f"{os.path.basename(wav_path)} is {fs / 1e3:g} kHz, "
-            f"not {SDR_SAMPLE_RATE / 1e3:g} kHz")
-    iq = qs._load_iq_wav(wav_path, int(SDR_SAMPLE_RATE),
-                         float(args.duration))
+            f"not {rate / 1e3:g} kHz")
+    iq = qs._load_iq_wav(wav_path, rate, float(args.duration))
     demodulated = qs._run_demod_diag_iq(iq, **qs._iq_demod_overrides(args))
     return qs.measure_demodulated(
         demodulated,
@@ -276,10 +305,11 @@ def decode_file(wav_path: str, window_s: float,
 
 
 def _decode_in_child(send, wav_path: str, window_s: float,
-                     arguments: Sequence[str] = ()) -> None:
+                     arguments: Sequence[str] = (),
+                     light: bool = False) -> None:
     """The child process: decode, and send back one answer either way."""
     try:
-        measured = decode_file(wav_path, window_s, arguments)
+        measured = decode_file(wav_path, window_s, arguments, light)
     except Exception as e:
         send.send(("failed", f"{type(e).__name__}: {e}"))
     else:
@@ -302,18 +332,19 @@ class Job:
     normally ends it on the way out even if nobody cancelled it; one
     that is killed does not.
 
-    *arguments* are the DSP flags to decode under (see
-    :func:`decode_file`).  *target* is the child's entry point, for
-    tests; it is called as ``target(send, wav_path, window_s,
-    arguments)`` and must send one message.
+    *arguments* are the DSP flags to decode under and *light* the
+    chain (see :func:`decode_file`).  *target* is the child's entry
+    point, for tests; it is called as ``target(send, wav_path,
+    window_s, arguments, light)`` and must send one message.
     """
 
     def __init__(self, wav_path: str, window_s: float,
-                 arguments: Sequence[str] = (), *,
+                 arguments: Sequence[str] = (), light: bool = False, *,
                  target: Callable | None = None) -> None:
         self.wav_path = wav_path
         self.window_s = float(window_s)
         self.arguments = tuple(arguments)
+        self.light = bool(light)
         self._target = target or _decode_in_child
         self._context = multiprocessing.get_context("spawn")
         self._process = None
@@ -334,7 +365,8 @@ class Job:
         self._receive = receive
         self._process = self._context.Process(
             target=self._target,
-            args=(send, self.wav_path, self.window_s, self.arguments),
+            args=(send, self.wav_path, self.window_s, self.arguments,
+                  self.light),
             name="Redecode", daemon=True)
         try:
             self._process.start()

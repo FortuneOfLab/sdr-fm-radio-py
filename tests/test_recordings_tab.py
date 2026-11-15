@@ -560,10 +560,11 @@ class StandInJob:
 
     made: list = []
 
-    def __init__(self, wav_path, window_s, arguments=()):
+    def __init__(self, wav_path, window_s, arguments=(), light=False):
         self.wav_path = wav_path
         self.window_s = window_s
         self.arguments = arguments
+        self.light = light
         self.cancelled = False
         self.on_done = None
         self._thread = None
@@ -656,8 +657,7 @@ def test_the_button_says_whether_the_chosen_one_can_be(make_tab, qt_app,
     choose(tab, "iq.json")
     assert tab.redecode_button.isEnabled() is True
     choose(tab, "light.json")
-    assert tab.redecode_button.isEnabled() is False
-    assert "250 kHz" in tab.redecode_button.toolTip()
+    assert tab.redecode_button.isEnabled() is True
     choose(tab, "audio.json")
     assert tab.redecode_button.isEnabled() is False
     assert "Only IQ" in tab.redecode_button.toolTip()
@@ -709,7 +709,8 @@ def test_a_finished_re_decode_is_a_row_with_the_report_behind_it(
 
     assert results(tab) == [{
         "File": "iq.wav", "MHz": "80.0", "Station": "TOKYO FM",
-        "Window": "30 s", "DSP": "defaults", "Measured": "29.2 s",
+        "Window": "30 s", "Chain": "standard", "DSP": "defaults",
+        "Measured": "29.2 s",
         "Blend avg": "0.877", "Pilot SNR p10": "24.13 dB",
         "Pilot SNR p50": "28.50 dB", "L-R / L+R": "0.3333",
         "L/R corr": "0.9012", "Mid HF p10": "-80.00 dB",
@@ -819,8 +820,8 @@ def test_a_reload_while_decoding_keeps_the_answer_with_its_recording(
     decoded(tab, qt_app)
 
     (row,) = results(tab)
-    assert (row["File"], row["MHz"], row["Station"]) == (
-        "iq.wav", "80.0", "TOKYO FM")
+    assert (row["File"], row["MHz"], row["Station"], row["Chain"]) == (
+        "iq.wav", "80.0", "TOKYO FM", "standard")
 
 
 def test_save_csv_writes_every_re_decode_in_the_command_lines_format(
@@ -989,8 +990,8 @@ def test_a_re_decode_that_outlives_the_tab_is_let_go_of_where_it_was_made(
                         lambda args: raised.append(args))
     freed_on = []
     with Listener() as listener:
-        monkeypatch.setattr(recordings_tab, "Job", lambda path, window, arguments: Job(
-            listener.address, window, arguments,
+        monkeypatch.setattr(recordings_tab, "Job", lambda path, window, arguments, light: Job(
+            listener.address, window, arguments, light,
             target=redecode_children.answer_when_told))
         tab = RecordingsTab(Namer(), str(tmp_path))
         tab.reload()
@@ -1295,3 +1296,89 @@ def test_powershell_quoting_leaves_nothing_bare_that_it_would_read():
     assert recordings_tab.for_powershell(words) == (
         "python --iq-wav 'C:\\Radio&A\\x.wav' 'a;b' '$x' 'it''s' "
         "'\u2019\u2019' --fixed-blend=-0.5 '' '@x'")
+
+
+# ----------------------------------------------------------------------
+# A light-mode capture (P5 PR-F)
+# ----------------------------------------------------------------------
+
+def test_a_light_capture_goes_to_the_light_chain(make_tab, qt_app, tmp_path,
+                                                 stand_in):
+    """The chain is the sidecar's rate, and the row and its command say
+    which: a 1.024 Msps capture to the standard chain, 250 kHz to the
+    light one."""
+    three_kinds(tmp_path)
+    tab = make_tab()
+    tab.reload()
+    finish(tab, qt_app)
+    for name in ("iq.json", "light.json"):
+        choose(tab, name)
+        tab.redecode_button.click()
+        stand_in[-1].answer(_MEASURED)
+        decoded(tab, qt_app)
+
+    assert [job.light for job in stand_in] == [False, True]
+    assert [(r["File"], r["Chain"]) for r in results(tab)] == [
+        ("iq.wav", "standard"), ("light.wav", "light")]
+    standard, light = tab._results
+    assert "--light" not in standard.command_words()
+    assert light.command_words()[3:8] == [
+        "--iq-wav", str(tmp_path / "light.wav"), "--duration", "30.0",
+        "--light"]
+
+
+def _a_real_light_capture(tmp_path, seconds=3.0):
+    from iq_capture import write_light_iq_wav
+    write_light_iq_wav(tmp_path / "lite.wav", seconds)
+    _sidecar(tmp_path, "lite", ["lite.wav"], freq=80.0e6,
+             sample_rate_hz=250000)
+
+
+def test_a_light_capture_through_the_tab_saves_what_the_command_line_writes(
+        make_tab, qt_app, tmp_path, monkeypatch, capsys):
+    """Defaults, then slot B, on a 250 kHz capture, from the button to
+    the saved file: against the command line with --light written out
+    by hand, and against each row's tooltip command."""
+    import fm_radio.quality_selftest as qs
+
+    _a_real_light_capture(tmp_path)
+    tab = make_tab(dsp=StandInDsp(
+        B=replace(_DEFAULTS, force_blend_factor=0.0)))
+    tab.reload()
+    finish(tab, qt_app)
+    choose(tab, "lite.json")
+    tab.window_box.setValue(2)
+    for which in ("defaults", "B"):
+        choose_dsp(tab, which)
+        tab.redecode_button.click()
+        tab._job.wait()
+        decoded(tab, qt_app)
+    assert [(r["Chain"], r["DSP"]) for r in results(tab)] == [
+        ("light", "defaults"), ("light", "B")], tab.decode_status.text()
+    assert tab._results[0].measured.blend_mean > 0.5
+    assert tab._results[1].measured.blend_mean == 0.0
+
+    saved = tmp_path / "gui.csv"
+    monkeypatch.setattr(recordings_tab.QFileDialog, "getSaveFileName",
+                        lambda *a: (str(saved), ""))
+    tab.save_button.click()
+
+    written = tmp_path / "cli.csv"
+    wav = str(tmp_path / "lite.wav")
+    for flags in ([], ["--fixed-blend=0.0",
+                       "--noise-tag", "lite.wav slot B --fixed-blend=0.0"]):
+        monkeypatch.setattr(sys, "argv", [
+            "quality_selftest", "--iq-wav", wav, "--duration", "2",
+            "--light", *flags, "--noise-csv", str(written)])
+        qs.main()
+    capsys.readouterr()
+    assert saved.read_bytes() == written.read_bytes()
+
+    pasted = tmp_path / "pasted"
+    pasted.mkdir()
+    monkeypatch.chdir(pasted)
+    for result in tab._results:
+        monkeypatch.setattr(sys, "argv", result.command_words()[2:])
+        qs.main()
+    capsys.readouterr()
+    assert saved.read_bytes() == (pasted / "redecode.csv").read_bytes()
