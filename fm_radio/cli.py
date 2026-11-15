@@ -26,7 +26,7 @@
 """Command line interface for the FM receiver.
 
 Uses a dispatch-table pattern: exact-match commands are looked up in a
-dictionary, while prefix-match commands (``agc``, ``gain``) and numeric
+dictionary, while prefix-match commands (``agc``, ``gain``, ``vol``) and numeric
 input (station number / frequency) are handled via fallback logic.
 """
 
@@ -39,7 +39,7 @@ import threading
 from typing import TYPE_CHECKING, Callable
 
 from fm_radio.console_input import ConsoleReader, console_reader
-from fm_radio.constants import RECORDINGS_DIR
+from fm_radio.constants import RECORDINGS_DIR, VOLUME_STEP_PERCENT
 
 if TYPE_CHECKING:
     from fm_radio.controller import FMReceiverController
@@ -217,6 +217,10 @@ class CommandLineInterface(threading.Thread):
             return self._cmd_list(cmd)
         if verb == 'search':
             return self._cmd_search(cmd)
+        if verb in ('vol', 'volume'):
+            return self._cmd_volume(cmd.lower())
+        if verb in ('mute', 'unmute'):
+            return self._cmd_mute(cmd.lower())
 
         # 3. Numeric / frequency input -> tune
         return self._cmd_tune(cmd)
@@ -240,6 +244,9 @@ class CommandLineInterface(threading.Thread):
         print("  'agc on' -> enable auto gain control")
         print("  'agc off' -> disable auto gain (manual mode)")
         print("  'gain <value>' -> set manual gain in dB (when auto gain is off)")
+        print("  'vol <0-100>', 'vol +' or 'vol -' -> listening volume "
+              "(recordings stay at full level)")
+        print("  'mute' / 'unmute' -> silence the output and bring it back")
         print("  <station_num> or <freq_MHz> -> tune")
         print("  'q' -> quit")
 
@@ -413,6 +420,63 @@ class CommandLineInterface(threading.Thread):
         else:
             print("Invalid gain command format.")
         return True
+
+    def _cmd_volume(self, cmd: str) -> bool:
+        """Handle 'vol', 'vol <0-100>', 'vol +' and 'vol -'.
+
+        The command line reads lines, not keys, so a step is a short
+        command rather than a key press: 'vol +' and 'vol -' move it by
+        VOLUME_STEP_PERCENT, which is the nearest a line can get.
+        """
+        tokens = cmd.split()
+        if len(tokens) == 1:
+            self._say_the_volume()
+            return True
+        if len(tokens) != 2:
+            print("Usage: vol <0-100>, vol + or vol -")
+            return True
+        argument = tokens[1].rstrip('%')
+        if argument in ('+', '-'):
+            step = VOLUME_STEP_PERCENT if argument == '+' else -VOLUME_STEP_PERCENT
+            wanted = self.controller.get_volume() + step
+        else:
+            try:
+                wanted = float(argument)
+            except ValueError:
+                print("Usage: vol <0-100>, vol + or vol -")
+                return True
+            if not 0.0 <= wanted <= 100.0:
+                # Said rather than clamped: 'vol 500' is more likely a
+                # typo than a wish for full level.
+                print("The volume goes from 0 to 100.")
+                return True
+        self.controller.set_volume(wanted)
+        self._say_the_volume()
+        return True
+
+    def _cmd_mute(self, cmd: str) -> bool:
+        """Handle 'mute' (a toggle), 'mute on', 'mute off' and 'unmute'."""
+        tokens = cmd.split()
+        if tokens == ['unmute'] or tokens == ['mute', 'off']:
+            wanted = False
+        elif tokens == ['mute', 'on']:
+            wanted = True
+        elif tokens == ['mute']:
+            wanted = not self.controller.is_muted()
+        else:
+            print("Usage: mute, mute on, mute off or unmute")
+            return True
+        self.controller.set_muted(wanted)
+        self._say_the_volume()
+        return True
+
+    def _say_the_volume(self) -> None:
+        """One line for where the volume stands, muted or not."""
+        volume = self.controller.get_volume()
+        if self.controller.is_muted():
+            print(f"Muted (volume {volume}% when unmuted).")
+        else:
+            print(f"Volume: {volume}%")
 
     def _cmd_tune(self, cmd: str) -> bool:
         """Handle station number or frequency input — tune to station."""

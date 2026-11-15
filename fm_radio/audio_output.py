@@ -48,7 +48,33 @@ from fm_radio.constants import (
     AUDIO_CARD_BUFFER_MAX_SEC,
     RECORD_SAMPLE_WIDTH, RECORD_MAX_INT16,
     RECORD_QUEUE_MAXSIZE, AUDIO_RECORD_ROTATE_THRESHOLD_BYTES,
+    VOLUME_MIN_PERCENT, VOLUME_MAX_PERCENT, VOLUME_DEFAULT_PERCENT,
 )
+
+
+def clamp_volume(percent: float) -> int:
+    """A volume as the output takes it: a whole percent, 0 to 100.
+
+    Raises:
+        ValueError: *percent* is not a number (NaN included).
+    """
+    value = float(percent)
+    if value != value:
+        raise ValueError("volume is not a number")
+    return int(round(min(max(value, VOLUME_MIN_PERCENT),
+                         VOLUME_MAX_PERCENT)))
+
+
+def volume_gain(percent: int) -> float:
+    """The linear gain a volume in percent stands for.
+
+    Cubed rather than straight: loudness goes roughly with the log of
+    the level, and a straight line puts nearly all of the audible range
+    in the bottom fifth of the travel.  The cube is close to a 60 dB
+    log taper over the useful part (50 % is -18 dB, 20 % is -42 dB)
+    and, unlike a log taper, reaches true silence at 0.
+    """
+    return (clamp_volume(percent) / VOLUME_MAX_PERCENT) ** 3
 
 
 # Sentinel placed in the recording queue to wake the worker for shutdown.
@@ -203,6 +229,37 @@ class AudioOutput(AudioOutputInterface):
         # included.  Written by the processing thread alone.
         self._refill_blocks: int = 0
         self._refill_last_logged: float = 0.0
+        # Listening volume.  The percent is what was asked for; the gain
+        # is what the callback is to reach, written by set_volume on
+        # whatever thread asked and read once per callback.  One float
+        # rebinding, so no lock: a stale read is one callback late.
+        # The callback alone writes the gain it has actually reached, and
+        # ramps from that to the wanted one over a single buffer, so a
+        # change is never a step in the waveform - a step is a click.
+        self._volume_percent: int = VOLUME_DEFAULT_PERCENT
+        # Muting is a state of its own rather than a volume of 0, so the
+        # volume is still there to come back to.
+        self._muted: bool = False
+        self._gain_wanted: float = volume_gain(VOLUME_DEFAULT_PERCENT)
+        self._gain_applied: float = self._gain_wanted
+        # Taken by set_volume and set_muted, and by nothing else: the
+        # three fields above are one state, and two setters interleaving
+        # left it muted by its own account with a non-zero gain.  The
+        # callback reads _gain_wanted alone, one load, and never takes
+        # this - it holds a lock for nothing on the audio path.
+        self._volume_lock: threading.Lock = threading.Lock()
+        # Whether the last thing the card was handed went past the
+        # volume: a refill's silence, the silence of a failed callback,
+        # or nothing at all because the stream was not running.  The
+        # next buffer that goes through the volume then starts at it
+        # rather than ramping from _gain_applied, which describes audio
+        # that is no longer the last thing heard.  One rule at the one
+        # place the volume is applied, rather than a fix-up at each way
+        # out of a silence - there are more of those than it looks, and
+        # missing one let a muted station through.  Written by the
+        # callback, and by _play_from_now_on while the stream is
+        # stopped; True to begin with, because nothing has been played.
+        self._after_silence: bool = True
         # Set for as long as a recording is being closed: the flag above
         # goes down first and the file stays open for the flush, the
         # worker handshake, the close and the sidecar - up to fifteen
@@ -300,6 +357,7 @@ class AudioOutput(AudioOutputInterface):
                     break
 
             if self._refilling and self._still_refilling(frame_count):
+                self._after_silence = True
                 return (np.zeros(requested_samples, dtype=np.float32).tobytes(),
                         pyaudio.paContinue)
 
@@ -345,12 +403,101 @@ class AudioOutput(AudioOutputInterface):
                         "the last of these)",
                         requested_samples - filled, requested_samples, since)
 
+            self._turn_to_the_volume(out, frame_count)
+            if filled < requested_samples:
+                # The padding went through the volume, but zeros scaled
+                # are zeros: this buffer ends in silence like any other,
+                # and the next one must not ramp from a gain nobody is
+                # hearing.  Set after the volume, not before - the flag
+                # is for the buffer after this, and this one's audible
+                # head follows heard audio and ramps as usual.
+                self._after_silence = True
             return (out.tobytes(), pyaudio.paContinue)
         except Exception as e:
             self.logger.error(f"Error in audio callback: {e}", exc_info=True)
             # Return silence to avoid crashing the audio stream
+            self._after_silence = True
             silence = np.zeros(frame_count * AUDIO_CHANNELS, dtype=np.float32)
             return (silence.tobytes(), pyaudio.paContinue)
+
+    def _turn_to_the_volume(self, out: np.ndarray, frame_count: int) -> None:
+        """Scale one callback's interleaved buffer, in place, to the volume.
+
+        Here rather than where blocks are queued, for two reasons.  It
+        is heard at once: a block queued now plays behind the cushion,
+        a hundred-odd milliseconds later, and a volume control that
+        lags its slider by that much feels broken.  And it is after
+        the recording has taken its copy, so a recording is the
+        broadcast and not the listener's setting.
+
+        At unity, which is the default, this is a comparison and
+        nothing else.  Otherwise it is one multiply over the buffer -
+        2048 floats - and a ramp only on the callback after a change.
+        """
+        wanted = self._gain_wanted
+        if self._after_silence:
+            # Coming out of a silence the volume never saw: there is no
+            # level in the air to ramp from, so start at the volume.
+            self._after_silence = False
+            self._gain_applied = wanted
+        was = self._gain_applied
+        if wanted == was:
+            if wanted != 1.0:
+                out *= wanted
+            return
+        # Frame by frame from where the last buffer ended to where this
+        # one should, reaching it on the last frame.
+        steps = np.arange(1, frame_count + 1, dtype=np.float32) / frame_count
+        ramp = was + (wanted - was) * steps
+        out.reshape(frame_count, AUDIO_CHANNELS)[:] *= ramp[:, None]
+        self._gain_applied = wanted
+
+    def set_volume(self, percent: float) -> int:
+        """Set the listening volume; returns what it was set to.
+
+        Takes effect on the next callback, ramped over that buffer.
+        Recording is not affected.  Safe from any thread, and does no
+        more than two assignments, so it is safe from a slider that
+        sends one per pixel.
+
+        Args:
+            percent: 0 (silence) to 100 (full level).  Outside that is
+                clamped; not a number is refused.
+
+        Raises:
+            ValueError: *percent* is not a number.
+        """
+        percent = clamp_volume(percent)
+        with self._volume_lock:
+            self._volume_percent = percent
+            # Setting a volume is asking to hear it: a muted output that
+            # took a new volume and stayed silent would look like a knob
+            # that does nothing.
+            self._muted = False
+            self._gain_wanted = volume_gain(percent)
+        return percent
+
+    @property
+    def volume(self) -> int:
+        """The listening volume in percent; see :meth:`set_volume`."""
+        return self._volume_percent
+
+    def set_muted(self, muted: bool) -> bool:
+        """Silence the output, or bring it back at the volume it had.
+
+        Ramped like any other change, so neither way is a click.
+        Recording is not affected.  Returns the new state.
+        """
+        with self._volume_lock:
+            self._muted = bool(muted)
+            self._gain_wanted = (0.0 if self._muted
+                                 else volume_gain(self._volume_percent))
+            return self._muted
+
+    @property
+    def muted(self) -> bool:
+        """Whether the output is muted; see :meth:`set_muted`."""
+        return self._muted
 
     @property
     def closed(self) -> bool:
@@ -630,6 +777,11 @@ class AudioOutput(AudioOutputInterface):
             if self._playing or self._closed.is_set() or self._holds:
                 return
             try:
+                # Nothing has been played since the card stopped - or
+                # ever - so there is no level to ramp from, and the
+                # first frame is at the volume.  Safe to write: the
+                # callback does not run on a stream that is not started.
+                self._after_silence = True
                 self.stream.start_stream()
             except Exception as e:             # pragma: no cover - guard
                 self.logger.error("Could not start the audio stream: %s", e,

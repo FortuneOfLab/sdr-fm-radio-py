@@ -76,6 +76,9 @@ class FakeController:
         self.frequency = 80.0e6
         self.gain = 28.0
         self.auto_gain = True
+        # The listening volume, in percent, as the real one keeps it.
+        self.volume = 100
+        self.muted = False
         self.recording = False
         self.iq_recording = False
         # Stopped but still being written, as the real one is between
@@ -133,6 +136,25 @@ class FakeController:
 
     def is_manual_gain(self):
         return not self.auto_gain
+
+    def get_volume(self):
+        return self.volume
+
+    def set_volume(self, percent):
+        # Clamped as the real one clamps, so the window shows what the
+        # receiver settled on rather than what it asked for.
+        self.calls.append(("set_volume", percent))
+        self.volume = int(round(min(max(float(percent), 0.0), 100.0)))
+        self.muted = False          # as the real one: a volume unmutes
+        return self.volume
+
+    def is_muted(self):
+        return self.muted
+
+    def set_muted(self, muted):
+        self.calls.append(("set_muted", muted))
+        self.muted = bool(muted)
+        return self.muted
 
     def is_recording(self):
         return self.recording
@@ -3013,3 +3035,186 @@ def test_choosing_an_area_names_the_scan_list_again(window, monkeypatch,
     choose_the_area(view, "関東")
 
     assert "TOKYO FM" in view._found.itemText(1)
+
+
+# ----------------------------------------------------------------------
+# The volume
+# ----------------------------------------------------------------------
+
+def test_the_volume_slider_starts_where_the_receiver_is(window):
+    controller = FakeController(snapshot())
+    controller.volume = 35
+    view, _ = window(controller)
+    assert view._volume.value() == 35
+    assert view._volume_value.text() == "35%"
+    assert ("set_volume", 35) not in controller.calls, (
+        "reading the volume back should not set it")
+
+
+def test_moving_the_volume_sets_the_level_the_card_plays(window,
+                                                         audio_output):
+    """From the slider to the samples, through the facade.
+
+    The stand-in hands the volume to a real output, so what is
+    checked is the level coming out of the PortAudio callback, not
+    that a method was called.
+    """
+    import numpy as np
+
+    class Wired(FakeController):
+        def get_volume(self):
+            return audio_output.volume
+
+        def set_volume(self, percent):
+            self.calls.append(("set_volume", percent))
+            return audio_output.set_volume(percent)
+
+    view, controller = window(Wired(snapshot()))
+    view._volume.setValue(50)
+    assert ("set_volume", 50) in controller.calls
+    assert view._volume_value.text() == "50%"
+
+    frames = 1024
+    tone = (0.5 * np.sin(2 * np.pi * 1000.0 * np.arange(frames) / 48000.0)
+            ).astype(np.float32)
+    for _ in range(2):                  # the change ramps over the first
+        audio_output.enqueue_audio(tone, tone)
+        out, _ = audio_output.callback(None, frames, {}, 0)
+    played = np.frombuffer(out, dtype=np.float32)[0::2]
+    ratio_db = 20 * np.log10(np.sqrt(np.mean(played.astype(np.float64) ** 2))
+                             / np.sqrt(np.mean(tone.astype(np.float64) ** 2)))
+    assert ratio_db == pytest.approx(-18.06, abs=0.01)
+
+
+def test_the_volume_is_applied_during_a_drag(window):
+    """Unlike the gain: nothing here is slow enough to wait for."""
+    view, controller = window()
+    view._volume.setSliderDown(True)
+    view._volume.setValue(70)
+    assert controller.volume == 70
+    view._volume.setSliderDown(False)
+
+
+def test_the_volume_stays_usable_through_a_sweep_and_a_lost_device(window):
+    """It changes nothing the sweep or the dead device cares about."""
+    controller = FakeController(snapshot())
+    view, _ = window(controller)
+    controller.device_failure = "gone"
+    view._say_what_can_be_used()
+    assert view._volume.isEnabled()
+
+
+def test_the_volume_figure_does_not_move_anything_as_it_changes(window):
+    view, _ = window()
+    widths = set()
+    for value in (0, 9, 10, 99, 100):
+        view._volume.setValue(value)
+        widths.add(view._volume_value.width())
+        widths.add(view._volume_value.minimumSizeHint().width())
+    assert len(widths) == 1, widths
+
+
+def test_the_recording_line_does_not_push_the_volume_about(window):
+    view, controller = window()
+    view.show()
+    layout = view._volume.parentWidget().layout()
+    layout.activate()
+    where = view._volume.geometry()
+    controller.recording = True
+    controller.iq_recording = True
+    controller.finishing_audio = True
+    view._show_recording()
+    layout.activate()
+    assert view._recording_status.text()
+    assert view._volume.geometry() == where
+
+
+def test_the_volume_does_not_widen_the_window(window):
+    """The tuner row sets the width; the row the volume joined is short of it.
+
+    True offscreen as well, but it only means something with real
+    glyph widths: run with QT_QPA_PLATFORM=windows.
+    """
+    view, _ = window()
+    audio_row = view._volume.parentWidget()
+    tuner_row = view._frequency.parentWidget()
+    assert (audio_row.minimumSizeHint().width()
+            < tuner_row.minimumSizeHint().width())
+
+
+def test_the_volume_figure_has_room_for_its_widest(window):
+    """Skipped offscreen, where every glyph is 12 px and any width fits."""
+    from PySide6.QtWidgets import QLabel
+
+    plain = QLabel().fontMetrics()
+    if plain.horizontalAdvance("W") == plain.horizontalAdvance("i"):
+        pytest.skip("this platform draws every glyph the same width")
+    view, _ = window()
+    label = view._volume_value
+    assert (label.fontMetrics().horizontalAdvance("100%")
+            <= label.contentsRect().width())
+
+
+def test_the_mute_button_starts_where_the_receiver_is(window):
+    controller = FakeController(snapshot())
+    controller.muted = True
+    view, _ = window(controller)
+    assert view._mute.isChecked()
+    assert ("set_muted", True) not in controller.calls
+
+
+def test_mute_in_the_window_silences_the_card_and_unmute_restores(
+        window, audio_output):
+    """From the button to the samples, as the slider test does."""
+    import numpy as np
+
+    class Wired(FakeController):
+        def get_volume(self):
+            return audio_output.volume
+
+        def set_volume(self, percent):
+            return audio_output.set_volume(percent)
+
+        def is_muted(self):
+            return audio_output.muted
+
+        def set_muted(self, muted):
+            return audio_output.set_muted(muted)
+
+    frames = 1024
+    tone = (0.5 * np.sin(2 * np.pi * 1000.0 * np.arange(frames) / 48000.0)
+            ).astype(np.float32)
+
+    def played():
+        for _ in range(2):              # the change ramps over the first
+            audio_output.enqueue_audio(tone, tone)
+            out, _ = audio_output.callback(None, frames, {}, 0)
+        return np.frombuffer(out, dtype=np.float32)[0::2]
+
+    view, _ = window(Wired(snapshot()))
+    view._volume.setValue(50)
+    view._mute.click()
+    assert view._mute.isChecked()
+    assert not np.any(played())
+    assert view._volume.value() == 50, "the slider keeps the volume"
+    view._mute.click()
+    level = played()
+    ratio_db = 20 * np.log10(np.sqrt(np.mean(level.astype(np.float64) ** 2))
+                             / np.sqrt(np.mean(tone.astype(np.float64) ** 2)))
+    assert ratio_db == pytest.approx(-18.06, abs=0.01)
+
+
+def test_moving_the_volume_while_muted_lets_the_button_out(window):
+    view, controller = window()
+    view._mute.click()
+    assert controller.muted
+    view._volume.setValue(40)
+    assert not controller.muted
+    assert not view._mute.isChecked()
+
+
+def test_the_mute_button_is_the_same_width_pressed_or_not(window):
+    view, _ = window()
+    before = view._mute.sizeHint().width()
+    view._mute.click()
+    assert view._mute.sizeHint().width() == before
