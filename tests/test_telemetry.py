@@ -77,17 +77,34 @@ def test_a_snapshot_cannot_be_modified():
         snapshot.freq_hz = 81.3e6       # frozen dataclass
 
 
-def test_healthy_while_inside_budget_and_nothing_dropped():
-    assert make_snapshot().healthy
-
-
-@pytest.mark.parametrize("overrides", [
-    {"block_ms": 17.0},                 # over budget
-    {"iq_drops": 1},
-    {"audio_drops": 1},
+@pytest.mark.parametrize("queue, behind", [
+    (0, False), (1, False), (2, False), (19, False), (20, True), (80, True),
 ])
-def test_not_healthy_once_something_is_wrong(overrides):
-    assert not make_snapshot(**overrides).healthy
+def test_falling_behind_is_the_queue_backing_up(queue, behind):
+    """A quarter of eighty: the depth the processing thread warns at."""
+    snapshot = make_snapshot(sdr_queue=queue, sdr_queue_max=80)
+    assert snapshot.falling_behind is behind
+
+
+def test_one_slow_block_is_not_falling_behind():
+    """What the queue absorbs is jitter, however long the block."""
+    snapshot = make_snapshot(block_ms=40.0, block_budget_ms=16.0,
+                             sdr_queue=1, sdr_queue_max=80)
+    assert not snapshot.falling_behind
+
+
+def test_a_small_queue_needs_two_waiting_to_be_behind():
+    assert not make_snapshot(sdr_queue=1, sdr_queue_max=4).falling_behind
+    assert make_snapshot(sdr_queue=2, sdr_queue_max=4).falling_behind
+
+
+def test_the_window_and_the_processing_thread_judge_the_same_depth():
+    import logging
+    from fm_radio.controller import _BlockProfiler
+    from fm_radio.telemetry import backlog_depth
+    for capacity in (4, 8, 80, 200):
+        profiler = _BlockProfiler(logging.getLogger("test"), capacity)
+        assert profiler._backlog_at == backlog_depth(capacity)
 
 
 @pytest.mark.parametrize("blend,expected", [(1.0, True), (0.51, True),

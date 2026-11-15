@@ -999,9 +999,95 @@ def test_the_health_line_is_set_where_a_space_is_as_wide_as_a_digit(
             == metrics.horizontalAdvance("W"))
 
 
-def test_the_health_line_says_so_when_blocks_run_long(window):
-    view, _ = window(FakeController(snapshot(block_ms=20.0)))
-    assert "loaded" in view._health.text()
+def _health_word(view) -> str:
+    return view._health.text().split()[0]
+
+
+def test_jittery_blocks_on_a_receiver_keeping_up_stay_healthy(window):
+    """The flicker, as it was reported.
+
+    Block times drawn the way the hardware measured them - about
+    10 ms on average, one in ten past the 16 ms budget - with the
+    queue at 0 to 2 of 80, which is a receiver keeping up.  Judged
+    block by block the line changed its mind every few refreshes.
+    """
+    import numpy as np
+    rng = np.random.default_rng(1)
+    controller = FakeController(snapshot())
+    view, _ = window(controller)
+    words = []
+    slow = 0
+    for _ in range(200):
+        # Nine in ten well inside the budget, one in ten well past
+        # it: 10.2 ms on average, as measured, with the slow tail the
+        # measurement found rather than the thin one a smooth
+        # distribution with that mean would have.
+        block_ms = float(rng.uniform(17.0, 30.0) if rng.random() < 0.1
+                         else rng.uniform(5.0, 13.0))
+        slow += block_ms > 16.0
+        controller.status = snapshot(block_ms=block_ms,
+                                     sdr_queue=int(rng.integers(0, 3)))
+        view.refresh()
+        words.append(_health_word(view))
+    assert slow >= 10, "the run was meant to have slow blocks in it"
+    assert set(words) == {"healthy"}, words
+
+
+def test_a_backed_up_queue_says_loaded(window):
+    view, _ = window(FakeController(snapshot(sdr_queue=20,
+                                             sdr_queue_max=80)))
+    assert _health_word(view) == "loaded"
+
+
+@pytest.mark.parametrize("counter", ["iq_drops", "audio_drops",
+                                     "audio_underruns"])
+def test_a_drop_says_loaded_for_a_while_then_healthy(window, monkeypatch,
+                                                     counter):
+    from fm_radio.gui import main_window
+    clock = [1000.0]
+    monkeypatch.setattr(main_window.time, "monotonic", lambda: clock[0])
+    controller = FakeController(snapshot())
+    view, _ = window(controller)
+    assert _health_word(view) == "healthy"
+
+    controller.status = snapshot(**{counter: 1})
+    view.refresh()
+    assert _health_word(view) == "loaded"
+
+    clock[0] += main_window.HEALTH_HOLD_SECONDS - 0.1
+    view.refresh()
+    assert _health_word(view) == "loaded", "held long enough to be read"
+
+    clock[0] += 0.2
+    view.refresh()
+    assert _health_word(view) == "healthy", (
+        "a drop long past should not leave the line loaded for good")
+
+
+def test_another_drop_extends_the_hold(window, monkeypatch):
+    from fm_radio.gui import main_window
+    clock = [1000.0]
+    monkeypatch.setattr(main_window.time, "monotonic", lambda: clock[0])
+    controller = FakeController(snapshot(iq_drops=1))
+    view, _ = window(controller)
+    clock[0] += main_window.HEALTH_HOLD_SECONDS - 1.0
+    controller.status = snapshot(iq_drops=2)
+    view.refresh()
+    clock[0] += 2.0
+    view.refresh()
+    assert _health_word(view) == "loaded"
+
+
+def test_a_counter_that_starts_again_is_not_a_drop(window, monkeypatch):
+    from fm_radio.gui import main_window
+    clock = [1000.0]
+    monkeypatch.setattr(main_window.time, "monotonic", lambda: clock[0])
+    controller = FakeController(snapshot(audio_underruns=7))
+    view, _ = window(controller)
+    clock[0] += main_window.HEALTH_HOLD_SECONDS + 1.0
+    controller.status = snapshot(audio_underruns=0)
+    view.refresh()
+    assert _health_word(view) == "healthy"
 
 
 def test_without_a_snapshot_it_shows_the_tuner_not_stale_values(window):
