@@ -2903,3 +2903,111 @@ def test_the_window_does_not_return_while_the_receiver_is_starting(
     main_window.run_window(controller, switch_on)
 
     assert still_starting.acquire(blocking=False),         "the window returned while the receiver was still starting"
+
+
+# ----------------------------------------------------------------------
+# The area list
+# ----------------------------------------------------------------------
+
+def choose_the_area(view, area):
+    """Pick *area* from the tuner row's list, as a click does."""
+    index = view._area.findData(area)
+    assert index >= 0, "%s is not in the list" % area
+    view._area.setCurrentIndex(index)
+    view._area.activated.emit(index)
+
+
+def test_the_area_list_starts_on_the_area_the_radio_is_in(window):
+    controller = FakeController(snapshot())
+    controller.area = "近畿"
+    view, _ = window(controller)
+    assert view._area.currentText() == "近畿"
+
+
+def test_with_no_area_the_list_says_so_rather_than_picking_one(window):
+    """No area is a state of its own: the first entry is not it."""
+    view, controller = window()
+    assert controller.area is None
+    assert view._area.currentIndex() == -1
+
+
+def test_choosing_an_area_keeps_it_and_says_so(window):
+    view, controller = window()
+
+    choose_the_area(view, "関東")
+
+    assert controller.saved == ["関東"]
+    assert controller.area == "関東"
+    assert view._area.currentText() == "関東"
+    assert "関東" in view._health.text()
+
+
+def test_choosing_the_area_already_set_writes_nothing(window):
+    controller = FakeController(snapshot())
+    controller.area = "関東"
+    view, _ = window(controller)
+
+    choose_the_area(view, "関東")
+
+    assert ("remember_where_this_is", "関東") not in controller.calls
+
+
+def test_an_area_that_was_not_saved_is_not_left_showing(window,
+                                                        monkeypatch):
+    """The list goes back to the area the radio is still naming by.
+
+    And the user is told why, in full: the message names the file
+    and the line to type, which is all they have left to go on.
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    from fm_radio.stations import WillNotEdit
+
+    controller = FakeController(snapshot())
+    controller.area = "近畿"
+    controller.save_error = WillNotEdit("add area = \"関東\" yourself")
+    view, _ = window(controller)
+    shown = watch_the_boxes(monkeypatch, answer=QMessageBox.Ok)
+
+    choose_the_area(view, "関東")
+
+    assert controller.area == "近畿"
+    assert view._area.currentText() == "近畿"
+    assert len(shown) == 1 and "yourself" in shown[0].informativeText()         + shown[0].text()
+    assert "not saved" in view._health.text()
+
+
+def test_an_area_kept_after_a_scan_shows_in_the_list(window, monkeypatch,
+                                                      qt_app):
+    """Two ways to set it, one list that says which it is."""
+    view, controller, _ = a_scan(window, monkeypatch,
+                                 found=[a_find(80.0), a_find(81.3)])
+    controller.catalogue = one_place()
+    watch_the_boxes(monkeypatch)
+
+    view._scan_button.click()
+    finish(view, qt_app)
+
+    assert controller.saved == ["関東"], "the area was meant to be kept"
+    assert view._area.currentText() == "関東"
+
+
+def test_choosing_an_area_names_the_scan_list_again(window, monkeypatch,
+                                                    qt_app):
+    """The finds were named by the old area, as after the scan's own
+    question."""
+    view, controller, _ = a_scan(window, monkeypatch,
+                                 found=[a_find(80.0)])
+
+    def by_area(freqs):
+        name = "TOKYO FM" if controller.area == "関東" else "RKKラジオ"
+        return {f: _Station(name) for f in freqs}
+
+    controller.stations_at = by_area
+    view._scan_button.click()
+    finish(view, qt_app)
+    assert "RKK" in view._found.itemText(1), "the test meant to start here"
+
+    choose_the_area(view, "関東")
+
+    assert "TOKYO FM" in view._found.itemText(1)

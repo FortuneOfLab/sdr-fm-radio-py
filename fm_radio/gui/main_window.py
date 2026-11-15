@@ -106,7 +106,7 @@ from fm_radio.gui.band_view import BandView
 from fm_radio.gui.dsp_tab import DspTab
 from fm_radio.gui.recordings_tab import RecordingsTab
 from fm_radio.multipath import NOISE_AM_DEPTH
-from fm_radio.stations import WillNotEdit
+from fm_radio.stations import AREAS, WillNotEdit
 from fm_radio.device_worker import TUNE
 from fm_radio.telemetry import SILENCE_DBFS, StatusSnapshot
 
@@ -564,6 +564,7 @@ class ReceiverWindow(QMainWindow):
         self._timer.start()
 
         self._load_presets()
+        self._show_the_area()
         self.refresh()
 
     # ------------------------------------------------------------------
@@ -640,6 +641,20 @@ class ReceiverWindow(QMainWindow):
 
         self._station = _StationLabel(box)
         row.addWidget(self._station, 1)
+
+        # Where the radio is, which is what decides the names: a
+        # frequency is not unique in Japan.  A setting rather than a
+        # control, but it sits beside what it changes - the name on
+        # the dial and in the scan list.
+        self._area = QComboBox(box)
+        self._area.setToolTip(
+            "Where this radio is. Stations are named from this area's "
+            "transmitters; choosing one saves it in your station file.")
+        self._area.setPlaceholderText("Area")
+        for area in AREAS:
+            self._area.addItem(area, area)
+        self._area.activated.connect(self._area_chosen)
+        row.addWidget(self._area)
 
         self._presets = QComboBox(box)
         self._presets.setToolTip("Preset stations")
@@ -924,23 +939,55 @@ class ReceiverWindow(QMainWindow):
                 "stops a frequency being named after a transmitter on "
                 "the other side of the country." % area) != QMessageBox.Yes:
             return
+        self._keep_the_area(area)
+
+    def _area_chosen(self, index: int) -> None:
+        """The user picked an area from the list: keep it.
+
+        Choosing the one already set does nothing - there is nothing
+        to write.  There is no way back to no area at all from here:
+        the file can only be given one of the areas, and a radio with
+        none names stations from the whole country, which is the
+        thing an area is there to stop.
+        """
+        area = self._area.itemData(index)
+        if area is None or area == self.controller.area:
+            return
+        self._keep_the_area(area)
+
+    def _keep_the_area(self, area: str) -> None:
+        """Write *area* to the user's file and name by it, or say why not.
+
+        Both ways an area is chosen end here: the question after a
+        scan and the list in the tuner row.
+        """
         try:
             path = self.controller.remember_where_this_is(area)
         except (WillNotEdit, OSError) as trouble:
             # Said in full and in a box, not summarised onto the
             # status line: it names the file and the line to type,
             # which is all the user has left to go on, and it is the
-            # answer to a question they were just asked.
+            # answer to what they just asked for.
             self._tell_them(
                 "The area was not saved", str(trouble),
                 QMessageBox.Warning)
             self._set_notice("the area was not saved")
+            # The list goes back to the area the radio is still in,
+            # rather than showing one it is not naming by.
+            self._show_the_area()
             return
+        self._show_the_area()
         # The list was named by the old area; a find that was
         # RKKラジオ a moment ago is TOKYO FM now.
         self._show_what_was_found(self._found_signals)
         self._set_notice("stations are named from %s now (saved in %s)"
                          % (area, path))
+
+    def _show_the_area(self) -> None:
+        """Show the area the receiver is naming by, or none."""
+        self._area.setCurrentIndex(self._area.findData(self.controller.area)
+                                   if self.controller.area is not None
+                                   else -1)
 
     def _ask(self, title: str, text: str, detail: str) -> int:
         """Put a yes-or-no question up and return the button pressed."""

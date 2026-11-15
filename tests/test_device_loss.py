@@ -157,6 +157,9 @@ class _FakeController:
         self.finish = threading.Event()
         self.finish.set()
         self.cleanups: list[str] = []
+        # The area the receiver names by; the tuner row's area list
+        # reads it.  None, as for a radio nobody has placed.
+        self.area: str | None = None
 
     def cleanup(self) -> None:
         # In the order the real one does it: AudioOutput.stop_recording
