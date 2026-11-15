@@ -100,7 +100,9 @@ from PySide6.QtWidgets import (
 from fm_radio.band_scan import (
     BandScan, CONFIRMED, LIKELY_SKIRT, where_this_is,
 )
-from fm_radio.constants import RECORDINGS_DIR
+from fm_radio.constants import (
+    RECORDINGS_DIR, VOLUME_MAX_PERCENT, VOLUME_MIN_PERCENT, VOLUME_STEP_PERCENT,
+)
 from fm_radio.exceptions import SDRDeviceError
 from fm_radio.gui.band_view import BandView
 from fm_radio.gui.dsp_tab import DspTab
@@ -182,6 +184,11 @@ _FOUND_WIDTH = 230
 #: Gain slider resolution: the widget is integral, the tuner is in dB.
 _GAIN_SCALE = 10.0
 _GAIN_MAX_DB = 49.6
+
+#: How wide the volume slider is.  Fixed, so the row it sits in does not
+#: hand it the slack the recording line leaves: 100 steps in 120 px is
+#: a step a pixel or so, which is as fine as a mouse can set it anyway.
+_VOLUME_SLIDER_WIDTH = 120
 
 
 def _room_for_the_widest(label: QLabel, words=_BLEND_WORDS) -> int:
@@ -588,7 +595,7 @@ class ReceiverWindow(QMainWindow):
         layout.addWidget(self._band, 1)
         layout.addWidget(self._build_signal())
         layout.addWidget(self._build_gain())
-        layout.addWidget(self._build_recording())
+        layout.addWidget(self._build_audio())
         return page
 
     def _build_dsp_tab(self) -> QWidget:
@@ -780,8 +787,16 @@ class ReceiverWindow(QMainWindow):
         row.addWidget(self._iq_peak)
         return box
 
-    def _build_recording(self) -> QGroupBox:
-        box = QGroupBox("Recording", self)
+    def _build_audio(self) -> QGroupBox:
+        """Recording, and how loud the radio plays.
+
+        In one row because the recording row had room to spare: the
+        tuner row is what sets the window's width, and this one stays
+        well short of it with the volume in.  The volume goes on the
+        right, after the recording line's stretch, so that line
+        growing and shrinking never moves the slider.
+        """
+        box = QGroupBox("Audio", self)
         row = QHBoxLayout(box)
 
         self._record_audio = QPushButton("Record audio", box)
@@ -796,7 +811,39 @@ class ReceiverWindow(QMainWindow):
 
         self._recording_status = QLabel("", box)
         row.addWidget(self._recording_status, 1)
+
+        row.addWidget(QLabel("Volume", box))
+        self._volume = QSlider(Qt.Orientation.Horizontal, box)
+        self._volume.setRange(VOLUME_MIN_PERCENT, VOLUME_MAX_PERCENT)
+        self._volume.setSingleStep(1)
+        self._volume.setPageStep(VOLUME_STEP_PERCENT * 2)
+        self._volume.setFixedWidth(_VOLUME_SLIDER_WIDTH)
+        self._volume.setToolTip(
+            "Listening volume.  Recordings are made at full level "
+            "whatever this is set to.")
+        self._volume.setValue(int(self.controller.get_volume()))
+        # Applied on every step, drag included, unlike the gain: this
+        # is two assignments in the receiver and no device, and a
+        # volume that only changes when the mouse is let go is not one
+        # anybody can set by ear.
+        self._volume.valueChanged.connect(self._volume_moved)
+        row.addWidget(self._volume)
+        self._volume_value = QLabel(box)
+        # As wide as the widest it will say, so 9 % to 10 % to 100 %
+        # moves nothing, and right-aligned so the % stays put.
+        self._volume_value.setFixedWidth(
+            self._volume_value.fontMetrics().horizontalAdvance(
+                f"{VOLUME_MAX_PERCENT}%") + 2)
+        self._volume_value.setAlignment(Qt.AlignmentFlag.AlignRight
+                                        | Qt.AlignmentFlag.AlignVCenter)
+        self._volume_value.setText(f"{self._volume.value()}%")
+        row.addWidget(self._volume_value)
         return box
+
+    def _volume_moved(self, value: int) -> None:
+        """Hand the receiver the volume, and show what it settled on."""
+        applied = self.controller.set_volume(value)
+        self._volume_value.setText(f"{applied}%")
 
     def _load_presets(self) -> None:
         """Fill the preset list from the catalogue's favourites."""

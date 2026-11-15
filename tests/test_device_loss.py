@@ -209,6 +209,12 @@ class _FakeController:
     def is_manual_gain(self) -> bool:
         return False
 
+    def get_volume(self) -> int:
+        return 100
+
+    def set_volume(self, percent) -> int:
+        return int(percent)
+
     def is_recording(self) -> bool:
         return self.recording
 
