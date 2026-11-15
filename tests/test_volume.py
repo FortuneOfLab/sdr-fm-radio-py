@@ -487,3 +487,132 @@ def test_a_bad_volume_flag_stops_before_anything_is_opened(run_main, capsys,
     assert run_main(*argv) == 2
     assert _EntryController.built == []
     assert "--volume needs a number from 0 to 100" in capsys.readouterr().err
+
+
+# ----------------------------------------------------------------------
+# Coming out of a silence the volume never saw
+# ----------------------------------------------------------------------
+
+def _dc(frames: int = 4096) -> np.ndarray:
+    return np.full(frames, AMPLITUDE, dtype=np.float32)
+
+
+def _start_playing(audio_output) -> None:
+    """Queue the preroll in DC so the stream starts, as at startup."""
+    while not audio_output._playing:
+        audio_output.enqueue_audio(_dc(), _dc())
+
+
+def _first_audible(audio_output) -> np.ndarray:
+    """Left channel of the first callback that is not all silence."""
+    for _ in range(200):
+        out, _ = audio_output.callback(None, FRAMES, {}, 0)
+        left = np.frombuffer(out, dtype=np.float32)[0::2]
+        if np.any(left) or not audio_output._refilling:
+            return left
+    raise AssertionError("the refill never ended")
+
+
+def _into_a_refill(audio_output) -> None:
+    """Playing at full volume, then a retune's silence starts."""
+    _start_playing(audio_output)
+    while audio_output.audio_buffer_queue.qsize() or audio_output._buffer_len:
+        audio_output.callback(None, FRAMES, {}, 0)       # heard at 100 %
+    audio_output.rebuild_cushion()
+    out, _ = audio_output.callback(None, FRAMES, {}, 0)
+    assert audio_output._refilling, "the refill was meant to be under way"
+    assert not np.any(np.frombuffer(out, dtype=np.float32))
+
+
+def _out_of_the_refill(audio_output) -> np.ndarray:
+    for _ in range(8):
+        audio_output.enqueue_audio(_dc(), _dc())
+    return _first_audible(audio_output)
+
+
+def test_muting_during_a_refill_stays_silent_after_it(audio_output):
+    """The refill's silence did not pass through the volume, so the gain
+    it left behind is the one from before - and a ramp from there to
+    zero is half a buffer of the station the listener just muted."""
+    _into_a_refill(audio_output)
+    audio_output.set_muted(True)
+    left = _out_of_the_refill(audio_output)
+    assert not audio_output._refilling
+    assert not np.any(left), (
+        "muted, yet the first frame after the refill was %.4f" % left[0])
+
+
+def test_a_volume_set_during_a_refill_is_where_the_audio_comes_back(
+        audio_output):
+    _into_a_refill(audio_output)
+    audio_output.set_volume(20)
+    left = _out_of_the_refill(audio_output)
+    np.testing.assert_allclose(left, AMPLITUDE * volume_gain(20), rtol=1e-5)
+
+
+def test_a_volume_set_before_the_stream_starts_is_its_first_frame(
+        audio_output):
+    """Nothing has been played to ramp from: the first frame is the volume."""
+    audio_output.set_volume(20)
+    _start_playing(audio_output)
+    out, _ = audio_output.callback(None, FRAMES, {}, 0)
+    left = np.frombuffer(out, dtype=np.float32)[0::2]
+    np.testing.assert_allclose(left, AMPLITUDE * volume_gain(20), rtol=1e-5)
+
+
+def test_a_mute_set_while_held_is_silent_when_the_stream_restarts(
+        audio_output):
+    """A hold stops the card; the restart is a start like the first."""
+    _start_playing(audio_output)
+    audio_output.callback(None, FRAMES, {}, 0)           # heard at 100 %
+    audio_output.hold()
+    audio_output.set_muted(True)
+    audio_output.resume()
+    _start_playing(audio_output)
+    out, _ = audio_output.callback(None, FRAMES, {}, 0)
+    assert not np.any(np.frombuffer(out, dtype=np.float32))
+
+
+# ----------------------------------------------------------------------
+# Two setters at once
+# ----------------------------------------------------------------------
+
+def test_a_mute_landing_inside_a_volume_change_is_not_lost(audio_output,
+                                                          monkeypatch):
+    """set_volume clears the mute and then works out the gain.  A mute
+    landing between the two used to be overwritten by that gain: muted
+    by every account and playing all the same.
+
+    The interleaving is forced, not hoped for: set_volume is stopped
+    inside its gain lookup until set_muted has been given every chance
+    to run.
+    """
+    import threading
+    import fm_radio.audio_output as ao_mod
+
+    inside, go = threading.Event(), threading.Event()
+    real = ao_mod.volume_gain
+
+    def held(percent):
+        if threading.current_thread().name == "volume":
+            inside.set()
+            assert go.wait(5.0)
+        return real(percent)
+
+    monkeypatch.setattr(ao_mod, "volume_gain", held)
+    volume = threading.Thread(target=audio_output.set_volume, args=(30,),
+                              name="volume")
+    volume.start()
+    assert inside.wait(5.0)
+    mute = threading.Thread(target=audio_output.set_muted, args=(True,),
+                            name="mute")
+    mute.start()
+    mute.join(0.2)              # done by now unless it is made to wait
+    go.set()
+    volume.join(5.0)
+    mute.join(5.0)
+
+    assert audio_output.muted
+    assert audio_output.volume == 30
+    assert not np.any(_settled(audio_output)), (
+        "muted, and still playing at %.3f" % audio_output._gain_wanted)

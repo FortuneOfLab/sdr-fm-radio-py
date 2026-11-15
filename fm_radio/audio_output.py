@@ -242,6 +242,12 @@ class AudioOutput(AudioOutputInterface):
         self._muted: bool = False
         self._gain_wanted: float = volume_gain(VOLUME_DEFAULT_PERCENT)
         self._gain_applied: float = self._gain_wanted
+        # Taken by set_volume and set_muted, and by nothing else: the
+        # three fields above are one state, and two setters interleaving
+        # left it muted by its own account with a non-zero gain.  The
+        # callback reads _gain_wanted alone, one load, and never takes
+        # this - it holds a lock for nothing on the audio path.
+        self._volume_lock: threading.Lock = threading.Lock()
         # Set for as long as a recording is being closed: the flag above
         # goes down first and the file stays open for the flush, the
         # worker handshake, the close and the sidecar - up to fifteen
@@ -389,6 +395,7 @@ class AudioOutput(AudioOutputInterface):
         except Exception as e:
             self.logger.error(f"Error in audio callback: {e}", exc_info=True)
             # Return silence to avoid crashing the audio stream
+            self._gain_applied = self._gain_wanted
             silence = np.zeros(frame_count * AUDIO_CHANNELS, dtype=np.float32)
             return (silence.tobytes(), pyaudio.paContinue)
 
@@ -435,12 +442,13 @@ class AudioOutput(AudioOutputInterface):
             ValueError: *percent* is not a number.
         """
         percent = clamp_volume(percent)
-        self._volume_percent = percent
-        # Setting a volume is asking to hear it: a muted output that
-        # took a new volume and stayed silent would look like a knob
-        # that does nothing.
-        self._muted = False
-        self._gain_wanted = volume_gain(percent)
+        with self._volume_lock:
+            self._volume_percent = percent
+            # Setting a volume is asking to hear it: a muted output that
+            # took a new volume and stayed silent would look like a knob
+            # that does nothing.
+            self._muted = False
+            self._gain_wanted = volume_gain(percent)
         return percent
 
     @property
@@ -454,10 +462,11 @@ class AudioOutput(AudioOutputInterface):
         Ramped like any other change, so neither way is a click.
         Recording is not affected.  Returns the new state.
         """
-        self._muted = bool(muted)
-        self._gain_wanted = (0.0 if self._muted
-                             else volume_gain(self._volume_percent))
-        return self._muted
+        with self._volume_lock:
+            self._muted = bool(muted)
+            self._gain_wanted = (0.0 if self._muted
+                                 else volume_gain(self._volume_percent))
+            return self._muted
 
     @property
     def muted(self) -> bool:
@@ -663,6 +672,16 @@ class AudioOutput(AudioOutputInterface):
             # it is going to yet: play this one and judge again.
             return False
         self._refilling = False
+        if self._refill_frames:
+            # The card has been playing silence that never went through
+            # the volume, so the audio comes back at the volume as it is
+            # now - not ramped from the gain before the retune.  Left as
+            # it was, a mute set during the refill let half a buffer of
+            # the station through, and a volume set then started from
+            # the old level.  A refill that played no silence leaves the
+            # gain alone: the buffer before this one was heard, and the
+            # ramp from it is the right one.
+            self._gain_applied = self._gain_wanted
         now = time.monotonic()
         if (self._refill_frames
                 and now - self._refill_last_logged
@@ -742,6 +761,11 @@ class AudioOutput(AudioOutputInterface):
             if self._playing or self._closed.is_set() or self._holds:
                 return
             try:
+                # Nothing has been played since the card stopped - or
+                # ever - so there is no level to ramp from, and the
+                # first frame is at the volume.  Safe to write: the
+                # callback does not run on a stream that is not started.
+                self._gain_applied = self._gain_wanted
                 self.stream.start_stream()
             except Exception as e:             # pragma: no cover - guard
                 self.logger.error("Could not start the audio stream: %s", e,
