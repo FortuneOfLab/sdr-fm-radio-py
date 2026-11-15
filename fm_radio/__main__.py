@@ -42,6 +42,8 @@ Usage Examples:
       $ python fm_receiver.py --debug
   - Save logs to file:
       $ python fm_receiver.py --log-file fm_receiver.log
+  - Start at a lower listening volume (0-100, default 100):
+      $ python fm_receiver.py --volume 40
   - Combine options:
       $ python fm_receiver.py --light --debug --log-file debug.log
 
@@ -56,6 +58,7 @@ Command Examples (during execution):
   'agc on'            : Enable auto gain control
   'agc off'           : Disable auto gain (manual mode)
   'gain <value>'      : Set manual gain in dB (when auto gain is off)
+  'vol <0-100>'       : Set the listening volume ('vol +' / 'vol -' step it)
   '<station_num>' or '<freq_MHz>' : Tune to the specified station
   'q'                 : Quit the program
 """
@@ -108,6 +111,23 @@ def _install_gc_monitor() -> None:
     gc.callbacks.append(_gc_cb)
 
 
+def _volume_argument(text: str | None) -> float:
+    """Read --volume's value, or stop here saying what it should be.
+
+    Checked before the receiver is built, so a typo costs nothing: no
+    device is opened and no sound card is touched.  Out of range is
+    refused rather than clamped - '--volume 400' is not a wish for 100.
+    """
+    try:
+        value = float(text.rstrip('%')) if text is not None else None
+    except ValueError:
+        value = None
+    if value is None or not 0.0 <= value <= 100.0:
+        print("--volume needs a number from 0 to 100", file=sys.stderr)
+        sys.exit(2)
+    return value
+
+
 def main() -> None:
     """Entry point for the FM receiver application."""
     # Parse command line arguments
@@ -117,6 +137,7 @@ def main() -> None:
     log_file: str | None = None
     stations_path: str | None = None
     use_gui: bool = False
+    volume: float | None = None
 
     for i, arg in enumerate(sys.argv[1:], 1):
         if arg == '--light':
@@ -125,6 +146,9 @@ def main() -> None:
             use_gui = True
         elif arg == '--stations' and i + 1 < len(sys.argv):
             stations_path = sys.argv[i + 1]
+        elif arg == '--volume':
+            volume = _volume_argument(sys.argv[i + 1]
+                                      if i + 1 < len(sys.argv) else None)
         elif arg in ('--log', '--verbose', '-v'):
             enable_logging = True
         elif arg == '--debug':
@@ -150,6 +174,10 @@ def main() -> None:
     try:
         controller = FMReceiverController(light=light_mode,
                                           stations_path=stations_path)
+        if volume is not None:
+            # Before anything starts, so the first block out is already
+            # at this level: nothing has been played yet to jump from.
+            controller.set_volume(volume)
         if use_gui:
             # The window owns the main loop, so the receiver is started in
             # the background and shut down when the window closes.
