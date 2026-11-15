@@ -1213,6 +1213,29 @@ class FMReceiverController:
         """Return True if manual gain mode is active (auto gain disabled)."""
         return not self.auto_gain.enabled
 
+    def get_volume(self) -> int:
+        """Return the listening volume in percent (0 to 100)."""
+        return self.audio_output.volume
+
+    def set_volume(self, percent: float) -> int:
+        """Set the listening volume in percent; returns what it became.
+
+        Applied where the audio is played, so it is heard on the next
+        sound-card buffer rather than behind the cushion, and does
+        nothing to the recordings, the level meters or the telemetry:
+        those are of the broadcast, and this is the listener's setting.
+        Two assignments and no device, so a slider may call it on every
+        step of a drag.
+
+        Args:
+            percent: 0 (silence) to 100 (full level, the default).
+                Clamped to that range.
+
+        Raises:
+            ValueError: *percent* is not a number.
+        """
+        return self.audio_output.set_volume(percent)
+
     # ------------------------------------------------------------------
     # Internal methods
     # ------------------------------------------------------------------

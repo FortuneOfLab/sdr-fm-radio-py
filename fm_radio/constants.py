@@ -358,6 +358,17 @@ AUDIO_FINAL_LP_CUTOFF_HZ = 15000.0  # Passband edge (Hz)
 AUDIO_FINAL_LP_STOP_HZ = 16500.0    # Stopband edge (Hz)
 AUDIO_FRAMES_PER_BUFFER = 1024     # Frames per audio callback
 AUDIO_QUEUE_MAXSIZE = 50            # Max queued audio blocks
+# Listening volume, in percent of full level.  Applied to what the card
+# plays and to nothing else: the recordings, the level meters and the
+# telemetry all see the receiver's own level.  100 is unity gain, which
+# is what the receiver played before there was a control, and 0 is
+# silence.  The percentage is cubed into a gain (see
+# fm_radio.audio_output.volume_gain), which tracks loudness far better
+# than a straight line: 50 % is -18 dB, 20 % is -42 dB.
+VOLUME_MIN_PERCENT = 0
+VOLUME_MAX_PERCENT = 100
+VOLUME_DEFAULT_PERCENT = 100
+VOLUME_STEP_PERCENT = 5             # One 'vol +' / 'vol -' on the command line
 # What the stream starts on, over and above one block interval's
 # worth of audio.  The receiver produces exactly as fast as the card
 # consumes - a block every 16 ms carries the 768 frames the card will

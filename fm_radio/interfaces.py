@@ -160,5 +160,15 @@ class AudioOutputInterface(ABC):
         """
 
     @abstractmethod
+    def set_volume(self, percent: float) -> int:
+        """Set the listening volume, 0 to 100 percent.
+
+        Applies to what is played and not to what is recorded.
+
+        Returns:
+            The volume it was set to, after clamping.
+        """
+
+    @abstractmethod
     def cleanup(self) -> None:
         """Stop audio streams and release resources."""
