@@ -654,10 +654,16 @@ def test_a_mute_landing_inside_a_volume_change_is_not_lost(audio_output,
 
 
 
+def _what_meets_the_refill(audio_output) -> int:
+    """One block big enough to meet the refill's target at once."""
+    return int(max(audio_output._cushion_frames + FRAMES,
+                   audio_output._matcher.target)) + 16
+
+
 def test_muting_during_a_refill_stays_silent_on_the_settle_path(audio_output):
     _into_a_refill(audio_output)
     audio_output.set_muted(True)
-    frames = audio_output._cushion_frames + FRAMES + 16
+    frames = _what_meets_the_refill(audio_output)
     audio_output.enqueue_audio(_dc(frames), _dc(frames))
     out, _ = audio_output.callback(None, FRAMES, {}, 0)
     assert audio_output._refilling, (
@@ -670,7 +676,7 @@ def test_muting_during_a_refill_stays_silent_on_the_settle_path(audio_output):
 def test_a_volume_set_during_a_refill_holds_on_the_settle_path(audio_output):
     _into_a_refill(audio_output)
     audio_output.set_volume(20)
-    frames = audio_output._cushion_frames + FRAMES + 16
+    frames = _what_meets_the_refill(audio_output)
     audio_output.enqueue_audio(_dc(frames), _dc(frames))
     out, _ = audio_output.callback(None, FRAMES, {}, 0)
     assert audio_output._refilling

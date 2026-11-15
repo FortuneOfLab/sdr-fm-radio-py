@@ -149,7 +149,7 @@ class RateMatcher:
     too few waiting, fewer when there are too many.
 
     The proportional gain sets how quickly a step is taken back (time
-    constant ``1 / (rate * 1e-6 * kp)``: 42 s with the defaults); the
+    constant ``1 / (rate * 1e-6 * kp)``: 21 s with the defaults); the
     integral learns the steady mismatch, so that the level settles on
     the target rather than below it.  Both are clamped to
     ``max_ppm`` - two parts in a thousand at most is 3.5 cents of
@@ -157,12 +157,26 @@ class RateMatcher:
     """
 
     def __init__(self, rate: float, target_frames: float,
-                 kp_ppm_per_frame: float = 0.5,
-                 integral_sec: float = 120.0,
+                 kp_ppm_per_frame: float = 1.0,
+                 integral_sec: float = 240.0,
                  smoothing_sec: float = 5.0,
-                 max_ppm: float = 2000.0) -> None:
+                 max_ppm: float = 2000.0,
+                 learn_within_frames: float = float("inf")) -> None:
         self.rate = float(rate)
         self.target = float(target_frames)
+        #: How far from the target the level may be for the integral to
+        #: learn from it.  Further than that is a step - a startup that
+        #: settled high, a retune, a hold - and not the slow drift the
+        #: integral is for: learning from a step of E frames teaches it
+        #: E / (rate * 1e-6 * integral_sec) ppm of mismatch that is not
+        #: there, which on the hardware was 505 ppm the wrong way.  The
+        #: proportional term takes steps back on its own.  It still learns
+        #: from the last of a step's tail, inside this band: at most
+        #: learn_within / (rate * 1e-6 * integral_sec) ppm, so the band is
+        #: kept narrow - and kp high enough that a steady mismatch, which
+        #: the proportional term alone holds kp_ppm / kp frames off the
+        #: target, still falls inside it for the integral to learn.
+        self.learn_within = float(learn_within_frames)
         self.kp = float(kp_ppm_per_frame)
         self.integral_sec = float(integral_sec)
         self.smoothing_sec = float(smoothing_sec)
@@ -200,7 +214,8 @@ class RateMatcher:
             self.level += alpha * (reading - self.level)
         error = self.level - self.target          # frames too many
         proportional = -self.kp * error
-        self.integral_ppm += proportional * dt / self.integral_sec
+        if abs(error) <= self.learn_within:
+            self.integral_ppm += proportional * dt / self.integral_sec
         self.integral_ppm = float(np.clip(self.integral_ppm,
                                           -self.max_ppm, self.max_ppm))
         self.ppm = float(np.clip(proportional + self.integral_ppm,

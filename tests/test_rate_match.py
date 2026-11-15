@@ -112,6 +112,28 @@ def test_too_few_waiting_asks_for_more_frames_and_too_many_for_fewer():
     assert high.update(9000, 768) < 1.0
 
 
+@pytest.mark.parametrize("gated, most", [(True, 200.0), (False, None)])
+def test_a_step_is_taken_back_without_being_learned(gated, most):
+    """6000 frames too many and no drift: nothing to learn.
+
+    Ungated, the integral learns E / (rate * 1e-6 * integral_sec) of
+    mismatch that is not there - 520 ppm for this step - and spends
+    minutes unlearning it.  Gated to a cushion's width, only the
+    step's last tail gets in: about 155 ppm at most.
+    """
+    matcher = RateMatcher(FS, target_frames=7000,
+                          learn_within_frames=1792 if gated else float("inf"))
+    level, worst = 13000.0, 0.0
+    for _ in range(int(240 / (768 / FS))):
+        matcher.update(level, 768)
+        level += 768 * matcher.ppm * 1e-6
+        worst = max(worst, abs(matcher.integral_ppm))
+    if most is not None:
+        assert worst < most
+    else:
+        assert worst > 400.0, "the step was meant to teach an ungated loop"
+
+
 def test_the_correction_is_bounded():
     matcher = RateMatcher(FS, target_frames=5000, max_ppm=2000)
     for _ in range(100000):                     # 27 minutes of blocks
@@ -139,14 +161,18 @@ def test_the_integral_learns_the_mismatch(drift_ppm):
 # ----------------------------------------------------------------------
 
 def _play(audio_output, minutes, drift_ppm, block_sizes=(768,),
-          card_sec=0.1067):
+          card_sec=0.1067, retunes=(), learned=None):
     """Feed blocks *drift_ppm* slow against the card's clock; play them.
 
     Blocks come at the rate the SDR delivers samples (the block
     interval stretched by the drift) and callbacks at the card's own
     rate.  When the stream starts, the card takes what it holds in one
-    burst, as a real one does.  Returns the cushion level, in frames,
-    at the entry to every callback in the last two minutes.
+    burst, as a real one does.  At each time in ``retunes`` the
+    demodulator is reset as the controller does it: the output is told
+    to rebuild its cushion, and the next blocks owe the 1024 frames a
+    reset costs.  ``learned``, a list, collects ``(t, integral ppm)``
+    at every block.  Returns the cushion level, in frames, at the entry
+    to every callback in the last two minutes.
     """
     rate = FS
     fpb = AUDIO_FRAMES_PER_BUFFER
@@ -155,6 +181,7 @@ def _play(audio_output, minutes, drift_ppm, block_sizes=(768,),
     t_block, t_callback, i = 0.0, None, 0
     end = minutes * 60.0
     levels = []
+    pending, owed = sorted(retunes), 0
     while True:
         due = t_block if t_callback is None else min(t_block, t_callback)
         if due > end:
@@ -167,8 +194,16 @@ def _play(audio_output, minutes, drift_ppm, block_sizes=(768,),
             continue
         size = sizes[i % len(sizes)]
         i += 1
-        block = np.full(size, 0.1, dtype=np.float32)
+        while pending and pending[0] <= t_block:
+            pending.pop(0)
+            audio_output.rebuild_cushion()
+            owed += 1024
+        paid = min(owed, size)
+        owed -= paid
+        block = np.full(size - paid, 0.1, dtype=np.float32)
         audio_output.enqueue_audio(block, block)
+        if learned is not None:
+            learned.append((t_block, audio_output._matcher.integral_ppm))
         t_block += size / rate / (1.0 + drift_ppm * 1e-6)
         if t_callback is None and audio_output._playing:
             for _ in range(int(round(card_sec * rate / fpb))):
@@ -185,6 +220,26 @@ def test_a_drifting_receiver_plays_on_without_a_gap(audio_output, drift_ppm):
     assert np.mean(levels) == pytest.approx(target, abs=600)
     assert audio_output._matcher.integral_ppm == pytest.approx(
         -drift_ppm, abs=60)
+
+
+def test_a_start_above_the_target_and_retunes_do_not_teach_it_backwards(
+        audio_output):
+    """What the hardware did: learned -505 ppm against a real +450 need.
+
+    The stream started 2000 frames above the target - this card takes
+    little at once, so the preroll stays waiting - and a retune left it
+    below.  The integral took both for drift: the wrong way first,
+    then two retunes later an underrun.  Here a card that takes
+    nothing at once, a 450 ppm shortfall and two retunes 5 s apart.
+    """
+    learned = []
+    _play(audio_output, 6, -450, card_sec=0.0, retunes=(185.0, 190.0),
+          learned=learned)
+    assert audio_output.underruns == 0
+    after_a_minute = [ppm for t, ppm in learned if t > 60.0]
+    assert min(after_a_minute) > -50.0, (
+        "learned %.0f ppm against a +450 need" % min(after_a_minute))
+    assert after_a_minute[-1] == pytest.approx(450, abs=120)
 
 
 def test_without_matching_the_same_receiver_runs_dry(audio_output,

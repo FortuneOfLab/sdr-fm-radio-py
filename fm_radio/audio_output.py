@@ -352,11 +352,10 @@ class AudioOutput(AudioOutputInterface):
         # what a hold takes to reset them.
         self._resampler = FractionalResampler()
         self._matcher = RateMatcher(
-            float(output_rate),
-            target_frames=(2 * self._cushion_frames
-                           + AUDIO_RATE_MATCH_MARGIN_SEC * float(output_rate)))
-        self._trim_above: float = (self._matcher.target
-                                   + AUDIO_TRIM_EXCESS_SEC * float(output_rate))
+            float(output_rate), target_frames=0.0,
+            learn_within_frames=self._cushion_frames)
+        self._trim_above: float = 0.0
+        self._aim_the_matcher()
 
         # Opened but not started.  A stream that is running is a sound
         # card asking for a buffer every few milliseconds, and until
@@ -378,6 +377,7 @@ class AudioOutput(AudioOutputInterface):
             )
             self._preroll_frames = (self._cushion_frames
                                     + self._what_the_card_takes_at_once())
+            self._aim_the_matcher()
             self.logger.info(f"Audio output initialized: rate={output_rate}Hz, buffer={frames_per_buffer}")
         except OSError as e:
             self.logger.error(f"Failed to initialize audio output: {e}")
@@ -502,6 +502,23 @@ class AudioOutput(AudioOutputInterface):
         None before the first callback.  See RateWatch in the controller.
         """
         return self._card_mark
+
+    def _aim_the_matcher(self) -> None:
+        """Set the level the rate matcher holds, and the trim line above it.
+
+        Two cushions plus a margin at least - a reading swings by a
+        block and a card buffer either way of the mean - and otherwise
+        the preroll, which is where a stream settles when its card
+        takes little at once.  A target below where the stream settles
+        is a step the matcher spends its first minutes removing; on
+        the hardware that taught the integral 505 ppm the wrong way.
+        """
+        rate = float(self.output_rate)
+        self._matcher.target = float(max(
+            2 * self._cushion_frames + AUDIO_RATE_MATCH_MARGIN_SEC * rate,
+            self._preroll_frames))
+        self._trim_above = (self._matcher.target
+                            + AUDIO_TRIM_EXCESS_SEC * rate)
 
     def _frames_on_hand(self) -> int:
         """Queued (in, less out, thrown away and trimmed) plus held."""
@@ -848,7 +865,11 @@ class AudioOutput(AudioOutputInterface):
             stereo[1::2] = right
             self._buffer_deque.append(stereo)
             self._buffer_len += stereo.size
-        target = (self._cushion_frames + frame_count) * AUDIO_CHANNELS
+        # Back to the level the rate matcher holds, so that a retune is
+        # not a step it has to work off (and learn from): having been
+        # there before, this only puts back what the retune lost.
+        target = int(max(self._cushion_frames + frame_count,
+                         self._matcher.target)) * AUDIO_CHANNELS
         if self._buffer_len < target:
             if self._refill_frames < _REFILL_LIMIT_SEC * self.output_rate:
                 self._refill_frames += frame_count
