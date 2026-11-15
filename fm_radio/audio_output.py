@@ -282,6 +282,15 @@ class AudioOutput(AudioOutputInterface):
         self._level_last: int | None = None
         self._level_reset: bool = False
         self._level_taken: tuple[int, int] = (0, 0)
+        # Frames the card has asked for since the stream last started,
+        # and when it asked for the latest: (start, frames, perf_counter).
+        # Rebound whole by the callback.  The start number goes up every
+        # time the stream is started, so a reader comparing two of these
+        # can tell that a hold came between them and the count began
+        # again.
+        self._starts: int = 0
+        self._card_frames: int = 0
+        self._card_mark: "tuple[int, int, float] | None" = None
         # Set for as long as a recording is being closed: the flag above
         # goes down first and the file stays open for the flush, the
         # worker handshake, the close and the sidecar - up to fifteen
@@ -366,6 +375,9 @@ class AudioOutput(AudioOutputInterface):
                 self.logger.warning(f"Audio callback status: {status}")
 
             requested_samples = frame_count * AUDIO_CHANNELS  # stereo interleaved samples
+            self._card_frames += frame_count
+            self._card_mark = (self._starts, self._card_frames,
+                               time.perf_counter())
             on_hand = self._note_what_is_on_hand()
             # fill deque from queue (avoid concatenation)
             while self._buffer_len < requested_samples:
@@ -468,6 +480,14 @@ class AudioOutput(AudioOutputInterface):
         self._level_count += 1
         self._level_last = on_hand
         return on_hand
+
+    @property
+    def card_mark(self) -> "tuple[int, int, float] | None":
+        """(stream start number, frames asked for since, perf_counter).
+
+        None before the first callback.  See RateWatch in the controller.
+        """
+        return self._card_mark
 
     def take_cushion_stats(self) -> "tuple[int, float, int] | None":
         """Frames on hand since the last call: (least, mean, latest).
@@ -851,6 +871,10 @@ class AudioOutput(AudioOutputInterface):
                 # first frame is at the volume.  Safe to write: the
                 # callback does not run on a stream that is not started.
                 self._after_silence = True
+                # A new count for the rate: the time the card was
+                # stopped is not time it was asking for frames.
+                self._starts += 1
+                self._card_frames = 0
                 self.stream.start_stream()
             except Exception as e:             # pragma: no cover - guard
                 self.logger.error("Could not start the audio stream: %s", e,

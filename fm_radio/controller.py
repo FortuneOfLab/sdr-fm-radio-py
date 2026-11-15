@@ -114,6 +114,93 @@ _TELEMETRY_WARN_INTERVAL_SEC: float = 60.0
 _THREAD_JOIN_TIMEOUT_SEC: float = 3.0
 
 
+class RateWatch:
+    """How fast the SDR really delivers samples and the card takes them.
+
+    The receiver turns every IQ sample into exactly its share of audio
+    (768 frames a block, measured: 0 ppm), so the cushion can only
+    drain if the samples arrive slower than the card plays them - a
+    sample clock that disagrees with the card's, or samples lost on
+    the way in with nothing to report it.  Each side is timed from a
+    reference mark taken at the first summary - not from startup,
+    which has a burst at each end - to the latest mark: a count and
+    the moment of the callback that brought it there.  Timing from
+    callback to callback rather than over a summary window keeps the
+    error to the arrival jitter, a few milliseconds over minutes,
+    where counting blocks in a window is wrong by a block either way:
+    256 ppm a minute.
+
+    Both are measured against ``time.perf_counter``, so each figure is
+    that side against the computer's clock, and the difference
+    between them is what the cushion sees.
+    """
+
+    def __init__(self, sdr_mark, card_mark, sdr_nominal_hz: float,
+                 card_nominal_hz: float) -> None:
+        self._sdr_mark = sdr_mark
+        self._card_mark = card_mark
+        self._sdr_nominal = float(sdr_nominal_hz)
+        self._card_nominal = float(card_nominal_hz)
+        self._sdr_ref: "tuple[int, float] | None" = None
+        self._card_ref: "tuple[int, int, float] | None" = None
+
+    @staticmethod
+    def _rate(count: int, t: float, ref_count: int,
+              ref_t: float) -> "float | None":
+        if t - ref_t <= 0.0 or count <= ref_count:
+            return None
+        return (count - ref_count) / (t - ref_t)
+
+    def measure(self) -> "tuple[float | None, float | None, float]":
+        """(SDR Hz, card Hz, seconds measured over), each None until known.
+
+        The first call only takes the reference marks.  A card mark from
+        a later stream start than the reference's starts the card's
+        reference again: the count began again with it.
+        """
+        sdr, card = self._sdr_mark(), self._card_mark()
+        sdr_hz = card_hz = None
+        span = 0.0
+        if sdr is not None:
+            if self._sdr_ref is None:
+                self._sdr_ref = sdr
+            else:
+                sdr_hz = self._rate(sdr[0], sdr[1], *self._sdr_ref)
+                span = sdr[1] - self._sdr_ref[1]
+        if card is not None:
+            if self._card_ref is None or card[0] != self._card_ref[0]:
+                self._card_ref = card
+            else:
+                card_hz = self._rate(card[1], card[2], self._card_ref[1],
+                                     self._card_ref[2])
+        return sdr_hz, card_hz, span
+
+    def ppm(self, hz: "float | None", nominal: float) -> "float | None":
+        return None if hz is None else (hz / nominal - 1.0) * 1e6
+
+    def line(self, elapsed: float) -> "str | None":
+        """The log line, or None while there is nothing to say yet."""
+        sdr_hz, card_hz, span = self.measure()
+        if sdr_hz is None and card_hz is None:
+            return None
+        sdr_ppm = self.ppm(sdr_hz, self._sdr_nominal)
+        card_ppm = self.ppm(card_hz, self._card_nominal)
+
+        def say(hz, ppm):
+            return "--" if hz is None else f"{hz:.1f} Hz ({ppm:+.0f} ppm)"
+
+        text = (f"Rates: t={elapsed:.0f}s over {span:.0f}s sdr="
+                f"{say(sdr_hz, sdr_ppm)} card={say(card_hz, card_ppm)}")
+        if sdr_ppm is not None and card_ppm is not None:
+            gap = sdr_ppm - card_ppm
+            # What that does to the cushion: the card's frames a minute
+            # that the SDR's samples do not pay for, or more than pay for.
+            per_min = gap * 1e-6 * self._card_nominal * 60.0
+            text += (f" sdr-card={gap:+.0f} ppm"
+                     f" (cushion {per_min:+.0f} frames/min)")
+        return text
+
+
 class _BlockProfiler:
     """Lightweight per-block timing profiler for the processing loop.
 
@@ -141,8 +228,11 @@ class _BlockProfiler:
     def __init__(self, logger: logging.Logger, q_max_capacity: int,
                  block_interval_sec: float = _BLOCK_BUDGET_SEC,
                  clock=time.perf_counter, cushion=None,
-                 output_rate: int = AUDIO_OUTPUT_RATE) -> None:
+                 output_rate: int = AUDIO_OUTPUT_RATE,
+                 rates: "RateWatch | None" = None) -> None:
         self._log = logger
+        #: The SDR's and the card's real rates, for the summary.
+        self._rates = rates
         #: Where the audio cushion is read from for the summary:
         #: AudioOutput.take_cushion_stats, or None for no cushion part.
         self._cushion = cushion
@@ -304,6 +394,7 @@ class _BlockProfiler:
                 self._tot_slow_blocks,
             )
             self._say_the_cushion(elapsed)
+            self._say_the_rates(elapsed)
             self._t_last_summary = now
             self._win_blocks = 0
             self._win_sum_dt = 0.0
@@ -311,6 +402,18 @@ class _BlockProfiler:
             self._win_slow_blocks = 0
             self._win_q_max = 0
 
+
+    def _say_the_rates(self, elapsed: float) -> None:
+        """The SDR's and the card's measured rates; see RateWatch."""
+        if self._rates is None:
+            return
+        try:
+            text = self._rates.line(elapsed)
+        except Exception as trouble:            # pragma: no cover - guard
+            self._log.debug("Could not measure the rates: %s", trouble)
+            return
+        if text is not None:
+            self._log.info(text)
 
     def _say_the_cushion(self, elapsed: float) -> None:
         """The audio cushion over the last window, on a line of its own.
@@ -1584,6 +1687,11 @@ class FMReceiverController:
                                 / self.sdr_receiver.sample_rate),
             cushion=self.audio_output.take_cushion_stats,
             output_rate=self.audio_output.output_rate,
+            rates=RateWatch(
+                lambda: self.sdr_receiver.arrival_mark,
+                lambda: self.audio_output.card_mark,
+                self.sdr_receiver.sample_rate,
+                self.audio_output.output_rate),
         )
         # Cleared on entry as well as in __init__: a thread that is
         # started a second time has a demodulator somebody else has been

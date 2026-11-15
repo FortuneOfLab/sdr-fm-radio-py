@@ -156,6 +156,14 @@ class SDRReceiver(SDRReceiverInterface):
         # Cumulative count of dropped IQ blocks (queue full). Bumped from
         # the SDR callback thread; only read for diagnostic logging.
         self._dropped_count: int = 0
+        # Samples the library has handed over, and when the latest of
+        # them arrived: (count, time.perf_counter()).  Rebound whole by
+        # the callback, so a reader always sees a pair that belongs
+        # together.  Two of these minutes apart give the rate samples
+        # really arrive at, which is how samples lost before they reach
+        # this callback show up: nothing else reports them.
+        self._samples_seen: int = 0
+        self._arrival: "tuple[int, float] | None" = None
         # Async IQ-recording worker: keeps the SDR callback off disk
         # writeframes (~4 MB/s of data, with occasional 100-1000 ms
         # OS-level stalls), so callback stalls cannot back up the
@@ -422,6 +430,10 @@ class SDRReceiver(SDRReceiverInterface):
         try:
             # Convert to numpy array allowing a copy if necessary (NumPy 2.x compatibility).
             iq = np.asarray(iq_samples, dtype=np.complex64)
+            # Counted whether or not the queue takes the block: this is
+            # the rate the samples arrive at, not the rate they are used.
+            self._samples_seen += iq.size
+            self._arrival = (self._samples_seen, time.perf_counter())
             self.data_queue.put((generation, iq), block=False)
 
             # And to whoever else is watching.  data_queue is a work
@@ -472,6 +484,14 @@ class SDRReceiver(SDRReceiverInterface):
         except Exception as e:
             # Drop this buffer if conversion fails to avoid crashing the SDR ctypes callback.
             self.logger.error(f"Error in SDR callback: {e}", exc_info=True)
+
+    @property
+    def arrival_mark(self) -> "tuple[int, float] | None":
+        """(samples handed over so far, perf_counter when the last came).
+
+        None before the first block.  See RateWatch in the controller.
+        """
+        return self._arrival
 
     @property
     def dropped_blocks(self) -> int:
