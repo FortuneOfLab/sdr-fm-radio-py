@@ -15,6 +15,7 @@ import numpy as np
 import pytest
 
 from fm_radio.audio_output import clamp_volume, volume_gain
+from fm_radio.rate_match import FractionalResampler
 from fm_radio.cli import CommandLineInterface
 from fm_radio.constants import (
     AUDIO_FRAMES_PER_BUFFER, AUDIO_OUTPUT_RATE, RECORD_MAX_INT16,
@@ -57,6 +58,24 @@ def _settled(audio_output) -> np.ndarray:
 REFERENCE_DB = _rms_db(_tone())         # -9.03 dBFS
 
 
+def _next_frames(audio_output, frames: int = FRAMES) -> np.ndarray:
+    """The next *frames* the card will be handed, before the volume.
+
+    What the callback still holds, then the queue from its head: the
+    audio after rate matching, which resamples each block by a few
+    ppm and delays it by 16 frames, so that the volume stage can be
+    held to exactly what it was given rather than to what went in.
+    Shape (frames, 2).
+    """
+    with audio_output.audio_buffer_queue.mutex:
+        queued = list(audio_output.audio_buffer_queue.queue)
+    parts = [chunk.reshape(-1, 2) for chunk in audio_output._buffer_deque]
+    parts += [np.column_stack([left, right]) for left, right in queued]
+    waiting = np.concatenate(parts) if parts else np.zeros((0, 2))
+    assert len(waiting) >= frames, "not enough waiting to compare against"
+    return waiting[:frames].astype(np.float32)
+
+
 # ----------------------------------------------------------------------
 # The curve
 # ----------------------------------------------------------------------
@@ -89,11 +108,19 @@ def test_not_a_number_is_refused():
 # ----------------------------------------------------------------------
 
 def test_full_volume_plays_the_audio_untouched(audio_output):
-    """The default is what the receiver played before there was a knob."""
-    out = _played(audio_output)
+    """The default hands the card exactly what was waiting for it."""
+    tone = _tone()
+    audio_output.enqueue_audio(tone, tone)
+    waiting = _next_frames(audio_output)
+    out, _ = audio_output.callback(None, FRAMES, {}, 0)
+    out = np.frombuffer(out, dtype=np.float32).reshape(FRAMES, 2)
     assert audio_output.volume == 100
-    np.testing.assert_array_equal(out[:, 0], _tone())
-    np.testing.assert_array_equal(out[:, 1], _tone())
+    np.testing.assert_array_equal(out, waiting)
+    # And what was waiting is the tone, 16 frames late (the
+    # resampler's delay) and at its level.
+    late = FractionalResampler().half
+    assert _rms_db(out[FRAMES // 2:, 0]) == pytest.approx(
+        _rms_db(tone[FRAMES // 2 - late:FRAMES - late]), abs=0.01)
 
 
 @pytest.mark.parametrize("percent", [80, 50, 20, 10])
@@ -115,8 +142,13 @@ def test_turning_it_back_up_restores_the_audio_exactly(audio_output):
     audio_output.set_volume(30)
     _settled(audio_output)
     audio_output.set_volume(100)
-    out = _settled(audio_output)
-    np.testing.assert_array_equal(out[:, 0], _tone())
+    _settled(audio_output)
+    tone = _tone()
+    audio_output.enqueue_audio(tone, tone)
+    waiting = _next_frames(audio_output)
+    out, _ = audio_output.callback(None, FRAMES, {}, 0)
+    np.testing.assert_array_equal(
+        np.frombuffer(out, dtype=np.float32).reshape(FRAMES, 2), waiting)
 
 
 def test_a_change_is_ramped_over_one_buffer_not_stepped(audio_output):
@@ -555,9 +587,12 @@ def test_a_volume_set_before_the_stream_starts_is_its_first_frame(
     """Nothing has been played to ramp from: the first frame is the volume."""
     audio_output.set_volume(20)
     _start_playing(audio_output)
+    waiting = _next_frames(audio_output)
     out, _ = audio_output.callback(None, FRAMES, {}, 0)
     left = np.frombuffer(out, dtype=np.float32)[0::2]
-    np.testing.assert_allclose(left, AMPLITUDE * volume_gain(20), rtol=1e-5)
+    np.testing.assert_allclose(left, waiting[:, 0] * volume_gain(20),
+                               rtol=1e-5, atol=1e-9)
+    assert left[-1] == pytest.approx(AMPLITUDE * volume_gain(20), rel=1e-4)
 
 
 def test_a_mute_set_while_held_is_silent_when_the_stream_restarts(

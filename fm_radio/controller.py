@@ -229,8 +229,12 @@ class _BlockProfiler:
                  block_interval_sec: float = _BLOCK_BUDGET_SEC,
                  clock=time.perf_counter, cushion=None,
                  output_rate: int = AUDIO_OUTPUT_RATE,
-                 rates: "RateWatch | None" = None) -> None:
+                 rates: "RateWatch | None" = None,
+                 rate_correction=None) -> None:
         self._log = logger
+        #: (ppm now, ppm learned, frames trimmed) from the rate matcher,
+        #: appended to the cushion line; None for no such part.
+        self._rate_correction = rate_correction
         #: The SDR's and the card's real rates, for the summary.
         self._rates = rates
         #: Where the audio cushion is read from for the summary:
@@ -433,11 +437,20 @@ class _BlockProfiler:
             return
         least, mean, last = stats
         per_ms = 1000.0 / self._output_rate
+        matching = ""
+        if self._rate_correction is not None:
+            try:
+                ppm, learned, trimmed = self._rate_correction()
+                matching = (f" rate {ppm:+.0f} ppm (learned {learned:+.0f})"
+                            f" trimmed {trimmed} frames")
+            except Exception as trouble:        # pragma: no cover - guard
+                self._log.debug("Could not read the rate matcher: %s",
+                                trouble)
         self._log.info(
             "AudioCushion: t=%.0fs min=%d avg=%.0f last=%d frames "
-            "(%.1f/%.1f/%.1f ms)",
+            "(%.1f/%.1f/%.1f ms)%s",
             elapsed, least, mean, last,
-            least * per_ms, mean * per_ms, last * per_ms)
+            least * per_ms, mean * per_ms, last * per_ms, matching)
 
 
 #: How long the command line is given to notice that it has been asked
@@ -1692,6 +1705,7 @@ class FMReceiverController:
                 lambda: self.audio_output.card_mark,
                 self.sdr_receiver.sample_rate,
                 self.audio_output.output_rate),
+            rate_correction=lambda: self.audio_output.rate_correction,
         )
         # Cleared on entry as well as in __init__: a thread that is
         # started a second time has a demodulator somebody else has been

@@ -369,6 +369,17 @@ AUDIO_FINAL_LP_CUTOFF_HZ = 15000.0  # Passband edge (Hz)
 AUDIO_FINAL_LP_STOP_HZ = 16500.0    # Stopband edge (Hz)
 AUDIO_FRAMES_PER_BUFFER = 1024     # Frames per audio callback
 AUDIO_QUEUE_MAXSIZE = 50            # Max queued audio blocks
+# Rate matching (fm_radio.rate_match): the audio waiting for the card is
+# held at two cushions plus this - 105 ms in standard mode - by
+# resampling each block by a few hundred ppm.  Two cushions, because a
+# reading swings by a block and a card buffer either way of the mean,
+# and the mean has to stay clear of the card's next request.
+AUDIO_RATE_MATCH_MARGIN_SEC = 0.03
+# More than this over the target and the excess is dropped at once
+# rather than resampled away: a startup that kept a second of audio
+# would take ten minutes to bleed it off at the rate limit, a second
+# behind the station all the while.
+AUDIO_TRIM_EXCESS_SEC = 0.25
 # Listening volume, in percent of full level.  Applied to what the card
 # plays and to nothing else: the recordings, the level meters and the
 # telemetry all see the receiver's own level.  100 is unity gain, which

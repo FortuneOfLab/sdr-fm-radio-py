@@ -163,6 +163,21 @@ def test_the_minute_summary_carries_the_cushion(caplog):
     assert "min=480 avg=1200 last=960 frames (10.0/25.0/20.0 ms)" in lines[0]
 
 
+def test_the_cushion_line_carries_the_rate_correction(caplog):
+    from fm_radio.controller import _BlockProfiler
+    clock = [100.0]
+    profiler = _BlockProfiler(logging.getLogger("test.cushion"), 80,
+                              clock=lambda: clock[0],
+                              cushion=lambda: (480, 1200.0, 960),
+                              output_rate=48000,
+                              rate_correction=lambda: (523.4, 480.2, 26880))
+    with caplog.at_level(logging.INFO, logger="test.cushion"):
+        _a_minute_of_blocks(profiler, clock)
+    (line,) = [r.getMessage() for r in caplog.records
+               if r.getMessage().startswith("AudioCushion")]
+    assert line.endswith("rate +523 ppm (learned +480) trimmed 26880 frames")
+
+
 @pytest.mark.parametrize("cushion", [None, lambda: None],
                          ids=["no output", "nothing played"])
 def test_no_cushion_line_without_a_cushion(caplog, cushion):
@@ -202,6 +217,8 @@ def test_the_receiver_hands_its_output_to_the_profiler(no_user_config,
         assert rates._card_mark() is card_mark
         assert rates._sdr_nominal == receiver.sdr_receiver.sample_rate
         assert rates._card_nominal == receiver.audio_output.output_rate
+        receiver.audio_output._matcher.ppm = 321.0
+        assert seen["rate_correction"]()[0] == 321.0
     finally:
         receiver.auto_gain.stop()
         receiver.audio_output.cleanup()

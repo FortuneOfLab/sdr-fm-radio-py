@@ -39,6 +39,7 @@ import numpy as np
 import pyaudio
 
 from fm_radio import recording_meta
+from fm_radio.rate_match import FractionalResampler, RateMatcher
 from fm_radio.interfaces import AudioOutputInterface
 from fm_radio.exceptions import AudioOutputError, RecordingError
 from fm_radio.constants import (
@@ -49,6 +50,7 @@ from fm_radio.constants import (
     RECORD_SAMPLE_WIDTH, RECORD_MAX_INT16,
     RECORD_QUEUE_MAXSIZE, AUDIO_RECORD_ROTATE_THRESHOLD_BYTES,
     VOLUME_MIN_PERCENT, VOLUME_MAX_PERCENT, VOLUME_DEFAULT_PERCENT,
+    AUDIO_RATE_MATCH_MARGIN_SEC, AUDIO_TRIM_EXCESS_SEC,
 )
 
 
@@ -273,6 +275,10 @@ class AudioOutput(AudioOutputInterface):
         self._frames_in: int = 0
         self._frames_pulled: int = 0
         self._frames_discarded: int = 0
+        # Frames the rate matcher dropped because far too many were
+        # waiting.  The processing thread's own, like _frames_in.
+        self._frames_trimmed: int = 0
+        self._trim_last_logged: float = 0.0
         # Per window, for take_cushion_stats.  Written by the callback;
         # the reader asks for a new window by raising _level_reset,
         # which the callback lowers when it starts one.
@@ -341,6 +347,16 @@ class AudioOutput(AudioOutputInterface):
             int(round(float(block_interval_sec) * float(output_rate)))
             + AUDIO_PREROLL_SLACK_FRAMES)
         self._preroll_frames: int = self._cushion_frames
+        # Rate matching; see fm_radio.rate_match.  Both are the
+        # processing thread's, used under _close_lock, which is also
+        # what a hold takes to reset them.
+        self._resampler = FractionalResampler()
+        self._matcher = RateMatcher(
+            float(output_rate),
+            target_frames=(2 * self._cushion_frames
+                           + AUDIO_RATE_MATCH_MARGIN_SEC * float(output_rate)))
+        self._trim_above: float = (self._matcher.target
+                                   + AUDIO_TRIM_EXCESS_SEC * float(output_rate))
 
         # Opened but not started.  A stream that is running is a sound
         # card asking for a buffer every few milliseconds, and until
@@ -468,9 +484,7 @@ class AudioOutput(AudioOutputInterface):
         is counted a callback late, which is one block's error in one
         reading and nothing in the trend.
         """
-        on_hand = (self._frames_in - self._frames_pulled
-                   - self._frames_discarded
-                   + self._buffer_len // AUDIO_CHANNELS)
+        on_hand = self._frames_on_hand()
         if self._level_reset or self._level_min is None:
             self._level_reset = False
             self._level_min = on_hand
@@ -488,6 +502,67 @@ class AudioOutput(AudioOutputInterface):
         None before the first callback.  See RateWatch in the controller.
         """
         return self._card_mark
+
+    def _frames_on_hand(self) -> int:
+        """Queued (in, less out, thrown away and trimmed) plus held."""
+        return (self._frames_in - self._frames_pulled
+                - self._frames_discarded - self._frames_trimmed
+                + self._buffer_len // AUDIO_CHANNELS)
+
+    @property
+    def rate_correction(self) -> "tuple[float, float, int]":
+        """(ppm now, ppm learned, frames trimmed so far), for the log."""
+        return (self._matcher.ppm, self._matcher.integral_ppm,
+                self._frames_trimmed)
+
+    def _match_the_rate(self, left: np.ndarray, right: np.ndarray
+                        ) -> "tuple[np.ndarray, np.ndarray]":
+        """Resample a block on its way in, by what the cushion says.
+
+        Only a playing stream that is not refilling has a level worth
+        steering by: before the start the preroll is filling, and a
+        refill is a level held low on purpose.  Those blocks are still
+        resampled, by the ratio already learned, so that the resampler's
+        state runs on unbroken; the level is measured afresh after them.
+        """
+        matcher = self._matcher
+        if self._playing and not self._refilling and not self._holds:
+            on_hand = self._frames_on_hand()
+            if on_hand > self._trim_above:
+                on_hand -= self._trim(on_hand)
+                matcher.restart_level()
+            ratio = matcher.update(on_hand, int(left.size))
+        else:
+            matcher.restart_level()
+            ratio = matcher.ratio()
+        return self._resampler.process(left, right, ratio)
+
+    def _trim(self, on_hand: int) -> int:
+        """Drop the oldest queued blocks down to the target; returns frames.
+
+        A jump in the audio, so only for an excess the resampler would
+        take minutes to remove - in practice the burst a startup leaves
+        when a stalled first few seconds are delivered all at once.
+        The callback takes from the same queue; Queue is safe for two
+        takers, and each counts only what it took.
+        """
+        dropped = 0
+        while on_hand - dropped > self._matcher.target:
+            try:
+                left, _ = self.audio_buffer_queue.get_nowait()
+            except queue.Empty:
+                break
+            self._frames_trimmed += left.size
+            dropped += left.size
+        now = time.monotonic()
+        if dropped and now - self._trim_last_logged >= _UNDERRUN_LOG_INTERVAL_SEC:
+            self._trim_last_logged = now
+            self.logger.info(
+                "Audio trimmed: %.0f ms dropped, %d frames were waiting "
+                "against a target of %.0f",
+                1000.0 * dropped / self.output_rate, on_hand,
+                self._matcher.target)
+        return dropped
 
     def take_cushion_stats(self) -> "tuple[int, float, int] | None":
         """Frames on hand since the last call: (least, mean, latest).
@@ -837,6 +912,11 @@ class AudioOutput(AudioOutputInterface):
         with self._close_lock:
             with self._play_lock:
                 self._holding_stopped = True
+                # What comes after the hold is another place in the
+                # band: the resampler starts clean, and the level is
+                # measured again once the stream is playing.
+                self._resampler.reset()
+                self._matcher.restart_level()
                 # The preroll re-armed below rebuilds the cushion on
                 # its own; a refill left over would add to it.
                 self._refilling = False
@@ -930,6 +1010,7 @@ class AudioOutput(AudioOutputInterface):
             # yet - and every retune resets it.  A slot in the queue
             # for nothing, and fifty of those is a full queue.
             return
+        left32, right32 = self._match_the_rate(left32, right32)
         try:
             self.audio_buffer_queue.put((left32, right32), timeout=AUDIO_ENQUEUE_TIMEOUT)
             self._frames_in += left32.size
