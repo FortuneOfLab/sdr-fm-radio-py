@@ -11,7 +11,7 @@ import threading
 from multiprocessing.connection import Client
 
 
-def wait_forever(send, address, window_s):
+def wait_forever(send, address, window_s, arguments=()):
     """Tell *address* it is running, then never answer the job.
 
     *address* is a ``multiprocessing.connection.Listener``'s, passed
@@ -23,7 +23,7 @@ def wait_forever(send, address, window_s):
     threading.Event().wait()
 
 
-def answer_when_told(send, address, window_s):
+def answer_when_told(send, address, window_s, arguments=()):
     """Tell *address* it is running, and answer the job once told to."""
     with Client(address) as told:
         told.send(os.getpid())
@@ -31,6 +31,6 @@ def answer_when_told(send, address, window_s):
     send.send(("failed", "told to"))
 
 
-def die_without_answering(send, wav_path, window_s):
+def die_without_answering(send, wav_path, window_s, arguments=()):
     """End the process the way a crash would: no answer, no clean-up."""
     os._exit(3)

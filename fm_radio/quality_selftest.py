@@ -1730,6 +1730,41 @@ def _check_the_ranges(args) -> None:
             f"not {phase}.  NaN means the variant's default.")
 
 
+def _iq_demod_overrides(args) -> dict:
+    """What an ``--iq-wav`` run asks the demodulator for.
+
+    The parsed command line turned into :func:`_run_demod_diag_iq`'s
+    keywords: where an argument spells "not asked for" as NaN or as a
+    negative number, that becomes None; ``--side-nr`` left out is
+    already None, and ``--disable-iq-phase-correction`` left out is
+    False.  Call :func:`_check_the_ranges` on *args* first.
+
+    One function because two front ends ask: ``main`` and
+    :func:`fm_radio.redecode.decode_file`, which hands this the
+    command line the Recordings tab builds from a DSP-tab slot.  What
+    the GUI re-decodes under a set of arguments is then what the
+    command line measures under the same arguments, by construction.
+    """
+    def given(value):
+        value = float(value)
+        return None if math.isnan(value) else value
+
+    return dict(
+        fixed_blend=(None if float(args.fixed_blend) < 0.0
+                     else float(args.fixed_blend)),
+        disable_iq_phase_correction=bool(args.disable_iq_phase_correction),
+        mono_delay_samples=(
+            None if int(args.mono_delay_samples) < 0
+            else int(args.mono_delay_samples)),
+        subcarrier_phase_offset_deg=given(args.subcarrier_phase_offset_deg),
+        lr_high_max_gain=given(args.lr_high_max_gain),
+        lr_super_high_max_gain=given(args.lr_super_high_max_gain),
+        side_nr_enable=args.side_nr,
+        side_nr_alpha_floor=given(args.side_nr_alpha_floor),
+        side_nr_beta=given(args.side_nr_beta),
+    )
+
+
 def main() -> None:
     args = _parser().parse_args()
     # --cnr-db uses a sentinel default so each mode can pick its own
@@ -1791,36 +1826,7 @@ def main() -> None:
                 format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
             )
         iq = _load_iq_wav(args.iq_wav, int(SDR_SAMPLE_RATE), float(args.duration))
-        common_overrides = dict(
-            disable_iq_phase_correction=bool(args.disable_iq_phase_correction),
-            mono_delay_samples=(
-                None if int(args.mono_delay_samples) < 0 else int(args.mono_delay_samples)
-            ),
-            subcarrier_phase_offset_deg=(
-                None if np.isnan(float(args.subcarrier_phase_offset_deg))
-                else float(args.subcarrier_phase_offset_deg)
-            ),
-            lr_high_max_gain=(
-                None if np.isnan(float(args.lr_high_max_gain))
-                else float(args.lr_high_max_gain)
-            ),
-            lr_super_high_max_gain=(
-                None if np.isnan(float(args.lr_super_high_max_gain))
-                else float(args.lr_super_high_max_gain)
-            ),
-            side_nr_enable=args.side_nr,
-            side_nr_alpha_floor=(
-                None if np.isnan(float(args.side_nr_alpha_floor))
-                else float(args.side_nr_alpha_floor)
-            ),
-            side_nr_beta=(
-                None if np.isnan(float(args.side_nr_beta))
-                else float(args.side_nr_beta)
-            ),
-        )
-        stereo_diag = _run_demod_diag_iq(
-            iq, fixed_blend=fixed_blend, **common_overrides,
-        )
+        stereo_diag = _run_demod_diag_iq(iq, **_iq_demod_overrides(args))
         measured = measure_demodulated(
             stereo_diag,
             warmup_s=float(args.warmup_s),

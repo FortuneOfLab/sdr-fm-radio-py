@@ -477,6 +477,17 @@ def test_the_dsp_tab_holds_the_settings(window):
     assert view._dsp._reset_all.isEnabled()
 
 
+def test_the_recordings_tab_can_re_decode_under_the_dsp_tabs_slots(window):
+    """The window hands the recordings tab the DSP tab itself, so a
+    re-decode reads a slot as it is when the button is pressed."""
+    view, _ = window()
+
+    assert view._recordings._dsp is view._dsp
+    box = view._recordings.dsp_box
+    assert [box.itemData(i) for i in range(box.count())] == [
+        "defaults", "A", "B"]
+
+
 # ----------------------------------------------------------------------
 # What it shows
 # ----------------------------------------------------------------------

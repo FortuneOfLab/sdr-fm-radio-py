@@ -485,3 +485,16 @@ class DspTab(QWidget):
     def slot(self) -> str:
         """Which of :data:`SLOTS` is being edited and heard."""
         return self._slot
+
+    def slot_settings(self, which: str):
+        """What slot *which* holds now, heard or not.
+
+        For the Recordings tab, which re-decodes under it.  A
+        ``DspSettings`` is immutable, so what is handed out is not
+        changed by anything the controls do afterwards.
+        """
+        return self._slots[which]
+
+    def defaults(self):
+        """What the receiver started under: what Reset goes back to."""
+        return self._defaults
