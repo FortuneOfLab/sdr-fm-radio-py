@@ -616,3 +616,47 @@ def test_a_mute_landing_inside_a_volume_change_is_not_lost(audio_output,
     assert audio_output.volume == 30
     assert not np.any(_settled(audio_output)), (
         "muted, and still playing at %.3f" % audio_output._gain_wanted)
+
+
+
+def test_muting_during_a_refill_stays_silent_on_the_settle_path(audio_output):
+    _into_a_refill(audio_output)
+    audio_output.set_muted(True)
+    frames = audio_output._cushion_frames + FRAMES + 16
+    audio_output.enqueue_audio(_dc(frames), _dc(frames))
+    out, _ = audio_output.callback(None, FRAMES, {}, 0)
+    assert audio_output._refilling, (
+        "the refill was meant to stay armed: this is the settle path")
+    left = np.frombuffer(out, dtype=np.float32)[0::2]
+    assert not np.any(left), (
+        "muted, yet the first frame after the silence was %.4f" % left[0])
+
+
+def test_a_volume_set_during_a_refill_holds_on_the_settle_path(audio_output):
+    _into_a_refill(audio_output)
+    audio_output.set_volume(20)
+    frames = audio_output._cushion_frames + FRAMES + 16
+    audio_output.enqueue_audio(_dc(frames), _dc(frames))
+    out, _ = audio_output.callback(None, FRAMES, {}, 0)
+    assert audio_output._refilling
+    left = np.frombuffer(out, dtype=np.float32)[0::2]
+    np.testing.assert_allclose(left, AMPLITUDE * volume_gain(20), rtol=1e-5)
+
+
+def test_a_refill_that_played_no_silence_still_ramps(audio_output):
+    """Heard audio before, heard audio after: the ramp is the right one.
+
+    The refill is armed, but the cushion is already there, so the next
+    buffer is audio through the settle branch with no silence before
+    it.  Snapping the gain there would be a step from what was just
+    heard - the click the ramp exists to prevent.
+    """
+    _start_playing(audio_output)
+    audio_output.callback(None, FRAMES, {}, 0)           # heard at 100 %
+    audio_output.rebuild_cushion()
+    audio_output.set_volume(0)
+    out, _ = audio_output.callback(None, FRAMES, {}, 0)
+    assert audio_output._refilling, "meant to be the settle branch"
+    gain = np.frombuffer(out, dtype=np.float32)[0::2] / AMPLITUDE
+    steps = np.diff(np.concatenate([[1.0], gain]))
+    assert np.max(np.abs(steps)) == pytest.approx(1.0 / FRAMES, rel=1e-3)

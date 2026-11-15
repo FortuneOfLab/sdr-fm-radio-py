@@ -248,6 +248,18 @@ class AudioOutput(AudioOutputInterface):
         # callback reads _gain_wanted alone, one load, and never takes
         # this - it holds a lock for nothing on the audio path.
         self._volume_lock: threading.Lock = threading.Lock()
+        # Whether the last thing the card was handed went past the
+        # volume: a refill's silence, the silence of a failed callback,
+        # or nothing at all because the stream was not running.  The
+        # next buffer that goes through the volume then starts at it
+        # rather than ramping from _gain_applied, which describes audio
+        # that is no longer the last thing heard.  One rule at the one
+        # place the volume is applied, rather than a fix-up at each way
+        # out of a silence - there are more of those than it looks, and
+        # missing one let a muted station through.  Written by the
+        # callback, and by _play_from_now_on while the stream is
+        # stopped; True to begin with, because nothing has been played.
+        self._after_silence: bool = True
         # Set for as long as a recording is being closed: the flag above
         # goes down first and the file stays open for the flush, the
         # worker handshake, the close and the sidecar - up to fifteen
@@ -345,6 +357,7 @@ class AudioOutput(AudioOutputInterface):
                     break
 
             if self._refilling and self._still_refilling(frame_count):
+                self._after_silence = True
                 return (np.zeros(requested_samples, dtype=np.float32).tobytes(),
                         pyaudio.paContinue)
 
@@ -395,7 +408,7 @@ class AudioOutput(AudioOutputInterface):
         except Exception as e:
             self.logger.error(f"Error in audio callback: {e}", exc_info=True)
             # Return silence to avoid crashing the audio stream
-            self._gain_applied = self._gain_wanted
+            self._after_silence = True
             silence = np.zeros(frame_count * AUDIO_CHANNELS, dtype=np.float32)
             return (silence.tobytes(), pyaudio.paContinue)
 
@@ -414,6 +427,11 @@ class AudioOutput(AudioOutputInterface):
         2048 floats - and a ramp only on the callback after a change.
         """
         wanted = self._gain_wanted
+        if self._after_silence:
+            # Coming out of a silence the volume never saw: there is no
+            # level in the air to ramp from, so start at the volume.
+            self._after_silence = False
+            self._gain_applied = wanted
         was = self._gain_applied
         if wanted == was:
             if wanted != 1.0:
@@ -672,16 +690,6 @@ class AudioOutput(AudioOutputInterface):
             # it is going to yet: play this one and judge again.
             return False
         self._refilling = False
-        if self._refill_frames:
-            # The card has been playing silence that never went through
-            # the volume, so the audio comes back at the volume as it is
-            # now - not ramped from the gain before the retune.  Left as
-            # it was, a mute set during the refill let half a buffer of
-            # the station through, and a volume set then started from
-            # the old level.  A refill that played no silence leaves the
-            # gain alone: the buffer before this one was heard, and the
-            # ramp from it is the right one.
-            self._gain_applied = self._gain_wanted
         now = time.monotonic()
         if (self._refill_frames
                 and now - self._refill_last_logged
@@ -765,7 +773,7 @@ class AudioOutput(AudioOutputInterface):
                 # ever - so there is no level to ramp from, and the
                 # first frame is at the volume.  Safe to write: the
                 # callback does not run on a stream that is not started.
-                self._gain_applied = self._gain_wanted
+                self._after_silence = True
                 self.stream.start_stream()
             except Exception as e:             # pragma: no cover - guard
                 self.logger.error("Could not start the audio stream: %s", e,
