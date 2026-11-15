@@ -59,6 +59,19 @@ _RECORD_WORKER_SHUTDOWN = object()
 # all, not each of the fifty a second.
 _UNDERRUN_LOG_INTERVAL_SEC: float = 5.0
 
+#: Longest the output plays silence while it rebuilds its cushion after
+#: a retune.  Rebuilding takes the frames the retune lost plus whatever
+#: had already gone - 21 or 43 ms measured - so this is only reached
+#: when nothing is arriving at all, and then the gaps had better be
+#: counted as the underruns they are rather than hidden as a refill.
+_REFILL_LIMIT_SEC: float = 0.25
+
+#: Blocks a refill stays armed for after the reset, whatever the level.
+#: The audio the reset costs is missed over the first two blocks after
+#: it - the first comes out empty, the second short - so a cushion
+#: judged before both are in has not lost anything yet.
+_REFILL_SETTLE_BLOCKS: int = 2
+
 #: Longest shutdown waits for a recording that is being closed elsewhere.
 #: stop_recording is itself bounded at about fifteen seconds; past this
 #: something is wrong and the log should say so rather than the process
@@ -181,6 +194,15 @@ class AudioOutput(AudioOutputInterface):
         # the log can say how long a hold lasted in blocks rather
         # than only in seconds.
         self._held_drop_count: int = 0
+        # Set by rebuild_cushion() on the processing thread, cleared by
+        # the callback once the cushion is back; see there.  A plain
+        # flag: a stale read costs one callback either way.
+        self._refilling: bool = False
+        self._refill_frames: int = 0
+        # Blocks handed over since the refill was asked for, empty ones
+        # included.  Written by the processing thread alone.
+        self._refill_blocks: int = 0
+        self._refill_last_logged: float = 0.0
         # Set for as long as a recording is being closed: the flag above
         # goes down first and the file stays open for the flush, the
         # worker handshake, the close and the sidecar - up to fifteen
@@ -276,6 +298,10 @@ class AudioOutput(AudioOutputInterface):
                     self._buffer_len += stereo.size
                 except queue.Empty:
                     break
+
+            if self._refilling and self._still_refilling(frame_count):
+                return (np.zeros(requested_samples, dtype=np.float32).tobytes(),
+                        pyaudio.paContinue)
 
             out = np.empty((requested_samples,), dtype=np.float32)
             filled = 0
@@ -459,6 +485,82 @@ class AudioOutput(AudioOutputInterface):
         """Whether the output is being held; see :meth:`hold`."""
         return self._holds > 0
 
+    def rebuild_cushion(self) -> None:
+        """Play silence until the cushion is back; the audio just jumped.
+
+        For the processing thread to call when it resets the
+        demodulator for a new tuning.  The reset costs audio: the
+        first block after it comes out empty and the second short,
+        1024 frames (21.3 ms) between them, measured.  The receiver
+        produces at exactly the rate the card consumes and never gets
+        ahead, so those frames come out of the cushion and stay out.
+        Offline, one retune left 768 of the 1792 frames the stream
+        started with and the next ran it dry (the hardware went three
+        or four retunes first); from then on the stream
+        plays with nothing in hand, so every slow block afterwards is
+        a gap.  An underrun's padding puts back only what it had to,
+        which leaves the queue at the edge rather than behind a
+        cushion.  On the hardware that was underruns 5 to 52 seconds
+        after a burst of retunes, and none in three to four minutes
+        before the first.
+
+        So the card is given silence, without being stopped, until
+        what is waiting is the cushion plus the buffer it is asking
+        for - where a stream stands after its start-up burst.  The
+        silence falls at the station change, which is a gap anyway.
+        Stopping the card instead is what hold() does and costs a
+        graceful stop's 100-odd ms; see FMReceiverController._tune_now.
+
+        Not when the output is not playing: the preroll covers a
+        stream that has not started, and a held one re-arms it.
+        """
+        if self._playing and not self._holds:
+            self._refill_frames = 0
+            self._refill_blocks = 0
+            self._refilling = True
+
+    def _still_refilling(self, frame_count: int) -> bool:
+        """Whether this callback is still silence; see rebuild_cushion.
+
+        Runs on the callback, which owns the deque.  Everything queued
+        is pulled in first, so the count is the whole of what is
+        waiting and the queue cannot fill while the card is not taking
+        from it.  The silence is not counted as an underrun: it is
+        chosen, as the preroll at startup is.  It is bounded, so that
+        a receiver that has stopped producing still shows up as
+        underruns.
+        """
+        while True:
+            try:
+                left, right = self.audio_buffer_queue.get_nowait()
+            except queue.Empty:
+                break
+            stereo = np.empty((left.size + right.size,), dtype=np.float32)
+            stereo[0::2] = left
+            stereo[1::2] = right
+            self._buffer_deque.append(stereo)
+            self._buffer_len += stereo.size
+        target = (self._cushion_frames + frame_count) * AUDIO_CHANNELS
+        if self._buffer_len < target:
+            if self._refill_frames < _REFILL_LIMIT_SEC * self.output_rate:
+                self._refill_frames += frame_count
+                return True
+            # Nothing is arriving: give up, and let the gaps count.
+        elif self._refill_blocks < _REFILL_SETTLE_BLOCKS:
+            # Enough in hand for now, but the reset has not cost what
+            # it is going to yet: play this one and judge again.
+            return False
+        self._refilling = False
+        now = time.monotonic()
+        if (self._refill_frames
+                and now - self._refill_last_logged
+                >= _UNDERRUN_LOG_INTERVAL_SEC):
+            self._refill_last_logged = now
+            self.logger.info(
+                "Audio cushion rebuilt after a retune: %.0f ms of silence",
+                1000.0 * self._refill_frames / self.output_rate)
+        return False
+
     def _stop_the_card(self) -> "tuple[bool, bool]":
         """Ask PortAudio to stop the stream.  Step 2 of :meth:`hold`.
 
@@ -500,6 +602,9 @@ class AudioOutput(AudioOutputInterface):
         with self._close_lock:
             with self._play_lock:
                 self._holding_stopped = True
+                # The preroll re-armed below rebuilds the cushion on
+                # its own; a refill left over would add to it.
+                self._refilling = False
                 self._frames_ready = 0
                 self._buffer_deque.clear()
                 self._buffer_len = 0
@@ -565,6 +670,9 @@ class AudioOutput(AudioOutputInterface):
             # a silence full of underruns.
             self._held_drop_count += 1
             return
+        # Before the empty block is turned away below: it is one of
+        # the two a refill waits for.
+        self._refill_blocks += 1
         try:
             left32 = np.asarray(left, dtype=np.float32, copy=False)
             right32 = np.asarray(right, dtype=np.float32, copy=False)
