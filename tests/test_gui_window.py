@@ -3011,3 +3011,28 @@ def test_choosing_an_area_names_the_scan_list_again(window, monkeypatch,
     choose_the_area(view, "関東")
 
     assert "TOKYO FM" in view._found.itemText(1)
+
+
+def test_an_area_saved_during_a_scan_is_not_overwritten_by_its_progress(
+        window, monkeypatch):
+    """The sweep reports many times a second; the notice gets its time.
+
+    Then the progress is back: holding it off for good would leave a
+    running scan saying nothing about where it has got to.
+    """
+    from fm_radio.gui import main_window
+
+    view, controller = window()
+    view._scanning("scanning 78.0 MHz")
+    assert "78.0" in view._health.text(), "the test meant to start here"
+
+    choose_the_area(view, "関東")
+    view._scanning("scanning 80.0 MHz")
+    view.refresh()
+
+    assert "関東" in view._health.text(), view._health.text()
+
+    clock = [main_window.time.monotonic() + main_window.NOTICE_SECONDS + 1]
+    monkeypatch.setattr(main_window.time, "monotonic", lambda: clock[0])
+    view._scanning("scanning 82.0 MHz")
+    assert "82.0" in view._health.text(), view._health.text()
