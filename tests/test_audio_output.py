@@ -268,7 +268,10 @@ def test_an_underrun_says_so_in_the_log(audio_output, caplog):
     said = underrun_lines(caplog)
     assert len(said) == 1
     assert said[0].levelno == logging.INFO
-    assert "768 of 768 frames" in said[0].getMessage()
+    # Frames, which is what the words say: it used to count the
+    # interleaved samples and print 768 for a 384-frame buffer.
+    assert "384 of 384 frames short" in said[0].getMessage()
+    assert "0 frames on hand" in said[0].getMessage()
 
 
 def test_a_flood_of_underruns_is_one_line_carrying_the_count(audio_output,

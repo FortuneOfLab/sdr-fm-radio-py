@@ -260,6 +260,28 @@ class AudioOutput(AudioOutputInterface):
         # callback, and by _play_from_now_on while the stream is
         # stopped; True to begin with, because nothing has been played.
         self._after_silence: bool = True
+        # How much audio is waiting for the card, measured at the entry
+        # to every callback: what is queued plus what the callback
+        # already holds.  For the log, to tell a cushion that drains
+        # steadily (the SDR's clock and the card's disagreeing) from one
+        # that drops in a step (a retune) from one that is fine and only
+        # meets a late block.  Three counters, each written by one
+        # thread only, so none of them needs a lock: frames that went
+        # into the queue (the processing thread), frames the callback
+        # took out of it, and frames a hold threw away (written while
+        # the card is stopped, when the callback is not running).
+        self._frames_in: int = 0
+        self._frames_pulled: int = 0
+        self._frames_discarded: int = 0
+        # Per window, for take_cushion_stats.  Written by the callback;
+        # the reader asks for a new window by raising _level_reset,
+        # which the callback lowers when it starts one.
+        self._level_min: int | None = None
+        self._level_sum: int = 0
+        self._level_count: int = 0
+        self._level_last: int | None = None
+        self._level_reset: bool = False
+        self._level_taken: tuple[int, int] = (0, 0)
         # Set for as long as a recording is being closed: the flag above
         # goes down first and the file stays open for the flush, the
         # worker handshake, the close and the sidecar - up to fifteen
@@ -344,10 +366,12 @@ class AudioOutput(AudioOutputInterface):
                 self.logger.warning(f"Audio callback status: {status}")
 
             requested_samples = frame_count * AUDIO_CHANNELS  # stereo interleaved samples
+            on_hand = self._note_what_is_on_hand()
             # fill deque from queue (avoid concatenation)
             while self._buffer_len < requested_samples:
                 try:
                     left, right = self.audio_buffer_queue.get_nowait()
+                    self._frames_pulled += left.size
                     stereo = np.empty((left.size + right.size,), dtype=np.float32)
                     stereo[0::2] = left
                     stereo[1::2] = right
@@ -398,10 +422,14 @@ class AudioOutput(AudioOutputInterface):
                     # per _UNDERRUN_LOG_INTERVAL_SEC and carries how
                     # many there have been since, so a bad stretch
                     # is a line every five seconds and not a flood.
+                    # The counts are frames, not the interleaved
+                    # samples the buffer is made of: the earlier line
+                    # said 512 of 2048 for a gap of 256 frames.
                     self.logger.info(
-                        "Audio buffer underrun (%d of %d frames; %d since "
-                        "the last of these)",
-                        requested_samples - filled, requested_samples, since)
+                        "Audio buffer underrun (%d of %d frames short; "
+                        "%d frames on hand; %d since the last of these)",
+                        (requested_samples - filled) // AUDIO_CHANNELS,
+                        frame_count, on_hand, since)
 
             self._turn_to_the_volume(out, frame_count)
             if filled < requested_samples:
@@ -419,6 +447,43 @@ class AudioOutput(AudioOutputInterface):
             self._after_silence = True
             silence = np.zeros(frame_count * AUDIO_CHANNELS, dtype=np.float32)
             return (silence.tobytes(), pyaudio.paContinue)
+
+    def _note_what_is_on_hand(self) -> int:
+        """Frames waiting for the card at this callback, noted for the log.
+
+        Queued (put in, less taken out and thrown away) plus what the
+        callback already holds.  A block being put in while this runs
+        is counted a callback late, which is one block's error in one
+        reading and nothing in the trend.
+        """
+        on_hand = (self._frames_in - self._frames_pulled
+                   - self._frames_discarded
+                   + self._buffer_len // AUDIO_CHANNELS)
+        if self._level_reset or self._level_min is None:
+            self._level_reset = False
+            self._level_min = on_hand
+        elif on_hand < self._level_min:
+            self._level_min = on_hand
+        self._level_sum += on_hand
+        self._level_count += 1
+        self._level_last = on_hand
+        return on_hand
+
+    def take_cushion_stats(self) -> "tuple[int, float, int] | None":
+        """Frames on hand since the last call: (least, mean, latest).
+
+        For one reader - the processing thread's minute summary.  None
+        when no callback has run since the last call: a stream that is
+        not playing has no cushion to speak of.
+        """
+        total, count = self._level_sum, self._level_count
+        least, last = self._level_min, self._level_last
+        was_total, was_count = self._level_taken
+        self._level_taken = (total, count)
+        self._level_reset = True
+        if count == was_count or least is None or last is None:
+            return None
+        return least, (total - was_total) / (count - was_count), last
 
     def _turn_to_the_volume(self, out: np.ndarray, frame_count: int) -> None:
         """Scale one callback's interleaved buffer, in place, to the volume.
@@ -682,6 +747,7 @@ class AudioOutput(AudioOutputInterface):
                 left, right = self.audio_buffer_queue.get_nowait()
             except queue.Empty:
                 break
+            self._frames_pulled += left.size
             stereo = np.empty((left.size + right.size,), dtype=np.float32)
             stereo[0::2] = left
             stereo[1::2] = right
@@ -704,8 +770,10 @@ class AudioOutput(AudioOutputInterface):
                 >= _UNDERRUN_LOG_INTERVAL_SEC):
             self._refill_last_logged = now
             self.logger.info(
-                "Audio cushion rebuilt after a retune: %.0f ms of silence",
-                1000.0 * self._refill_frames / self.output_rate)
+                "Audio cushion rebuilt after a retune: %.0f ms of silence, "
+                "%d frames on hand",
+                1000.0 * self._refill_frames / self.output_rate,
+                self._buffer_len // AUDIO_CHANNELS)
         return False
 
     def _stop_the_card(self) -> "tuple[bool, bool]":
@@ -757,9 +825,10 @@ class AudioOutput(AudioOutputInterface):
                 self._buffer_len = 0
                 while True:
                     try:
-                        self.audio_buffer_queue.get_nowait()
+                        left, _ = self.audio_buffer_queue.get_nowait()
                     except queue.Empty:
                         break
+                    self._frames_discarded += left.size
 
     def _play_from_now_on(self) -> None:
         """Start the stream, now that there is enough to play.
@@ -839,6 +908,7 @@ class AudioOutput(AudioOutputInterface):
             return
         try:
             self.audio_buffer_queue.put((left32, right32), timeout=AUDIO_ENQUEUE_TIMEOUT)
+            self._frames_in += left32.size
         except queue.Full:
             self._enqueue_drop_count += 1
             self.logger.debug("Audio buffer queue full, dropping audio data")

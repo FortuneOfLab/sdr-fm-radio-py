@@ -140,8 +140,13 @@ class _BlockProfiler:
 
     def __init__(self, logger: logging.Logger, q_max_capacity: int,
                  block_interval_sec: float = _BLOCK_BUDGET_SEC,
-                 clock=time.perf_counter) -> None:
+                 clock=time.perf_counter, cushion=None,
+                 output_rate: int = AUDIO_OUTPUT_RATE) -> None:
         self._log = logger
+        #: Where the audio cushion is read from for the summary:
+        #: AudioOutput.take_cushion_stats, or None for no cushion part.
+        self._cushion = cushion
+        self._output_rate = int(output_rate)
         self._q_capacity = q_max_capacity
         #: How long one block of samples lasts, for saying a queue
         #: depth in seconds.  Light mode's blocks are 65.5 ms, four
@@ -298,12 +303,38 @@ class _BlockProfiler:
                 self._win_slow_blocks, self._win_q_max, self._q_capacity,
                 self._tot_slow_blocks,
             )
+            self._say_the_cushion(elapsed)
             self._t_last_summary = now
             self._win_blocks = 0
             self._win_sum_dt = 0.0
             self._win_max_dt = 0.0
             self._win_slow_blocks = 0
             self._win_q_max = 0
+
+
+    def _say_the_cushion(self, elapsed: float) -> None:
+        """The audio cushion over the last window, on a line of its own.
+
+        Least, mean and latest frames on hand at the card's callbacks.
+        A mean that falls minute by minute is two clocks disagreeing;
+        a step is something that took audio and did not give it back.
+        """
+        if self._cushion is None:
+            return
+        try:
+            stats = self._cushion()
+        except Exception as trouble:            # pragma: no cover - guard
+            self._log.debug("Could not read the audio cushion: %s", trouble)
+            return
+        if stats is None:
+            return
+        least, mean, last = stats
+        per_ms = 1000.0 / self._output_rate
+        self._log.info(
+            "AudioCushion: t=%.0fs min=%d avg=%.0f last=%d frames "
+            "(%.1f/%.1f/%.1f ms)",
+            elapsed, least, mean, last,
+            least * per_ms, mean * per_ms, last * per_ms)
 
 
 #: How long the command line is given to notice that it has been asked
@@ -1551,6 +1582,8 @@ class FMReceiverController:
             self.logger, self.sdr_receiver.data_queue.maxsize,
             block_interval_sec=(self.sdr_receiver.block_size
                                 / self.sdr_receiver.sample_rate),
+            cushion=self.audio_output.take_cushion_stats,
+            output_rate=self.audio_output.output_rate,
         )
         # Cleared on entry as well as in __init__: a thread that is
         # started a second time has a demodulator somebody else has been
