@@ -32,6 +32,17 @@ SDR_SAMPLE_RATE = 1.024e6           # Standard mode sample rate (Hz)
 SDR_SAMPLE_RATE_LIGHT = 0.25e6      # Light mode sample rate (Hz)
 SDR_CENTER_FREQ_DEFAULT = 80e6      # Default center frequency (Hz)
 SDR_BLOCK_SIZE = 16384              # Samples per SDR read
+# USB transfers librtlsdr keeps in flight for the async read, each one
+# SDR_BLOCK_SIZE samples.  pyrtlsdr passes 0, which is librtlsdr's 15:
+# 240 ms at 1.024 Msps.  A transfer is only handed back to the dongle
+# once the Python callback for it has returned, and that callback waits
+# for the GIL; when every transfer is waiting, the dongle's FIFO
+# overflows and samples are lost with nothing to report it.  Measured on
+# the hardware with 15: samples arrived 500 ppm short of 1.024 Msps (270
+# ppm on another run) against a card within 100 ppm, which drained the
+# audio cushion about 1300 frames a minute into an underrun every few
+# minutes.  64 is 1.02 s of transfers, 2 MiB.
+SDR_ASYNC_BUF_NUMBER = 64
 SDR_QUEUE_MAXSIZE = 80              # Max queued SDR sample blocks (~1.28 sec
                                     # of headroom for transient processing
                                     # stalls; samples are dropped beyond this)
