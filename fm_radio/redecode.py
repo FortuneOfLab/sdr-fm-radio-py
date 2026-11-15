@@ -25,9 +25,11 @@
 #
 """Decoding a recorded IQ capture again, away from the live receiver.
 
-What ``quality_selftest --iq-wav FILE --duration SECONDS`` measures, with
-every other option at its default, worked out in a process of its own
-and handed back as an :class:`~fm_radio.quality_selftest.IqMeasurement`.
+What ``quality_selftest --iq-wav FILE --duration SECONDS`` measures,
+worked out in a process of its own and handed back as an
+:class:`~fm_radio.quality_selftest.IqMeasurement` - with every other
+option at its default, or with the command line's flags for some of the
+nine DSP settings added (see :func:`dsp_arguments`).
 
 **A process, not a thread.**  The demodulator is Python between its
 numpy calls, and a second one running in the receiver's process takes
@@ -48,20 +50,37 @@ about 16 minutes at 1.024 Msps, so a window of at most
 window is normalised to its own peak, as the command line does: the
 same seconds of a recording measure the same whichever tool asks, but a
 longer window of the same recording can be scaled differently.
+
+**DSP settings travel as the command line's arguments.**  A slot of the
+DSP tab is turned into the flags ``quality_selftest`` would be given to
+decode under it, and the child parses those flags with the command
+line's own parser, checks them with its own range check and turns them
+into the demodulator's overrides with its own function.  So a re-decode
+and the command line given the same flags cannot differ in what they
+ask the demodulator for, and the flags are a command anyone can run to
+get the same row.  Only the settings that differ from the receiver's
+defaults are said: a setting left at its default is left to the
+decoding demodulator's own default, which is the standard chain's -
+the one a 1.024 Msps capture is decoded with - even when the receiver
+is running the light chain, whose subcarrier phase default is not the
+same.
 """
 
 from __future__ import annotations
 
+import math
 import multiprocessing
 import multiprocessing.connection
 import os
 import threading
-from typing import Callable
+from dataclasses import fields
+from typing import Callable, Sequence
 
 from scipy.io import wavfile
 
 from fm_radio import quality_selftest as qs
 from fm_radio.constants import SDR_SAMPLE_RATE
+from fm_radio.dsp_settings import DspSettings
 from fm_radio.recording_meta import Recording
 
 #: The window the tab offers first, in seconds.
@@ -75,6 +94,94 @@ WINDOW_MIN_S = 1
 
 #: What :meth:`Job.cancel` reports.
 CANCELLED = "Cancelled."
+
+#: The command line's flags for the nine DSP settings, and the only
+#: ones :func:`decode_file` takes.  The rest - the warmup, the noise
+#: band, the duration - would make a row that is not the row the
+#: table's columns and the CSV's header describe.
+DSP_FLAGS = frozenset((
+    "--fixed-blend",
+    "--subcarrier-phase-offset-deg",
+    "--mono-delay-samples",
+    "--disable-iq-phase-correction",
+    "--lr-high-max-gain",
+    "--lr-super-high-max-gain",
+    "--side-nr", "--no-side-nr",
+    "--side-nr-alpha-floor",
+    "--side-nr-beta",
+))
+
+
+def _blend(value) -> str:
+    if value is None:
+        # The command line has no spelling for "adaptive, although
+        # the default is forced": a negative blend means the default.
+        raise ValueError("an adaptive blend cannot be asked for when "
+                         "the default blend is forced")
+    return f"--fixed-blend={value!r}"
+
+
+def _correction(value) -> str:
+    if value:
+        raise ValueError("I/Q phase correction cannot be turned on from "
+                         "the command line; it can only be disabled")
+    return "--disable-iq-phase-correction"
+
+
+#: How each setting is said on the command line, given a value that
+#: is not the default.  The phase is held in radians and asked for in
+#: degrees; the command line turns it back with numpy's deg2rad, so it
+#: can arrive a rounding error away from the slot's own number - the
+#: same rounding error the command line gets for the same flag.
+_SAY = {
+    "force_blend_factor": _blend,
+    "subcarrier_phase_offset_rad":
+        lambda v: f"--subcarrier-phase-offset-deg={math.degrees(v)!r}",
+    "mono_delay_samples": lambda v: f"--mono-delay-samples={int(v)}",
+    "iq_phase_correction_enabled": _correction,
+    "lr_high_max_gain": lambda v: f"--lr-high-max-gain={v!r}",
+    "lr_super_high_max_gain": lambda v: f"--lr-super-high-max-gain={v!r}",
+    "side_nr_enabled": lambda v: "--side-nr" if v else "--no-side-nr",
+    "side_nr_alpha_floor": lambda v: f"--side-nr-alpha-floor={v!r}",
+    "side_nr_beta": lambda v: f"--side-nr-beta={v!r}",
+}
+assert _SAY.keys() == {f.name for f in fields(DspSettings)}
+
+
+def dsp_arguments(settings: DspSettings,
+                  defaults: DspSettings) -> tuple[str, ...]:
+    """The command line's flags for *settings*, as far as they differ.
+
+    One flag for each setting that is not what *defaults* has, in the
+    order :class:`~fm_radio.dsp_settings.DspSettings` lists them, each
+    in the ``--flag=value`` form so that a negative number cannot be
+    read as a flag of its own.  Settings equal to the defaults are not
+    said at all (see the module docstring for why that matters).
+
+    Nothing out of range can reach this: a ``DspSettings`` refuses it
+    when it is made.
+
+    Raises:
+        ValueError: for the two values the command line cannot say -
+            an adaptive blend where the default is forced, and I/Q
+            correction on where the default is off.  Neither default
+            is so today.
+    """
+    said = []
+    for field in fields(DspSettings):
+        value = getattr(settings, field.name)
+        if value == getattr(defaults, field.name):
+            continue
+        said.append(_SAY[field.name](value))
+    return tuple(said)
+
+
+def command_line(wav_path: str, window_s: float,
+                 arguments: Sequence[str] = ()) -> list[str]:
+    """The ``quality_selftest`` arguments that measure what
+    :func:`decode_file` does with the same three things."""
+    return ["--iq-wav", wav_path, "--duration", repr(float(window_s)),
+            *arguments]
 
 
 def why_not(rec: Recording) -> str:
@@ -112,41 +219,67 @@ def first_part_path(rec: Recording) -> str:
                         os.path.basename(rec.parts[0]))
 
 
-def decode_file(wav_path: str, window_s: float):
+def decode_file(wav_path: str, window_s: float,
+                arguments: Sequence[str] = ()):
     """Measure the first *window_s* seconds of an IQ WAV.
 
-    The command line's ``--iq-wav`` path with nothing but ``--duration``
-    given: the same loader, the demodulator with none of its settings
-    overridden, and the warmup and noise band the command line defaults
-    to, read from its own parser so that the two cannot drift apart.
+    The command line's ``--iq-wav`` path given ``--duration`` and
+    *arguments*, which are some of :data:`DSP_FLAGS` (from
+    :func:`dsp_arguments`): parsed by its own parser, refused by its
+    own range check, turned into the demodulator's overrides by its own
+    function, and measured with the warmup and noise band it defaults
+    to, so that the two cannot drift apart.  With no arguments, the
+    demodulator runs with none of its settings overridden.
 
     The file's own rate is checked first.  The command line resamples
     whatever it is given to the standard rate; a file whose sidecar
     says 1.024 Msps and whose header says otherwise is not what the row
     in the list claims it is, and a measurement of it would be filed
     under the wrong recording.
+
+    Raises:
+        ValueError: for an argument that is not a DSP flag, and for one
+            the command line refuses - with the command line's own
+            sentence when it has one (its range check does; argparse
+            prints its complaint to stderr and leaves only an exit
+            status).
     """
+    for argument in arguments:
+        if argument.split("=", 1)[0] not in DSP_FLAGS:
+            raise ValueError(
+                f"{argument!r} is not one of the DSP settings' flags")
+    try:
+        args = qs._parser().parse_args(
+            command_line(wav_path, window_s, arguments))
+        qs._check_the_ranges(args)
+    except SystemExit as refused:
+        if isinstance(refused.code, str):
+            raise ValueError(refused.code) from None
+        raise ValueError(
+            "the command line does not take " + " ".join(arguments)
+        ) from None
     fs, _ = wavfile.read(wav_path, mmap=True)
     if int(fs) != int(SDR_SAMPLE_RATE):
         raise ValueError(
             f"{os.path.basename(wav_path)} is {fs / 1e3:g} kHz, "
             f"not {SDR_SAMPLE_RATE / 1e3:g} kHz")
-    defaults = qs._parser()
-    iq = qs._load_iq_wav(wav_path, int(SDR_SAMPLE_RATE), float(window_s))
-    demodulated = qs._run_demod_diag_iq(iq)
+    iq = qs._load_iq_wav(wav_path, int(SDR_SAMPLE_RATE),
+                         float(args.duration))
+    demodulated = qs._run_demod_diag_iq(iq, **qs._iq_demod_overrides(args))
     return qs.measure_demodulated(
         demodulated,
-        warmup_s=float(defaults.get_default("warmup_s")),
-        noise_diag=bool(defaults.get_default("noise_diag")),
-        noise_hf_lo_hz=float(defaults.get_default("noise_hf_lo_hz")),
-        noise_hf_hi_hz=float(defaults.get_default("noise_hf_hi_hz")),
+        warmup_s=float(args.warmup_s),
+        noise_diag=bool(args.noise_diag),
+        noise_hf_lo_hz=float(args.noise_hf_lo_hz),
+        noise_hf_hi_hz=float(args.noise_hf_hi_hz),
     )
 
 
-def _decode_in_child(send, wav_path: str, window_s: float) -> None:
+def _decode_in_child(send, wav_path: str, window_s: float,
+                     arguments: Sequence[str] = ()) -> None:
     """The child process: decode, and send back one answer either way."""
     try:
-        measured = decode_file(wav_path, window_s)
+        measured = decode_file(wav_path, window_s, arguments)
     except Exception as e:
         send.send(("failed", f"{type(e).__name__}: {e}"))
     else:
@@ -169,14 +302,18 @@ class Job:
     normally ends it on the way out even if nobody cancelled it; one
     that is killed does not.
 
-    *target* is the child's entry point, for tests; it is called as
-    ``target(send, wav_path, window_s)`` and must send one message.
+    *arguments* are the DSP flags to decode under (see
+    :func:`decode_file`).  *target* is the child's entry point, for
+    tests; it is called as ``target(send, wav_path, window_s,
+    arguments)`` and must send one message.
     """
 
-    def __init__(self, wav_path: str, window_s: float, *,
+    def __init__(self, wav_path: str, window_s: float,
+                 arguments: Sequence[str] = (), *,
                  target: Callable | None = None) -> None:
         self.wav_path = wav_path
         self.window_s = float(window_s)
+        self.arguments = tuple(arguments)
         self._target = target or _decode_in_child
         self._context = multiprocessing.get_context("spawn")
         self._process = None
@@ -196,7 +333,8 @@ class Job:
         receive, send = self._context.Pipe(duplex=False)
         self._receive = receive
         self._process = self._context.Process(
-            target=self._target, args=(send, self.wav_path, self.window_s),
+            target=self._target,
+            args=(send, self.wav_path, self.window_s, self.arguments),
             name="Redecode", daemon=True)
         try:
             self._process.start()

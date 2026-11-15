@@ -85,8 +85,9 @@ def make_tab(qt_app, tmp_path):
     sys.excepthook = lambda *trouble: swallowed.append(trouble)
     built = []
 
-    def _make(namer=None, directory=None):
-        tab = RecordingsTab(namer or Namer(), str(directory or tmp_path))
+    def _make(namer=None, directory=None, dsp=None):
+        tab = RecordingsTab(namer or Namer(), str(directory or tmp_path),
+                            dsp=dsp)
         built.append(tab)
         return tab
 
@@ -559,9 +560,10 @@ class StandInJob:
 
     made: list = []
 
-    def __init__(self, wav_path, window_s):
+    def __init__(self, wav_path, window_s, arguments=()):
         self.wav_path = wav_path
         self.window_s = window_s
+        self.arguments = arguments
         self.cancelled = False
         self.on_done = None
         self._thread = None
@@ -707,14 +709,17 @@ def test_a_finished_re_decode_is_a_row_with_the_report_behind_it(
 
     assert results(tab) == [{
         "File": "iq.wav", "MHz": "80.0", "Station": "TOKYO FM",
-        "Window": "30 s", "Measured": "29.2 s",
+        "Window": "30 s", "DSP": "defaults", "Measured": "29.2 s",
         "Blend avg": "0.877", "Pilot SNR p10": "24.13 dB",
         "Pilot SNR p50": "28.50 dB", "L-R / L+R": "0.3333",
         "L/R corr": "0.9012", "Mid HF p10": "-80.00 dB",
         "Side HF p10": "-72.50 dB", "HF penalty": "+0.15 dB",
     }]
+    command = tab._results[0].command()
     assert tab.results.item(0, 4).toolTip() == "\n".join(
-        iq_report_lines(_MEASURED))
+        [command, "", *iq_report_lines(_MEASURED)])
+    assert command.startswith("python -m fm_radio.quality_selftest --iq-wav")
+    assert command.endswith("--duration 30.0")
     assert tab.decode_status.text() == "Re-decoded the first 30 s of iq.wav."
     assert tab.redecode_button.text() == "Re-decode"
     assert tab.redecode_button.isEnabled() is True     # still chosen
@@ -983,8 +988,8 @@ def test_a_re_decode_that_outlives_the_tab_is_let_go_of_where_it_was_made(
                         lambda args: raised.append(args))
     freed_on = []
     with Listener() as listener:
-        monkeypatch.setattr(recordings_tab, "Job", lambda path, window: Job(
-            listener.address, window,
+        monkeypatch.setattr(recordings_tab, "Job", lambda path, window, arguments: Job(
+            listener.address, window, arguments,
             target=redecode_children.answer_when_told))
         tab = RecordingsTab(Namer(), str(tmp_path))
         tab.reload()
@@ -1011,3 +1016,159 @@ def test_a_re_decode_that_outlives_the_tab_is_let_go_of_where_it_was_made(
         f"freed on {freed_on[0].name if freed_on else 'no thread'}")
     assert raised == [], f"a thread raised: {raised[0].exc_value!r}"
     assert recordings_tab._RUNNING == set()
+
+
+# ----------------------------------------------------------------------
+# Under a slot of the DSP tab (P5 PR-E)
+# ----------------------------------------------------------------------
+
+from dataclasses import replace                               # noqa: E402
+
+from fm_radio.demodulator import FMDemodulator                # noqa: E402
+from fm_radio.dsp_settings import capture as dsp_capture      # noqa: E402
+
+#: The standard chain's defaults, which a re-decode starts from.
+_DEFAULTS = dsp_capture(FMDemodulator(stereo=True))
+
+
+class StandInDsp:
+    """The two things the tab asks the DSP tab, and nothing else."""
+
+    def __init__(self, A=None, B=None):
+        self.slots = {"A": A or _DEFAULTS, "B": B or _DEFAULTS}
+
+    def slot_settings(self, which):
+        return self.slots[which]
+
+    def defaults(self):
+        return _DEFAULTS
+
+
+def choose_dsp(tab, which: str) -> None:
+    index = tab.dsp_box.findData(which)
+    assert index >= 0, f"{which} is not offered"
+    tab.dsp_box.setCurrentIndex(index)
+
+
+def test_without_the_dsp_tab_only_the_defaults_are_offered(make_tab):
+    tab = make_tab()
+    assert [tab.dsp_box.itemData(i) for i in range(tab.dsp_box.count())] \
+        == ["defaults"]
+
+
+def test_the_defaults_are_chosen_to_begin_with(make_tab):
+    tab = make_tab(dsp=StandInDsp())
+    assert tab.dsp_box.currentData() == "defaults"
+
+
+def test_a_slot_goes_to_the_job_as_the_command_lines_flags(
+        make_tab, qt_app, tmp_path, stand_in):
+    three_kinds(tmp_path)
+    tab = make_tab(dsp=StandInDsp(
+        B=replace(_DEFAULTS, lr_high_max_gain=0.5, side_nr_beta=2.0)))
+    tab.reload()
+    finish(tab, qt_app)
+    choose(tab, "iq.json")
+    choose_dsp(tab, "B")
+
+    tab.redecode_button.click()
+
+    (job,) = stand_in
+    assert job.arguments == ("--lr-high-max-gain=0.5", "--side-nr-beta=2.0")
+    assert tab.dsp_box.isEnabled() is False
+    assert tab.decode_status.text() == (
+        "Re-decoding the first 30 s of iq.wav under slot B...")
+
+    job.answer(_MEASURED)
+    decoded(tab, qt_app)
+
+    (row,) = results(tab)
+    assert (row["File"], row["DSP"]) == ("iq.wav", "B")
+    (result,) = tab._results
+    assert result.tag == "iq.wav --lr-high-max-gain=0.5 --side-nr-beta=2.0"
+    assert result.csv_row() == iq_csv_row(_MEASURED, result.tag, 30)
+    assert "--noise-tag" in result.command()
+    assert tab.dsp_box.isEnabled() is True
+    assert tab.decode_status.text() == (
+        "Re-decoded the first 30 s of iq.wav under slot B.")
+
+
+def test_a_slot_at_the_defaults_says_so(make_tab, qt_app, tmp_path,
+                                        stand_in):
+    three_kinds(tmp_path)
+    tab = make_tab(dsp=StandInDsp())
+    tab.reload()
+    finish(tab, qt_app)
+    choose(tab, "iq.json")
+    choose_dsp(tab, "A")
+    tab.redecode_button.click()
+    (job,) = stand_in
+    assert job.arguments == ()
+    job.answer(_MEASURED)
+    decoded(tab, qt_app)
+
+    assert results(tab)[0]["DSP"] == "A (= defaults)"
+    assert tab._results[0].tag == "iq.wav"
+
+
+def test_a_slot_is_read_when_the_button_is_pressed(make_tab, qt_app,
+                                                   tmp_path, stand_in):
+    """Not when the tab was built: a slot edited between two presses is
+    decoded as it is at the second."""
+    three_kinds(tmp_path)
+    dsp = StandInDsp(A=replace(_DEFAULTS, mono_delay_samples=10))
+    tab = make_tab(dsp=dsp)
+    tab.reload()
+    finish(tab, qt_app)
+    choose(tab, "iq.json")
+    choose_dsp(tab, "A")
+    tab.redecode_button.click()
+    stand_in[-1].answer(_MEASURED)
+    decoded(tab, qt_app)
+
+    dsp.slots["A"] = replace(_DEFAULTS, mono_delay_samples=20)
+    tab.redecode_button.click()
+
+    assert [job.arguments for job in stand_in] == [
+        ("--mono-delay-samples=10",), ("--mono-delay-samples=20",)]
+
+
+def test_a_b_through_the_tab_saves_what_the_command_line_writes(
+        make_tab, qt_app, tmp_path, monkeypatch, capsys):
+    """Defaults, then slot B, from the button to the saved file, against
+    the command line run twice into one --noise-csv with the flags the
+    row's command gives: the same bytes, and two rows that differ."""
+    import fm_radio.quality_selftest as qs
+
+    _a_real_capture(tmp_path)
+    tab = make_tab(dsp=StandInDsp(
+        B=replace(_DEFAULTS, force_blend_factor=0.0)))
+    tab.reload()
+    finish(tab, qt_app)
+    choose(tab, "real.json")
+    tab.window_box.setValue(2)
+    for which in ("defaults", "B"):
+        choose_dsp(tab, which)
+        tab.redecode_button.click()
+        tab._job.wait()
+        decoded(tab, qt_app)
+    assert [r["DSP"] for r in results(tab)] == ["defaults", "B"], (
+        tab.decode_status.text())
+    assert tab._results[0].measured.blend_mean > 0.5
+    assert tab._results[1].measured.blend_mean == 0.0
+
+    saved = tmp_path / "gui.csv"
+    monkeypatch.setattr(recordings_tab.QFileDialog, "getSaveFileName",
+                        lambda *a: (str(saved), ""))
+    tab.save_button.click()
+
+    written = tmp_path / "cli.csv"
+    wav = str(tmp_path / "real.wav")
+    for flags in ([], ["--fixed-blend=0.0",
+                       "--noise-tag", "real.wav --fixed-blend=0.0"]):
+        monkeypatch.setattr(sys, "argv", [
+            "quality_selftest", "--iq-wav", wav, "--duration", "2",
+            *flags, "--noise-csv", str(written)])
+        qs.main()
+    capsys.readouterr()
+    assert saved.read_bytes() == written.read_bytes()

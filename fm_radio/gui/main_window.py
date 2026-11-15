@@ -76,8 +76,9 @@ receiver's own answer changes while the file is still being written.
 The spectrum and waterfall are in ``band_view``; the blend bar is here,
 because it reads off the same snapshot as the rest of the Signal group.
 The DSP settings and the recordings are tabs of their own, in ``dsp_tab``
-and ``recordings_tab``: this module builds them, and tells the recordings
-tab when it is first chosen.
+and ``recordings_tab``: this module builds them, hands the recordings tab
+the DSP tab (whose slots a re-decode can run under), and tells the
+recordings tab when it is first chosen.
 """
 
 from __future__ import annotations
@@ -479,11 +480,12 @@ class ReceiverWindow(QMainWindow):
     def _build_recordings_tab(self) -> QWidget:
         """The recordings on disk, as their sidecars describe them.
 
-        The directory is the one the CLI records into.  See
+        The directory is the one the CLI records into, and the DSP
+        tab is where a re-decode's settings can come from.  See
         fm_radio.gui.recordings_tab.
         """
         self._recordings = RecordingsTab(self.controller, RECORDINGS_DIR,
-                                         self)
+                                         self, dsp=self._dsp)
         return self._recordings
 
     def _tab_shown(self, index: int) -> None:

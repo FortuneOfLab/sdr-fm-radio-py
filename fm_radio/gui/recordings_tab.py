@@ -56,30 +56,41 @@ for why), one at a time, and adds a row to the table under the list.
 Those rows last as long as the window does; Save CSV writes them in the
 command line's ``--noise-csv`` format, so that a file of them can be
 read alongside one the command line wrote.
+
+A re-decode runs under the default DSP settings or under either slot
+of the DSP tab, as it stands when the button is pressed, so that a
+recording can be measured under A and under B and the two rows set
+side by side.  A slot reaches the decoder as the command line's flags
+(see :func:`fm_radio.redecode.dsp_arguments`), and the row's CSV tag
+carries them, so that a saved file says which row was decoded under
+what.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import shlex
+import subprocess
 import threading
 
 from PySide6.QtCore import QObject, Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QFileDialog, QHBoxLayout, QHeaderView,
-    QLabel, QPushButton, QSpinBox, QTableWidget, QTableWidgetItem,
-    QVBoxLayout, QWidget,
+    QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QHBoxLayout,
+    QHeaderView, QLabel, QPushButton, QSpinBox, QTableWidget,
+    QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from fm_radio.constants import AUDIO_OUTPUT_RATE
+from fm_radio.gui.dsp_tab import SLOTS
 from fm_radio.quality_selftest import (
     IQ_CSV_HEADER, IqMeasurement, iq_csv_row, iq_report_lines,
 )
 from fm_radio.recording_meta import Recording, scan_recordings
 from fm_radio.redecode import (
     CANCELLED, WINDOW_DEFAULT_S, WINDOW_MAX_S, WINDOW_MIN_S, Job,
-    first_part_path, why_not,
+    command_line, dsp_arguments, first_part_path, why_not,
 )
 
 logger = logging.getLogger("fm_receiver.gui")
@@ -89,7 +100,7 @@ COLUMNS = ("Started", "Kind", "MHz", "Station", "Length", "Rate", "Gain",
            "Dropped", "Audio", "File")
 
 #: The re-decode table's columns, left to right.
-RESULT_COLUMNS = ("File", "MHz", "Station", "Window", "Measured",
+RESULT_COLUMNS = ("File", "MHz", "Station", "Window", "DSP", "Measured",
                   "Blend avg", "Pilot SNR p10", "Pilot SNR p50",
                   "L-R / L+R", "L/R corr", "Mid HF p10", "Side HF p10",
                   "HF penalty")
@@ -230,24 +241,65 @@ def cells_for(rec: Recording, station: str) -> tuple[str, ...]:
 # What a re-decode says
 # ----------------------------------------------------------------------
 
+#: What the DSP column says for the default settings.
+DEFAULTS = "defaults"
+
+
 class Result:
-    """One re-decode: what was asked, of which recording, and the answer."""
+    """One re-decode: what was asked, of which recording, and the answer.
+
+    *dsp* is :data:`DEFAULTS` or the slot's name; *arguments* are the
+    command line's flags the slot came to (none when it is at the
+    defaults).
+    """
 
     def __init__(self, wav_path: str, frequency: str, station: str,
-                 window_s: int, measured: IqMeasurement) -> None:
+                 window_s: int, measured: IqMeasurement, *,
+                 dsp: str = DEFAULTS, arguments: tuple = ()) -> None:
         self.wav_path = wav_path
         self.frequency = frequency
         self.station = station
         self.window_s = window_s
         self.measured = measured
+        self.dsp = dsp
+        self.arguments = tuple(arguments)
 
     @property
     def tag(self) -> str:
-        """The CSV's tag: the file's name, the command line's default."""
-        return os.path.basename(self.wav_path)
+        """The CSV's tag: the file's name, then the DSP flags if any.
+
+        The file's name alone is the command line's default tag; with
+        flags, it is what ``--noise-tag`` would have to be given for
+        the command line to write the same row, and it is what tells
+        an A row from a B row in a saved file.  Neither can hold a
+        comma: a file name with one would already break the command
+        line's own CSV, and no flag's value has one.
+        """
+        name = os.path.basename(self.wav_path)
+        return " ".join((name, *self.arguments))
+
+    @property
+    def dsp_text(self) -> str:
+        """The DSP column: which settings, and whether they were the
+        defaults after all."""
+        if self.dsp != DEFAULTS and not self.arguments:
+            return f"{self.dsp} (= {DEFAULTS})"
+        return self.dsp
+
+    def command(self) -> str:
+        """The command line that measures the same row, to be pasted."""
+        words = ["python", "-m", "fm_radio.quality_selftest",
+                 *command_line(self.wav_path, self.window_s,
+                               self.arguments)]
+        if self.arguments:
+            words += ["--noise-tag", self.tag]
+        if os.name == "nt":
+            return subprocess.list2cmdline(words)
+        return shlex.join(words)
 
     def csv_row(self) -> str:
-        """The row the command line writes for the same file and window."""
+        """The row the command line writes for the same file, window
+        and flags."""
         return iq_csv_row(self.measured, self.tag, self.window_s)
 
 
@@ -262,10 +314,11 @@ def result_cells(result: Result) -> tuple[str, ...]:
     m = result.measured
     floor = m.noise_band_hz is not None
     return (
-        result.tag,
+        os.path.basename(result.wav_path),
         result.frequency,
         result.station,
         f"{result.window_s} s",
+        result.dsp_text,
         f"{m.samples / AUDIO_OUTPUT_RATE:.1f} s",
         f"{m.blend_mean:.3f}",
         f"{m.pilot_snr_p10_db:.2f} dB",
@@ -407,13 +460,18 @@ class RecordingsTab(QWidget):
 
     Uses one facade call, ``stations_at``, to name every recording's
     frequency the way the dial names it, from one naming view.
+
+    *dsp* is the DSP tab, or anything with its ``slot_settings(which)``
+    and ``defaults()``; without one, a re-decode can only use the
+    defaults.
     """
 
     def __init__(self, controller, directory: str,
-                 parent: QWidget | None = None) -> None:
+                 parent: QWidget | None = None, *, dsp=None) -> None:
         super().__init__(parent)
         self.controller = controller
         self.directory = os.path.abspath(directory)
+        self._dsp = dsp
         #: The read under way, or None.
         self._scan: Scan | None = None
         #: Every recording the last read found, shown or not.
@@ -425,7 +483,7 @@ class RecordingsTab(QWidget):
         #: The re-decode under way, what it is of, and whether it has
         #: been asked to stop.
         self._job: Redecode | None = None
-        self._decoding: tuple[str, str, str, int] | None = None
+        self._decoding: tuple[str, str, str, int, str, tuple] | None = None
         self._cancelling = False
         #: Every re-decode that has finished, oldest first.
         self._results: list[Result] = []
@@ -479,8 +537,17 @@ class RecordingsTab(QWidget):
         self.window_box.setSuffix(" s")
         decode.addWidget(self.window_box)
         decode.addWidget(QLabel(
-            "of the chosen IQ recording, with the default DSP settings",
-            self))
+            "of the chosen IQ recording, with the DSP settings of", self))
+        self.dsp_box = QComboBox(self)
+        self.dsp_box.addItem("the defaults", DEFAULTS)
+        if dsp is not None:
+            for which in SLOTS:
+                self.dsp_box.addItem(f"DSP tab slot {which}", which)
+        self.dsp_box.setToolTip(
+            "Which settings to decode under: the receiver's defaults, "
+            "or a slot of the DSP tab as it is when Re-decode is "
+            "pressed.")
+        decode.addWidget(self.dsp_box)
         decode.addStretch(1)
         self.redecode_button = QPushButton("Re-decode", self)
         self.redecode_button.clicked.connect(self._redecode_pressed)
@@ -637,7 +704,14 @@ class RecordingsTab(QWidget):
         rec, station = chosen
         window = self.window_box.value()
         path = first_part_path(rec)
-        job = Redecode(Job(path, window))
+        dsp = self.dsp_box.currentData()
+        try:
+            arguments = self._arguments_for(dsp)
+        except ValueError as e:
+            self.decode_status.setText(
+                f"Could not decode under slot {dsp}: {e}")
+            return
+        job = Redecode(Job(path, window, arguments))
         job.finished.connect(self._redecode_ended)
         try:
             job.go()
@@ -651,15 +725,30 @@ class RecordingsTab(QWidget):
                 f"{os.path.basename(path)}: {e}")
             return
         self._job = job
-        self._decoding = (path, frequency_text(rec), station, window)
+        self._decoding = (path, frequency_text(rec), station, window,
+                          dsp, arguments)
         self.window_box.setEnabled(False)
+        self.dsp_box.setEnabled(False)
+        under = "" if dsp == DEFAULTS else f" under slot {dsp}"
         self.decode_status.setText(
             f"Re-decoding the first {window} s of "
-            f"{os.path.basename(path)}...")
+            f"{os.path.basename(path)}{under}...")
         self._update_redecode()
 
+    def _arguments_for(self, dsp: str) -> tuple:
+        """The command line's flags for a choice of the DSP box.
+
+        Read from the DSP tab now, when the button is pressed: a slot
+        changed while the job runs does not change what it is
+        decoding, and the row says what it was decoded under.
+        """
+        if dsp == DEFAULTS:
+            return ()
+        return dsp_arguments(self._dsp.slot_settings(dsp),
+                             self._dsp.defaults())
+
     def _redecode_ended(self, measured, why: str) -> None:
-        path, frequency, station, window = self._decoding
+        path, frequency, station, window, dsp, arguments = self._decoding
         name = os.path.basename(path)
         # Asked to stop, it has stopped, whatever the answer says.  The
         # job can have answered before the Cancel reached it - the
@@ -671,25 +760,30 @@ class RecordingsTab(QWidget):
         self._decoding = None
         self._cancelling = False
         self.window_box.setEnabled(True)
+        self.dsp_box.setEnabled(True)
         if stopped:
             self.decode_status.setText(f"Re-decode of {name} stopped.")
         elif measured is None:
             self.decode_status.setText(
                 f"Re-decode of {name} failed: {why}")
         else:
-            result = Result(path, frequency, station, window, measured)
+            result = Result(path, frequency, station, window, measured,
+                            dsp=dsp, arguments=arguments)
             self._results.append(result)
             self._add_result(result)
+            under = "" if dsp == DEFAULTS else f" under slot {dsp}"
             self.decode_status.setText(
-                f"Re-decoded the first {window} s of {name}.")
+                f"Re-decoded the first {window} s of {name}{under}.")
         self._update_redecode()
         self._update_save()
 
     def _add_result(self, result: Result) -> None:
         row = self.results.rowCount()
         self.results.insertRow(row)
-        # The whole report, as the command line prints it, on every cell.
-        tip = "\n".join(iq_report_lines(result.measured))
+        # The whole report, as the command line prints it, on every
+        # cell, under the command that prints it.
+        tip = "\n".join([result.command(), "",
+                         *iq_report_lines(result.measured)])
         for column, text in enumerate(result_cells(result)):
             item = QTableWidgetItem(text)
             item.setToolTip(tip)

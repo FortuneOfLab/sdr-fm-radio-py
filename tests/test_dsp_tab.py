@@ -305,6 +305,28 @@ def test_it_starts_on_a_with_b_at_the_defaults(tab):
     assert set(SLOTS) == {"A", "B"}
 
 
+def test_each_slot_can_be_read_whether_or_not_it_is_heard(tab):
+    """For the Recordings tab: what a slot holds now, and the defaults."""
+    page, _ = tab()
+    row(page, "side_nr_alpha_floor").widgets[0].setValue(
+        int(0.55 * _FRACTION_STEPS))          # in A, which is heard
+
+    assert page.slot_settings("A").side_nr_alpha_floor == pytest.approx(
+        0.55)
+    assert page.slot_settings("B") == DSP_DEFAULTS
+    assert page.defaults() == DSP_DEFAULTS
+
+    a_slot_button(page, "B").setChecked(True)
+    row(page, "lr_high_max_gain").widgets[0].setValue(
+        int(0.4 * _FRACTION_STEPS))           # in B, now heard
+
+    assert page.slot_settings("A").side_nr_alpha_floor == pytest.approx(
+        0.55)
+    assert page.slot_settings("A").lr_high_max_gain == (
+        DSP_DEFAULTS.lr_high_max_gain)
+    assert page.slot_settings("B").lr_high_max_gain == pytest.approx(0.4)
+
+
 def test_switching_slots_writes_the_whole_set_once(tab):
     """A switch that arrived in pieces would have a block of neither."""
     page, controller = tab()
