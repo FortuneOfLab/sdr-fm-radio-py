@@ -202,6 +202,10 @@ class AudioOutput(AudioOutputInterface):
         # underrun.  Only ever incremented and read, so no lock is needed.
         self._enqueue_drop_count: int = 0
         self._underrun_count: int = 0
+        # Set by wind_down(): the receiver is stopping, so what is left
+        # runs out and the card is padded with silence until the stream
+        # closes.  That is the end of the audio, not a gap in it.
+        self._winding_down: bool = False
         # When nothing is feeding the output any more - the SDR unplugged,
         # say - every callback underruns, and one debug line each is fifty
         # a second for as long as the process lives.  The count is what
@@ -437,10 +441,11 @@ class AudioOutput(AudioOutputInterface):
                     filled += need
 
             if filled < requested_samples:
+                out[filled:requested_samples] = 0.0
+            if filled < requested_samples and not self._winding_down:
                 # Padding with silence at all is an underrun: a partly filled
                 # callback is an audible gap just the same, and counting only
                 # the completely empty ones hides the onset of the problem.
-                out[filled:requested_samples] = 0.0
                 self._underrun_count += 1
                 now = time.monotonic()
                 if (now - self._underrun_last_logged
@@ -1091,6 +1096,19 @@ class AudioOutput(AudioOutputInterface):
     def dropped_blocks(self) -> int:
         """Audio blocks discarded because the output queue was full."""
         return self._enqueue_drop_count
+
+    def wind_down(self) -> None:
+        """Say the receiver is stopping: running dry from here is not an underrun.
+
+        Nothing more is coming once the processing thread has stopped,
+        and the stream outlives it by however long the SDR takes to
+        close - over a second on the hardware.  The cushion runs out
+        partway through, and every log ended in an underrun line for a
+        gap nobody heard.  The padding is the same silence as before;
+        it is just not counted or reported.  One way: a receiver does
+        not come back from stopping.
+        """
+        self._winding_down = True
 
     @property
     def underruns(self) -> int:

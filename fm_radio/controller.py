@@ -1813,6 +1813,11 @@ class FMReceiverController:
             # one a listener who has just given up and closed the
             # window would want to read about.
             profiler.say_anything_held_back(force=True)
+            # Stopped because the receiver is: nothing more will come,
+            # and the card running out of what is left is the end of
+            # the audio.  Not after a fatal error, whose gaps are real.
+            if self._stopping_on_request():
+                self.audio_output.wind_down()
             self.logger.info("Processing thread stopped")
 
     def start_background(self) -> None:
@@ -1857,6 +1862,17 @@ class FMReceiverController:
             self.logger.critical(
                 "Unexpected failure in the SDR thread: %s", e, exc_info=True)
             self._device_is_gone(str(e))
+
+    def _stopping_on_request(self) -> bool:
+        """Whether the receiver is stopping because someone asked it to.
+
+        quit_event alone cannot say: a lost device sets it too, and the
+        audio running out after a pulled cable is the radio cutting out
+        on the listener, which the underrun count and log are for.
+        _device_is_gone records the failure before it sets the event,
+        so an event seen here with no failure was a request.
+        """
+        return self.quit_event.is_set() and self.device_failure is None
 
     def _device_is_gone(self, why: str) -> None:
         """Record why the samples stopped, and ask everything else to stop.
@@ -1999,6 +2015,10 @@ class FMReceiverController:
             # stop - a window that failed to open, for one - and everything
             # below is something they are still using.
             self.quit_event.set()
+            # Before anything is stopped: from here on the audio runs
+            # out, and that is not an underrun.
+            if self._stopping_on_request():
+                self.audio_output.wind_down()
             # The gain worker writes to the SDR from its own thread, so it
             # goes before the device it writes to.  Each resource also
             # refuses use once closed, because a bounded join cannot promise
