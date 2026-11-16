@@ -32,6 +32,17 @@ SDR_SAMPLE_RATE = 1.024e6           # Standard mode sample rate (Hz)
 SDR_SAMPLE_RATE_LIGHT = 0.25e6      # Light mode sample rate (Hz)
 SDR_CENTER_FREQ_DEFAULT = 80e6      # Default center frequency (Hz)
 SDR_BLOCK_SIZE = 16384              # Samples per SDR read
+# USB transfers librtlsdr keeps in flight for the async read, each one
+# SDR_BLOCK_SIZE samples.  pyrtlsdr passes 0, which is librtlsdr's 15:
+# 240 ms at 1.024 Msps.  A transfer is only handed back to the dongle
+# once the Python callback for it has returned, and that callback waits
+# for the GIL; when every transfer is waiting, the dongle's FIFO
+# overflows and samples are lost with nothing to report it.  Measured on
+# the hardware with 15: samples arrived 500 ppm short of 1.024 Msps (270
+# ppm on another run) against a card within 100 ppm, which drained the
+# audio cushion about 1300 frames a minute into an underrun every few
+# minutes.  64 is 1.02 s of transfers, 2 MiB.
+SDR_ASYNC_BUF_NUMBER = 64
 SDR_QUEUE_MAXSIZE = 80              # Max queued SDR sample blocks (~1.28 sec
                                     # of headroom for transient processing
                                     # stalls; samples are dropped beyond this)
@@ -358,6 +369,17 @@ AUDIO_FINAL_LP_CUTOFF_HZ = 15000.0  # Passband edge (Hz)
 AUDIO_FINAL_LP_STOP_HZ = 16500.0    # Stopband edge (Hz)
 AUDIO_FRAMES_PER_BUFFER = 1024     # Frames per audio callback
 AUDIO_QUEUE_MAXSIZE = 50            # Max queued audio blocks
+# Rate matching (fm_radio.rate_match): the audio waiting for the card is
+# held at two cushions plus this - 105 ms in standard mode - by
+# resampling each block by a few hundred ppm.  Two cushions, because a
+# reading swings by a block and a card buffer either way of the mean,
+# and the mean has to stay clear of the card's next request.
+AUDIO_RATE_MATCH_MARGIN_SEC = 0.03
+# More than this over the target and the excess is dropped at once
+# rather than resampled away: a startup that kept a second of audio
+# would take ten minutes to bleed it off at the rate limit, a second
+# behind the station all the while.
+AUDIO_TRIM_EXCESS_SEC = 0.25
 # Listening volume, in percent of full level.  Applied to what the card
 # plays and to nothing else: the recordings, the level meters and the
 # telemetry all see the receiver's own level.  100 is unity gain, which

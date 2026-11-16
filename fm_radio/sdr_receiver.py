@@ -43,7 +43,7 @@ from fm_radio.interfaces import SDRReceiverInterface
 from fm_radio.exceptions import SDRDeviceError, RecordingError
 from fm_radio.constants import (
     SDR_SAMPLE_RATE, SDR_CENTER_FREQ_DEFAULT,
-    SDR_BLOCK_SIZE, SDR_QUEUE_MAXSIZE,
+    SDR_BLOCK_SIZE, SDR_QUEUE_MAXSIZE, SDR_ASYNC_BUF_NUMBER,
     IQ_RECORD_QUEUE_MAXSIZE, IQ_RECORD_ROTATE_THRESHOLD_BYTES,
 )
 
@@ -972,7 +972,12 @@ class SDRReceiver(SDRReceiverInterface):
                 "Not starting the async read: the receiver is closed")
             return
         try:
-            self.logger.info("Starting SDR async read")
+            # pyrtlsdr reads the buffer count off the instance when it
+            # calls into librtlsdr, and offers no argument for it.
+            self.sdr.DEFAULT_ASYNC_BUF_NUMBER = SDR_ASYNC_BUF_NUMBER
+            self.logger.info("Starting SDR async read (%d USB transfers of "
+                             "%d samples)", SDR_ASYNC_BUF_NUMBER,
+                             self.block_size)
             self.sdr.read_samples_async(self.callback, num_samples=self.block_size)
         except OSError as e:
             self.logger.error(f"Failed to start SDR async read: {e}")
