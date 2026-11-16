@@ -679,8 +679,10 @@ class FMReceiverController:
             # card, and light mode's blocks are four times as far
             # apart as standard mode's.
             # The device asked for on the command line, or else the one
-            # last chosen, which the user's file remembers.
-            if audio_device is None:
+            # last chosen, which the user's file remembers - by its
+            # whole name: part of it may now be another device's.
+            remembered = audio_device is None
+            if remembered:
                 audio_device = configured_audio_device(
                     stations_path, warn=self._warn_station_config)
             self.audio_output: AudioOutput = AudioOutput(
@@ -689,6 +691,7 @@ class FMReceiverController:
                 block_interval_sec=(self.sdr_receiver.block_size
                                     / self.sdr_receiver.sample_rate),
                 device=audio_device,
+                exact_device=remembered,
             )
             # Auto gain controller (replaces hardware AGC)
             # One thread for every write to the device, so that no

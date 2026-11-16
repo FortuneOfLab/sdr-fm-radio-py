@@ -90,15 +90,33 @@ def test_a_name_that_is_not_one_device_gets_the_default(make_output, caplog,
     assert any(wanted in r.getMessage() for r in caplog.records)
 
 
-def test_a_device_that_will_not_open_falls_back_to_portaudio(
+def test_a_device_that_will_not_open_falls_back_to_the_wasapi_default(
         make_output, fake_sound_devices, caplog):
+    """Not to PortAudio's, which is MME and 100 ms further behind."""
     fake_sound_devices.refuse_to_open.add(REALTEK)
     with caplog.at_level(logging.WARNING, logger="fm_receiver.AudioOutput"):
         out = make_output(device="WASAPI: Realtek Digital Output")
-    assert out.device is None
-    assert fake_sound_devices.opened[-1]["output_device_index"] is None
+    assert out.device == "WASAPI: Speakers (USB Audio HP-A8)"
+    assert fake_sound_devices.opened[-1]["output_device_index"] == HP_WASAPI
     assert any("Could not open" in r.getMessage() for r in caplog.records)
     assert np.max(playing(out)) > 0.2
+
+
+def test_with_the_default_refusing_too_it_falls_back_to_portaudio(
+        make_output, fake_sound_devices):
+    fake_sound_devices.refuse_to_open.update({REALTEK, HP_WASAPI})
+    out = make_output(device="WASAPI: Realtek Digital Output")
+    assert out.device is None
+    assert fake_sound_devices.opened[-1]["output_device_index"] is None
+    assert np.max(playing(out)) > 0.2
+
+
+def test_the_default_refusing_is_tried_once(make_output,
+                                            fake_sound_devices):
+    """No device asked for and the default will not open: PortAudio's."""
+    fake_sound_devices.refuse_to_open.add(HP_WASAPI)
+    out = make_output()
+    assert out.device is None
 
 
 def test_with_no_devices_listed_it_plays_on_portaudios_default(
@@ -564,3 +582,71 @@ def test_a_wasapi_stream_rides_out_the_dip_the_hardware_had(make_output,
     monkeypatch.setattr(_FakeStream, "output_latency", 0.0427)
     out = make_output()
     assert _start_like_wasapi(out, seconds=6.0, stall=(4.0, 0.11)) == 0
+
+
+# ----------------------------------------------------------------------
+# Review fixes: two writers, and a remembered name
+# ----------------------------------------------------------------------
+
+@needs_tomllib
+def test_the_area_and_the_device_written_at_once_both_stay(tmp_path,
+                                                           monkeypatch):
+    """The window writes the area while the switch thread writes the device.
+
+    Each read the old file and put back its own edit of it, and the one
+    that finished last wiped out the other - or found the shared .new
+    file already moved away.  The first writer is held at the point of
+    putting its file in place, and the second started then.
+    """
+    import threading
+    import time
+    path = tmp_path / "stations.toml"
+    real_replace = st.os.replace
+    at_the_door = threading.Event()
+
+    def slow_replace(source, destination):
+        if not at_the_door.is_set():
+            at_the_door.set()
+            time.sleep(0.3)
+        real_replace(source, destination)
+
+    monkeypatch.setattr(st.os, "replace", slow_replace)
+    trouble = []
+
+    def write(what):
+        try:
+            what()
+        except Exception as e:          # pragma: no cover - the failure
+            trouble.append(e)
+
+    first = threading.Thread(target=write, args=(
+        lambda: st.remember_area("関東", path),))
+    second = threading.Thread(target=write, args=(
+        lambda: st.remember_audio_device("WASAPI: Realtek Digital Output",
+                                         path),))
+    first.start()
+    assert at_the_door.wait(5.0)
+    second.start()
+    first.join(5.0)
+    second.join(5.0)
+
+    assert not trouble, trouble
+    assert st.home_area(path) == "関東"
+    assert st.configured_audio_device(path) == "WASAPI: Realtek Digital Output"
+
+
+def test_a_remembered_name_is_not_taken_for_part_of_another(
+        receiver_on, no_user_config):
+    """Remembered "WASAPI: Realtek", and only "...Realtek Digital Output" is here.
+
+    That is another device that happens to start the same way; the
+    remembered one is gone, and the default plays instead.
+    """
+    st.remember_audio_device("WASAPI: Realtek", no_user_config)
+    receiver = receiver_on()
+    assert receiver.get_audio_device() == "WASAPI: Speakers (USB Audio HP-A8)"
+
+
+def test_a_typed_name_may_still_be_part_of_one(receiver_on):
+    receiver = receiver_on(audio_device="WASAPI: Realtek")
+    assert receiver.get_audio_device() == "WASAPI: Realtek Digital Output"

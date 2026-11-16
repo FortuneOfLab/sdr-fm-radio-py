@@ -86,6 +86,7 @@ import logging
 import math
 import os
 import re
+import threading
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Iterable
@@ -96,6 +97,14 @@ except ImportError:                                     # pragma: no cover
     tomllib = None                                      # type: ignore[assignment]
 
 logger = logging.getLogger('fm_receiver.stations')
+
+#: Held from reading the user's file to putting the new one in place.
+#: The area and the sound device are written from different threads -
+#: the window's, and the one switching the device - and two writers
+#: each reading the old file and each putting back their own edit of
+#: it lose whichever went first.  They would also share the ``.new``
+#: file beside it.
+_USER_FILE_LOCK = threading.Lock()
 
 DATA_PATH: Path = Path(__file__).resolve().parent / "data" / "stations.json"
 
@@ -346,7 +355,17 @@ def _toml_string(value: str) -> "str | None":
 
 
 def _remember(key: str, value: str, user_path: Path | str | None) -> Path:
-    """Set top-level *key* to *value* in the user's file; see remember_area."""
+    """Set top-level *key* to *value* in the user's file; see remember_area.
+
+    One at a time; see _USER_FILE_LOCK.
+    """
+    with _USER_FILE_LOCK:
+        return _remember_locked(key, value, user_path)
+
+
+def _remember_locked(key: str, value: str,
+                     user_path: Path | str | None) -> Path:
+    """Body of :func:`_remember`; the caller holds _USER_FILE_LOCK."""
     quoted = _toml_string(value)
     path = Path(user_path) if user_path is not None else user_config_path()
     if quoted is None:

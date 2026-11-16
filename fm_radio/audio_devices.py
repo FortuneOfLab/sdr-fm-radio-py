@@ -163,8 +163,8 @@ def default_device(pa, devices: list[OutputDevice]) -> "OutputDevice | None":
     return next((d for d in devices if d.index == index), None)
 
 
-def find_device(devices: list[OutputDevice],
-                wanted: str) -> "OutputDevice | None":
+def find_device(devices: list[OutputDevice], wanted: str,
+                exact: bool = False) -> "OutputDevice | None":
     """The device *wanted* names, or None.
 
     The key itself, or failing that the one device whose key contains
@@ -172,11 +172,18 @@ def find_device(devices: list[OutputDevice],
     enough, while ``fostex`` alone names that device under three APIs
     and is no answer.  Ambiguous is None: picking one of two for the
     user is how a radio ends up in the wrong headphones.
+
+    *exact* takes the key and nothing else.  For a name that was a
+    whole key when it was written down - the remembered device - a
+    part of it is not a short way of saying it: ``WASAPI: Speakers``
+    gone and ``WASAPI: Speakers (TV)`` there is a different device.
     """
     wanted = " ".join(wanted.split())
     for device in devices:
         if device.key == wanted:
             return device
+    if exact:
+        return None
     folded = wanted.casefold()
     if not folded:
         return None

@@ -152,11 +152,14 @@ class AudioOutput(AudioOutputInterface):
         frames_per_buffer: int = AUDIO_FRAMES_PER_BUFFER,
         block_interval_sec: float = AUDIO_BLOCK_INTERVAL_DEFAULT_SEC,
         device: "str | None" = None,
+        exact_device: bool = False,
     ) -> None:
         """
         Args:
             device: The sound device to play through, as
-                :func:`fm_radio.audio_devices.find_device` reads it;
+                :func:`fm_radio.audio_devices.find_device` reads it -
+                its whole name only, with *exact_device*, which is for
+                a name remembered rather than typed;
                 None for the default, which is WASAPI's where there is
                 one.  One that is not there, or will not open, is
                 reported and the default used instead: a radio that
@@ -399,7 +402,7 @@ class AudioOutput(AudioOutputInterface):
                 self.pyaudio_instance, int(self.output_rate),
                 AUDIO_CHANNELS, pyaudio.paFloat32)
             self.stream, self._device = self._open_what_will_open(
-                self._choose(device))
+                self._choose(device, exact_device))
             self._size_up_the_card()
             self.logger.info(
                 "Audio output initialized: rate=%dHz, buffer=%d, device=%s, "
@@ -411,10 +414,11 @@ class AudioOutput(AudioOutputInterface):
             self.logger.error(f"Failed to initialize audio output: {e}")
             raise AudioOutputError(f"Failed to initialize audio output: {e}") from e
 
-    def _choose(self, wanted: "str | None") -> "OutputDevice | None":
+    def _choose(self, wanted: "str | None",
+                exact: bool = False) -> "OutputDevice | None":
         """The device *wanted* names, or the default; None for PortAudio's."""
         if wanted:
-            device = find_device(self._devices, wanted)
+            device = find_device(self._devices, wanted, exact=exact)
             if device is not None:
                 return device
             self.logger.warning(
@@ -437,20 +441,28 @@ class AudioOutput(AudioOutputInterface):
         )
 
     def _open_what_will_open(self, device: "OutputDevice | None"):
-        """(stream, device) on *device*, or on PortAudio's default if not.
+        """(stream, device): *device*, else the default, else PortAudio's.
 
         A device that lists as able to play can still refuse to open -
         another program holding it, a driver having a bad day - and the
-        default is a better start than none.  The default refusing too
-        is the receiver having no sound at all, and that is raised.
+        default is a better start than none.  The default here first,
+        which is WASAPI's where there is one: PortAudio's own is MME on
+        Windows, 100 ms further behind the station.  PortAudio's
+        refusing too is the receiver having no sound at all, and that
+        is raised.
         """
-        if device is not None:
+        tried: list[OutputDevice] = []
+        for choice in (device,
+                       default_device(self.pyaudio_instance, self._devices)):
+            if choice is None or choice in tried:
+                continue
+            tried.append(choice)
             try:
-                return self._open_stream(device), device
+                return self._open_stream(choice), choice
             except Exception as e:
-                self.logger.warning(
-                    "Could not open %s (%s); using PortAudio's default "
-                    "device instead", device.key, e)
+                self.logger.warning("Could not open %s (%s)", choice.key, e)
+        if tried:
+            self.logger.warning("Using PortAudio's default device instead")
         return self._open_stream(None), None
 
     @property
