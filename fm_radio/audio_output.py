@@ -171,6 +171,17 @@ class AudioOutput(AudioOutputInterface):
         self._switch_lock: threading.Lock = threading.Lock()
         self._devices: list[OutputDevice] = []
         self._device: "OutputDevice | None" = None
+        # Why the output is not on the device it was asked for, as the
+        # choosing went; see fallback_reason.
+        self._why_not: list[str] = []
+        #: Why the radio is not playing where it was asked to - the
+        #: device is not there, or would not open - and where it is
+        #: playing instead; None when it is where it was asked.  For
+        #: the receiver to put in front of the user: the warnings in
+        #: the log reach nobody in an ordinary run, which has logging
+        #: off, and headphones that were unplugged mean the radio is
+        #: coming out of the speakers.
+        self.fallback_reason: "str | None" = None
         self.output_rate: int = output_rate
         self.frames_per_buffer: int = frames_per_buffer
         self.audio_buffer_queue: queue.Queue[tuple[np.ndarray, np.ndarray]] = queue.Queue(
@@ -403,6 +414,10 @@ class AudioOutput(AudioOutputInterface):
                 AUDIO_CHANNELS, pyaudio.paFloat32)
             self.stream, self._device = self._open_what_will_open(
                 self._choose(device, exact_device))
+            if self._why_not:
+                self.fallback_reason = "%s; playing through %s" % (
+                    "; ".join(self._why_not),
+                    self.device or "the system's default device")
             self._size_up_the_card()
             self.logger.info(
                 "Audio output initialized: rate=%dHz, buffer=%d, device=%s, "
@@ -421,6 +436,7 @@ class AudioOutput(AudioOutputInterface):
             device = find_device(self._devices, wanted, exact=exact)
             if device is not None:
                 return device
+            self._why_not.append("No sound device is called '%s'" % wanted)
             self.logger.warning(
                 "No sound device is called %r, or more than one is; using "
                 "the default.  --list-audio-devices says what there is.",
@@ -461,6 +477,8 @@ class AudioOutput(AudioOutputInterface):
                 return self._open_stream(choice), choice
             except Exception as e:
                 self.logger.warning("Could not open %s (%s)", choice.key, e)
+                self._why_not.append("Could not open %s (%s)"
+                                     % (choice.key, e))
         if tried:
             self.logger.warning("Using PortAudio's default device instead")
         return self._open_stream(None), None

@@ -650,3 +650,55 @@ def test_a_remembered_name_is_not_taken_for_part_of_another(
 def test_a_typed_name_may_still_be_part_of_one(receiver_on):
     receiver = receiver_on(audio_device="WASAPI: Realtek")
     assert receiver.get_audio_device() == "WASAPI: Realtek Digital Output"
+
+
+# ----------------------------------------------------------------------
+# Saying so when the radio is not playing where it was asked to
+# ----------------------------------------------------------------------
+
+def test_a_device_not_found_is_given_as_the_reason(make_output):
+    out = make_output(device="WASAPI: Headphones I lent out")
+    why = out.fallback_reason
+    assert "WASAPI: Headphones I lent out" in why
+    assert "WASAPI: Speakers (USB Audio HP-A8)" in why
+
+
+def test_a_device_that_will_not_open_is_given_as_the_reason(
+        make_output, fake_sound_devices):
+    fake_sound_devices.refuse_to_open.add(REALTEK)
+    out = make_output(device="WASAPI: Realtek Digital Output")
+    why = out.fallback_reason
+    assert "Could not open WASAPI: Realtek Digital Output" in why
+    assert "WASAPI: Speakers (USB Audio HP-A8)" in why
+
+
+def test_playing_where_asked_has_no_reason(make_output):
+    assert make_output(device="realtek").fallback_reason is None
+    assert make_output().fallback_reason is None
+
+
+def test_the_default_refusing_says_where_it_plays_instead(
+        make_output, fake_sound_devices):
+    fake_sound_devices.refuse_to_open.add(HP_WASAPI)
+    why = make_output().fallback_reason
+    assert "Could not open WASAPI: Speakers (USB Audio HP-A8)" in why
+    assert "the system's default device" in why
+
+
+def test_the_console_is_told_when_the_remembered_device_is_gone(
+        receiver_on, no_user_config, capsys):
+    """Logging is off in an ordinary run: a warning in it reaches nobody."""
+    st.remember_audio_device("WASAPI: Headphones I lent out",
+                             no_user_config)
+    receiver = receiver_on()
+    said = capsys.readouterr().err
+    assert "WASAPI: Headphones I lent out" in said
+    assert "WASAPI: Speakers (USB Audio HP-A8)" in said
+    assert receiver.get_audio_notice() == receiver.audio_output.fallback_reason
+
+
+def test_nothing_is_said_when_it_plays_where_it_was_asked(receiver_on,
+                                                          capsys):
+    receiver = receiver_on()
+    assert "Sound:" not in capsys.readouterr().err
+    assert receiver.get_audio_notice() is None

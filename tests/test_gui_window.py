@@ -84,6 +84,8 @@ class FakeController:
         self.audio_device: str | None = None
         # What set_audio_device does instead of switching: raise it.
         self.audio_device_trouble: Exception | None = None
+        # Why the radio is not playing where it was asked to, or None.
+        self.audio_notice: str | None = None
         self.recording = False
         self.iq_recording = False
         # Stopped but still being written, as the real one is between
@@ -166,6 +168,9 @@ class FakeController:
 
     def get_audio_device(self):
         return self.audio_device
+
+    def get_audio_notice(self):
+        return self.audio_notice
 
     def set_audio_device(self, wanted):
         self.calls.append(("set_audio_device", wanted))
@@ -3489,3 +3494,16 @@ def test_choosing_a_device_moves_the_sound_there(window, qt_app,
         assert view._output.currentData() == "WASAPI: Realtek Digital Output"
     finally:
         out.cleanup()
+
+
+def test_the_window_says_when_the_radio_is_not_where_it_was_asked(window):
+    controller = with_devices()
+    controller.audio_notice = ("No sound device is called 'WASAPI: Gone'; "
+                               "playing through WASAPI: Speakers")
+    view, _ = window(controller)
+    assert "No sound device is called 'WASAPI: Gone'" in view._health.text()
+
+
+def test_the_window_says_nothing_when_it_is(window):
+    view, _ = window(with_devices())
+    assert "sound device" not in view._health.text()

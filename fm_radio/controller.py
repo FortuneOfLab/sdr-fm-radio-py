@@ -52,6 +52,7 @@ from fm_radio.device_worker import (
 from fm_radio.exceptions import (
     SDRDeviceError, AudioOutputError, RecordingError,
 )
+from fm_radio.audio_devices import printable
 from fm_radio.stations import (
     Station, load_stations, favorites, here, home_area, remember_area,
     configured_audio_device, remember_audio_device, WillNotEdit,
@@ -693,6 +694,18 @@ class FMReceiverController:
                 device=audio_device,
                 exact_device=remembered,
             )
+            # Said here, not only logged: an ordinary run has logging
+            # off, and the user would start listening without knowing
+            # the radio is not in the headphones they chose.  The
+            # window shows it as well; see get_audio_notice.
+            self._audio_notice: str | None = (
+                self.audio_output.fallback_reason)
+            if self._audio_notice:
+                try:
+                    print(printable("Sound: %s" % self._audio_notice,
+                                    sys.stderr), file=sys.stderr)
+                except Exception:       # pragma: no cover - a closed stream
+                    pass
             # Auto gain controller (replaces hardware AGC)
             # One thread for every write to the device, so that no
             # window and no command line ever waits for USB.
@@ -1425,6 +1438,10 @@ class FMReceiverController:
     def get_audio_device(self) -> str | None:
         """The device playing; None for PortAudio's own default."""
         return self.audio_output.device
+
+    def get_audio_notice(self) -> str | None:
+        """Why the radio did not start on the device asked for, or None."""
+        return self._audio_notice
 
     def set_audio_device(self, wanted: str) -> str:
         """Play through *wanted* from now on, and next time; returns its name.

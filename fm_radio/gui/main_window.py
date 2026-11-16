@@ -621,6 +621,12 @@ class ReceiverWindow(QMainWindow):
 
         self._load_presets()
         self._show_the_area()
+        # The receiver started somewhere other than where it was asked
+        # to - the remembered headphones are not plugged in - and the
+        # status bar is where a window says so.
+        audio_notice = self.controller.get_audio_notice()
+        if audio_notice:
+            self._set_notice(audio_notice)
         self.refresh()
 
     # ------------------------------------------------------------------
