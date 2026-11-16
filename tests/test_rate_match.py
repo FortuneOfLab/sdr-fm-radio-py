@@ -285,6 +285,44 @@ def test_a_startup_burst_is_trimmed_to_the_target(audio_output, caplog):
     assert any("Audio trimmed" in r.getMessage() for r in caplog.records)
 
 
+def test_a_burst_in_a_refill_is_trimmed_oldest_first(audio_output, caplog):
+    """A refill pulls everything queued into the callback's own buffer.
+
+    The processing thread's trim takes only from the queue, so a burst
+    that arrived during a refill sat there out of its reach: 40 blocks
+    at once left about 29700 frames held after the refill, and the trim
+    then dropped the new blocks behind them while the old ones played.
+    Here each block carries its own level, so what plays first says
+    which blocks were kept.
+    """
+    fpb = AUDIO_FRAMES_PER_BUFFER
+    block = np.full(768, 0.001, dtype=np.float32)
+    while not audio_output._playing:
+        audio_output.enqueue_audio(block, block)
+    for _ in range(5):
+        audio_output.callback(None, fpb, {}, 0)
+    audio_output.rebuild_cushion()
+    for k in range(40):
+        level = np.full(768, 0.01 * (k + 1), dtype=np.float32)
+        audio_output.enqueue_audio(level, level)
+    target = audio_output._matcher.target
+    with caplog.at_level(logging.INFO, logger="fm_receiver.AudioOutput"):
+        out, _ = audio_output.callback(None, fpb, {}, 0)
+        while audio_output._refilling:
+            out, _ = audio_output.callback(None, fpb, {}, 0)
+    on_hand = audio_output._frames_on_hand()
+    # Down to the target, not below it, and not left far above it.
+    assert target - fpb <= on_hand <= target + 768
+    # The oldest went: what plays is from the last blocks, the ones
+    # the target holds - not the first of the burst, nor the old
+    # station still held from before the retune.
+    first = np.frombuffer(out, dtype=np.float32)[0]
+    kept = int(np.ceil(target / 768)) + 2
+    assert first > 0.01 * (40 - kept), first
+    assert audio_output.rate_correction[2] >= 768 * 40 - target - 2 * fpb
+    assert any("trimmed" in r.getMessage() for r in caplog.records)
+
+
 def test_ordinary_playing_trims_nothing(audio_output):
     _play(audio_output, 3, -300)
     assert audio_output.rate_correction[2] == 0

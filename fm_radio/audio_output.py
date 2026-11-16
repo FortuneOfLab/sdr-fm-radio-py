@@ -279,6 +279,12 @@ class AudioOutput(AudioOutputInterface):
         # waiting.  The processing thread's own, like _frames_in.
         self._frames_trimmed: int = 0
         self._trim_last_logged: float = 0.0
+        # The same, dropped by the callback from what it holds: a refill
+        # pulls everything queued into the deque, out of the processing
+        # thread's reach.  The callback's own; _buffer_len already says
+        # they are gone, so _frames_on_hand does not subtract these.
+        self._frames_trimmed_held: int = 0
+        self._refill_trimmed: int = 0
         # Per window, for take_cushion_stats.  Written by the callback;
         # the reader asks for a new window by raising _level_reset,
         # which the callback lowers when it starts one.
@@ -530,7 +536,7 @@ class AudioOutput(AudioOutputInterface):
     def rate_correction(self) -> "tuple[float, float, int]":
         """(ppm now, ppm learned, frames trimmed so far), for the log."""
         return (self._matcher.ppm, self._matcher.integral_ppm,
-                self._frames_trimmed)
+                self._frames_trimmed + self._frames_trimmed_held)
 
     def _match_the_rate(self, left: np.ndarray, right: np.ndarray
                         ) -> "tuple[np.ndarray, np.ndarray]":
@@ -841,6 +847,7 @@ class AudioOutput(AudioOutputInterface):
         if self._playing and not self._holds:
             self._refill_frames = 0
             self._refill_blocks = 0
+            self._refill_trimmed = 0
             self._refilling = True
 
     def _still_refilling(self, frame_count: int) -> bool:
@@ -870,6 +877,8 @@ class AudioOutput(AudioOutputInterface):
         # there before, this only puts back what the retune lost.
         target = int(max(self._cushion_frames + frame_count,
                          self._matcher.target)) * AUDIO_CHANNELS
+        if self._buffer_len > self._trim_above * AUDIO_CHANNELS:
+            self._trim_what_is_held(target)
         if self._buffer_len < target:
             if self._refill_frames < _REFILL_LIMIT_SEC * self.output_rate:
                 self._refill_frames += frame_count
@@ -881,16 +890,35 @@ class AudioOutput(AudioOutputInterface):
             return False
         self._refilling = False
         now = time.monotonic()
-        if (self._refill_frames
+        if ((self._refill_frames or self._refill_trimmed)
                 and now - self._refill_last_logged
                 >= _UNDERRUN_LOG_INTERVAL_SEC):
             self._refill_last_logged = now
             self.logger.info(
                 "Audio cushion rebuilt after a retune: %.0f ms of silence, "
-                "%d frames on hand",
+                "%.0f ms trimmed, %d frames on hand",
                 1000.0 * self._refill_frames / self.output_rate,
+                1000.0 * self._refill_trimmed / self.output_rate,
                 self._buffer_len // AUDIO_CHANNELS)
         return False
+
+    def _trim_what_is_held(self, target: int) -> None:
+        """Drop the oldest held audio down to *target* interleaved samples.
+
+        The refill's counterpart of :meth:`_trim`, on the callback, which
+        owns the deque: a burst that came in while the card was given
+        silence has been pulled out of the queue, where the processing
+        thread's trim would have found it.  Left there it would play
+        first, a second behind, while the trim dropped the new blocks
+        after it.  Whole blocks, and none that would take it below the
+        target.
+        """
+        held = self._buffer_deque
+        while held and self._buffer_len - held[0].size >= target:
+            chunk = held.popleft()
+            self._buffer_len -= chunk.size
+            self._frames_trimmed_held += chunk.size // AUDIO_CHANNELS
+            self._refill_trimmed += chunk.size // AUDIO_CHANNELS
 
     def _stop_the_card(self) -> "tuple[bool, bool]":
         """Ask PortAudio to stop the stream.  Step 2 of :meth:`hold`.
