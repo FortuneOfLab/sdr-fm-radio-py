@@ -46,6 +46,9 @@ Usage Examples:
       $ python fm_receiver.py --volume 40
   - Start muted (unmute with 'unmute', or from the window):
       $ python fm_receiver.py --mute
+  - See the sound devices, then play through one for this run:
+      $ python fm_receiver.py --list-audio-devices
+      $ python fm_receiver.py --audio-device "WASAPI: Speakers"
   - Combine options:
       $ python fm_receiver.py --light --debug --log-file debug.log
 
@@ -62,6 +65,7 @@ Command Examples (during execution):
   'gain <value>'      : Set manual gain in dB (when auto gain is off)
   'vol <0-100>'       : Set the listening volume ('vol +' / 'vol -' step it)
   'mute' / 'unmute'   : Silence the listening output and bring it back
+  'out' / 'out <n>'   : List the sound devices / play through another
   '<station_num>' or '<freq_MHz>' : Tune to the specified station
   'q'                 : Quit the program
 """
@@ -131,6 +135,39 @@ def _volume_argument(text: str | None) -> float:
     return value
 
 
+def _list_audio_devices() -> None:
+    """Print the sound devices the receiver could play through, and stop.
+
+    Without building a receiver: the dongle need not even be plugged in
+    to find out which name to give --audio-device.
+    """
+    import pyaudio
+    from fm_radio.audio_devices import (
+        default_device, list_output_devices, printable,
+    )
+    from fm_radio.constants import AUDIO_CHANNELS, AUDIO_OUTPUT_RATE
+    from fm_radio.stations import configured_audio_device
+    pa = pyaudio.PyAudio()
+    try:
+        devices = list_output_devices(pa, AUDIO_OUTPUT_RATE, AUDIO_CHANNELS,
+                                      pyaudio.paFloat32)
+        default = default_device(pa, devices)
+    finally:
+        pa.terminate()
+    if not devices:
+        print("No sound device listed; the receiver will use PortAudio's "
+              "default.")
+        return
+    print("Sound devices that can play the receiver's output:")
+    for device in devices:
+        mark = " (default)" if device == default else ""
+        print(printable(f"  {device.key}{mark}"))
+    remembered = configured_audio_device()
+    if remembered:
+        print(printable(f"Last chosen, used unless --audio-device says "
+                        f"otherwise: {remembered}"))
+
+
 def main() -> None:
     """Entry point for the FM receiver application."""
     # Parse command line arguments
@@ -142,6 +179,7 @@ def main() -> None:
     use_gui: bool = False
     volume: float | None = None
     muted: bool = False
+    audio_device: str | None = None
 
     for i, arg in enumerate(sys.argv[1:], 1):
         if arg == '--light':
@@ -152,6 +190,15 @@ def main() -> None:
             stations_path = sys.argv[i + 1]
         elif arg == '--mute':
             muted = True
+        elif arg == '--list-audio-devices':
+            _list_audio_devices()
+            return
+        elif arg == '--audio-device':
+            if i + 1 >= len(sys.argv) or not sys.argv[i + 1].strip():
+                print("--audio-device needs a device name; "
+                      "--list-audio-devices shows them", file=sys.stderr)
+                sys.exit(2)
+            audio_device = sys.argv[i + 1]
         elif arg == '--volume':
             volume = _volume_argument(sys.argv[i + 1]
                                       if i + 1 < len(sys.argv) else None)
@@ -179,7 +226,8 @@ def main() -> None:
 
     try:
         controller = FMReceiverController(light=light_mode,
-                                          stations_path=stations_path)
+                                          stations_path=stations_path,
+                                          audio_device=audio_device)
         if volume is not None:
             # Before anything starts, so the first block out is already
             # at this level: nothing has been played yet to jump from.

@@ -79,6 +79,11 @@ class FakeController:
         # The listening volume, in percent, as the real one keeps it.
         self.volume = 100
         self.muted = False
+        # Sound devices, by full name; None playing is PortAudio's own.
+        self.audio_devices: list[str] = []
+        self.audio_device: str | None = None
+        # What set_audio_device does instead of switching: raise it.
+        self.audio_device_trouble: Exception | None = None
         self.recording = False
         self.iq_recording = False
         # Stopped but still being written, as the real one is between
@@ -155,6 +160,19 @@ class FakeController:
         self.calls.append(("set_muted", muted))
         self.muted = bool(muted)
         return self.muted
+
+    def get_audio_devices(self):
+        return list(self.audio_devices)
+
+    def get_audio_device(self):
+        return self.audio_device
+
+    def set_audio_device(self, wanted):
+        self.calls.append(("set_audio_device", wanted))
+        if self.audio_device_trouble is not None:
+            raise self.audio_device_trouble
+        self.audio_device = wanted
+        return wanted
 
     def is_recording(self):
         return self.recording
@@ -3304,3 +3322,170 @@ def test_the_mute_button_is_the_same_width_pressed_or_not(window):
     before = view._mute.sizeHint().width()
     view._mute.click()
     assert view._mute.sizeHint().width() == before
+
+
+# ----------------------------------------------------------------------
+# The sound device
+# ----------------------------------------------------------------------
+
+DEVICES = ["MME: Speakers (USB Audio HP-A8)",
+           "WASAPI: Speakers (USB Audio HP-A8)",
+           "WASAPI: Realtek Digital Output"]
+
+
+def with_devices(current=DEVICES[1]):
+    controller = FakeController(snapshot())
+    controller.audio_devices = list(DEVICES)
+    controller.audio_device = current
+    return controller
+
+
+def choose_output(view, qt_app, key):
+    """Pick *key* the way a person does, and wait for the switch."""
+    view._output.activated.emit(view._output.findData(key))
+    switch = view._device_switch
+    if switch is not None:
+        switch.wait()
+    qt_app.processEvents()
+
+
+def test_the_output_list_shows_the_devices_and_the_one_playing(window):
+    view, _ = window(with_devices())
+    items = [view._output.itemData(i) for i in range(view._output.count())]
+    assert items == DEVICES
+    assert view._output.currentData() == DEVICES[1]
+    assert view._output.isEnabled()
+
+
+def test_portaudios_own_default_is_shown_and_not_offered(window, qt_app):
+    """Nothing listed, or the chosen device would not open."""
+    view, controller = window(with_devices(current=None))
+    assert view._output.currentText() == "System default"
+    assert view._output.currentData() is None
+    choose_output(view, qt_app, None)
+    assert not [c for c in controller.calls if c[0] == "set_audio_device"]
+
+
+def test_with_no_devices_the_list_is_out_of_reach(window):
+    view, _ = window()
+    assert not view._output.isEnabled()
+
+
+def test_choosing_a_device_switches_to_it_off_the_gui_thread(window, qt_app):
+    import threading
+
+    class Watched(FakeController):
+        def set_audio_device(self, wanted):
+            self.on = threading.current_thread()
+            return super().set_audio_device(wanted)
+
+    controller = Watched(snapshot())
+    controller.audio_devices = list(DEVICES)
+    controller.audio_device = DEVICES[1]
+    view, _ = window(controller)
+    choose_output(view, qt_app, DEVICES[2])
+    assert ("set_audio_device", DEVICES[2]) in controller.calls
+    assert controller.on is not threading.main_thread()
+    assert view._output.currentData() == DEVICES[2]
+    assert view._output.isEnabled()
+    assert "playing through" in view._health.text()
+
+
+def test_the_list_is_out_of_reach_while_a_switch_is_under_way(window,
+                                                              qt_app):
+    import threading
+    release = threading.Event()
+
+    class Slow(FakeController):
+        def set_audio_device(self, wanted):
+            release.wait(5.0)
+            return super().set_audio_device(wanted)
+
+    controller = Slow(snapshot())
+    controller.audio_devices = list(DEVICES)
+    controller.audio_device = DEVICES[1]
+    view, _ = window(controller)
+    view._output.activated.emit(2)
+    switch = view._device_switch
+    try:
+        assert not view._output.isEnabled()
+        assert "switching the output" in view._health.text()
+    finally:
+        release.set()
+        switch.wait()
+    qt_app.processEvents()
+    assert view._output.isEnabled()
+
+
+def test_a_device_that_will_not_switch_leaves_the_list_where_it_was(
+        window, qt_app):
+    from fm_radio.exceptions import AudioOutputError
+    controller = with_devices()
+    controller.audio_device_trouble = AudioOutputError("busy")
+    view, _ = window(controller)
+    choose_output(view, qt_app, DEVICES[2])
+    assert view._output.currentData() == DEVICES[1]
+    assert view._output.isEnabled()
+    assert "could not switch the output: busy" in view._health.text()
+
+
+def test_choosing_the_device_already_playing_does_nothing(window, qt_app):
+    view, controller = window(with_devices())
+    choose_output(view, qt_app, DEVICES[1])
+    assert not [c for c in controller.calls if c[0] == "set_audio_device"]
+
+
+def test_the_output_list_does_not_widen_the_window(window):
+    """The longest name is sixty-odd characters; the list stays narrow.
+
+    Means something only with real glyph widths: run with
+    QT_QPA_PLATFORM=windows.
+    """
+    controller = with_devices()
+    controller.audio_devices.append(
+        "DirectSound: Realtek Digital Output(Optical) "
+        "(Realtek High Definition Audio)")
+    view, _ = window(controller)
+    audio_box = view._output.parentWidget()
+    tuner_row = view._frequency.parentWidget()
+    assert (audio_box.minimumSizeHint().width()
+            < tuner_row.minimumSizeHint().width())
+
+
+def test_choosing_a_device_moves_the_sound_there(window, qt_app,
+                                                 fake_sound_devices):
+    """From the list to the samples: the new card plays the radio."""
+    import numpy as np
+    from fm_radio.audio_output import AudioOutput
+
+    out = AudioOutput()
+
+    class Wired(FakeController):
+        def get_audio_devices(self):
+            return out.output_devices
+
+        def get_audio_device(self):
+            return out.device
+
+        def set_audio_device(self, wanted):
+            return out.switch_device(wanted)
+
+    try:
+        view, _ = window(Wired(snapshot()))
+        block = np.full(768, 0.25, dtype=np.float32)
+        while not out._playing:
+            out.enqueue_audio(block, block)
+        old = out.stream
+
+        choose_output(view, qt_app, "WASAPI: Realtek Digital Output")
+
+        assert out.device == "WASAPI: Realtek Digital Output"
+        assert out.stream is not old and old.closed
+        while not out._playing:
+            out.enqueue_audio(block, block)
+        played, _ = out.callback(None, 1024, {}, 0)
+        assert np.max(np.frombuffer(played, dtype=np.float32)) > 0.2
+        assert out.stream.started and out.stream.device_index == 2
+        assert view._output.currentData() == "WASAPI: Realtek Digital Output"
+    finally:
+        out.cleanup()

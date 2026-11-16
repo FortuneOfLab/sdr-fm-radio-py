@@ -40,6 +40,8 @@ from typing import TYPE_CHECKING, Callable
 
 from fm_radio.console_input import ConsoleReader, console_reader
 from fm_radio.constants import RECORDINGS_DIR, VOLUME_STEP_PERCENT
+from fm_radio.exceptions import AudioOutputError
+from fm_radio.audio_devices import printable
 
 if TYPE_CHECKING:
     from fm_radio.controller import FMReceiverController
@@ -221,6 +223,8 @@ class CommandLineInterface(threading.Thread):
             return self._cmd_volume(cmd.lower())
         if verb in ('mute', 'unmute'):
             return self._cmd_mute(cmd.lower())
+        if verb in ('out', 'output'):
+            return self._cmd_output(cmd)
 
         # 3. Numeric / frequency input -> tune
         return self._cmd_tune(cmd)
@@ -247,6 +251,8 @@ class CommandLineInterface(threading.Thread):
         print("  'vol <0-100>', 'vol +' or 'vol -' -> listening volume "
               "(recordings stay at full level)")
         print("  'mute' / 'unmute' -> silence the output and bring it back")
+        print("  'out' -> list the sound devices; 'out <n>' or 'out <name>' "
+              "-> play through that one (remembered for next time)")
         print("  <station_num> or <freq_MHz> -> tune")
         print("  'q' -> quit")
 
@@ -468,6 +474,45 @@ class CommandLineInterface(threading.Thread):
             return True
         self.controller.set_muted(wanted)
         self._say_the_volume()
+        return True
+
+    def _cmd_output(self, cmd: str) -> bool:
+        """Handle 'out' (list the sound devices) and 'out <n or name>'.
+
+        The name keeps its case: it is matched against device names,
+        which do not care, but it is also shown back in messages.
+        """
+        devices = self.controller.get_audio_devices()
+        parts = cmd.split(maxsplit=1)
+        if len(parts) == 1:
+            current = self.controller.get_audio_device()
+            if not devices:
+                print("No sound device listed; playing on PortAudio's "
+                      "default.")
+                return True
+            for number, key in enumerate(devices, 1):
+                mark = "*" if key == current else " "
+                print(printable(f" {mark}{number:2d}. {key}"))
+            if current is None:
+                print("Playing on PortAudio's default device.")
+            return True
+        wanted = parts[1].strip()
+        if wanted.isdigit():
+            number = int(wanted)
+            if not 1 <= number <= len(devices):
+                print(f"There is no device {number}; 'out' lists them.")
+                return True
+            wanted = devices[number - 1]
+        try:
+            key = self.controller.set_audio_device(wanted)
+        except ValueError:
+            print(printable(f"No one sound device is called '{wanted}'; "
+                            "'out' lists them."))
+            return True
+        except AudioOutputError as e:
+            print(printable(f"Could not switch: {e}"))
+            return True
+        print(printable(f"Playing through {key}."))
         return True
 
     def _say_the_volume(self) -> None:

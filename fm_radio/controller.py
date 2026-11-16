@@ -54,6 +54,7 @@ from fm_radio.exceptions import (
 )
 from fm_radio.stations import (
     Station, load_stations, favorites, here, home_area, remember_area,
+    configured_audio_device, remember_audio_device, WillNotEdit,
     search, in_area, nearest,
 )
 from fm_radio import multipath
@@ -550,7 +551,14 @@ class FMReceiverController:
     The 'light' parameter selects between the standard and light demodulation versions.
     """
     def __init__(self, light: bool = False,
-                 stations_path: str | None = None) -> None:
+                 stations_path: str | None = None,
+                 audio_device: str | None = None) -> None:
+        """
+        Args:
+            audio_device: The sound device to play through, for this
+                run only; None for the one the user's file names, or
+                the default if it names none.
+        """
         self.logger: logging.Logger = logging.getLogger('fm_receiver.FMReceiverController')
         self.light: bool = light
         self.quit_event: threading.Event = threading.Event()
@@ -670,11 +678,17 @@ class FMReceiverController:
             # decides how much to have in hand before it starts the
             # card, and light mode's blocks are four times as far
             # apart as standard mode's.
+            # The device asked for on the command line, or else the one
+            # last chosen, which the user's file remembers.
+            if audio_device is None:
+                audio_device = configured_audio_device(
+                    stations_path, warn=self._warn_station_config)
             self.audio_output: AudioOutput = AudioOutput(
                 output_rate=AUDIO_OUTPUT_RATE,
                 frames_per_buffer=AUDIO_FRAMES_PER_BUFFER,
                 block_interval_sec=(self.sdr_receiver.block_size
                                     / self.sdr_receiver.sample_rate),
+                device=audio_device,
             )
             # Auto gain controller (replaces hardware AGC)
             # One thread for every write to the device, so that no
@@ -1400,6 +1414,40 @@ class FMReceiverController:
         listener's alone: recordings carry on at full level.
         """
         return self.audio_output.set_muted(muted)
+
+    def get_audio_devices(self) -> list[str]:
+        """The sound devices that could be played through, by full name."""
+        return self.audio_output.output_devices
+
+    def get_audio_device(self) -> str | None:
+        """The device playing; None for PortAudio's own default."""
+        return self.audio_output.device
+
+    def set_audio_device(self, wanted: str) -> str:
+        """Play through *wanted* from now on, and next time; returns its name.
+
+        A quarter of a second of silence while the card is changed - the
+        old one is stopped gracefully and the new one starts behind a
+        cushion - so a window calls this off its own thread.  The choice
+        goes in the user's file like the area does; a file that cannot
+        be written is reported and the switch stands.
+
+        Raises:
+            ValueError: if *wanted* names no device, or several.
+            AudioOutputError: if it would not open; the radio plays on
+                where it was.
+        """
+        key = self.audio_output.switch_device(wanted)
+        try:
+            path = remember_audio_device(key, self._stations_path)
+        except (WillNotEdit, OSError, ValueError) as e:
+            self._warn_station_config(
+                "Playing through %s, but could not remember it for next "
+                "time: %s" % (key, e))
+        else:
+            self.logger.info("Will play through %s next time too (%s)",
+                             key, path)
+        return key
 
     # ------------------------------------------------------------------
     # Internal methods

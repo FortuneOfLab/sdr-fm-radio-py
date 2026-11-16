@@ -131,6 +131,9 @@ METER_FLOOR_DBFS = -60.0
 #: every refresh, so without this a message about something the user just
 #: tried would be gone in 50 ms - faster than they can read it.
 NOTICE_SECONDS = 5.0
+#: How many characters of a device name the output list is wide enough
+#: for; the rest shows in the drop-down, which is as wide as it needs.
+_OUTPUT_LIST_CHARS = 28
 
 #: How long the health line says "loaded" after a drop or an underrun.
 #: Long enough to be read: one drop is one moment, and a word that is
@@ -378,6 +381,10 @@ _PROGRESS = "progress"
 #: scan, since the scan's tunes are not the window's.  The line
 #: lasted under 50 ms.
 _SCANNING = "scanning"
+#: A change of sound device, under way or done.  Not _PROGRESS for the
+#: same reason as the scan: the refresh clears that whenever the window
+#: is not tuning, and "playing through ..." would not have been seen.
+_OUTPUT = "output"
 
 
 def _still_going(request):
@@ -544,6 +551,8 @@ class ReceiverWindow(QMainWindow):
         self._health_watch = _HealthWatch()
         #: The band scan now running, or None.
         self._sweep: "Sweep | None" = None
+        # A change of sound device under way; see _output_chosen.
+        self._device_switch: "_DeviceSwitch | None" = None
         #: True between asking a sweep to stop and its saying it has.
         self._stopping: bool = False
 
@@ -837,7 +846,9 @@ class ReceiverWindow(QMainWindow):
         growing and shrinking never moves the slider.
         """
         box = QGroupBox("Audio", self)
-        row = QHBoxLayout(box)
+        column = QVBoxLayout(box)
+        row = QHBoxLayout()
+        column.addLayout(row)
 
         self._record_audio = QPushButton("Record audio", box)
         self._record_audio.setCheckable(True)
@@ -890,7 +901,80 @@ class ReceiverWindow(QMainWindow):
         self._mute.setChecked(bool(self.controller.is_muted()))
         self._mute.toggled.connect(self._mute_toggled)
         row.addWidget(self._mute)
+
+        # A row of its own: device names run to sixty characters, and
+        # the list is narrowed to a fixed length rather than allowed to
+        # widen the window to the longest of them.
+        output_row = QHBoxLayout()
+        column.addLayout(output_row)
+        output_row.addWidget(QLabel("Output", box))
+        self._output = QComboBox(box)
+        self._output.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self._output.setMinimumContentsLength(_OUTPUT_LIST_CHARS)
+        self._output.setToolTip(
+            "The sound device the radio plays through, remembered for "
+            "next time.  WASAPI is the least delayed of the three.")
+        self._load_outputs()
+        # activated, not currentIndexChanged: only a choice the user
+        # made, never the list being filled or put back.
+        self._output.activated.connect(self._output_chosen)
+        output_row.addWidget(self._output, 1)
         return box
+
+    def _load_outputs(self) -> None:
+        """Fill the device list and show the one playing.
+
+        A receiver playing on PortAudio's own default - nothing listed,
+        or the chosen device would not open - shows that as the first
+        entry, which is not one to switch to.
+        """
+        self._output.blockSignals(True)
+        try:
+            self._output.clear()
+            devices = list(self.controller.get_audio_devices())
+            current = self.controller.get_audio_device()
+            for key in devices:
+                self._output.addItem(key, key)
+            if current is None:
+                self._output.insertItem(0, "System default", None)
+                self._output.setCurrentIndex(0)
+            else:
+                self._output.setCurrentIndex(
+                    max(0, self._output.findData(current)))
+            self._output.setEnabled(bool(devices)
+                                    and self._device_switch is None)
+        finally:
+            self._output.blockSignals(False)
+
+    def _output_chosen(self, index: int) -> None:
+        """Move the radio to the device picked, off the GUI thread.
+
+        The old card is stopped gracefully - about a tenth of a second
+        on the hardware - and the new one opened, which together are
+        long enough to be a window that does not paint.  The list is
+        out of reach until it is done, so two switches cannot cross.
+        """
+        key = self._output.itemData(index)
+        if (key is None or self._device_switch is not None
+                or key == self.controller.get_audio_device()):
+            self._load_outputs()
+            return
+        self._output.setEnabled(False)
+        self._set_notice("switching the output to %s..." % key, _OUTPUT)
+        switch = _DeviceSwitch(self, self.controller, key)
+        switch.done.connect(self._output_switched)
+        self._device_switch = switch
+        switch.go()
+
+    def _output_switched(self, key: object, why: str) -> None:
+        """On the GUI thread: show where the radio is playing now."""
+        self._device_switch = None
+        self._load_outputs()
+        if why:
+            self._set_notice("could not switch the output: %s" % why)
+        else:
+            self._set_notice("playing through %s" % key, _OUTPUT)
 
     def _volume_moved(self, value: int) -> None:
         """Hand the receiver the volume, and show what it settled on.
@@ -1600,6 +1684,11 @@ class ReceiverWindow(QMainWindow):
         """
         self._timer.stop()
         self.stop_any_sweep()
+        # A device switch is two PortAudio calls and some locks; let it
+        # finish rather than shut the output down around it.
+        switch, self._device_switch = self._device_switch, None
+        if switch is not None:
+            switch.wait()
         self._recordings.shutdown()
         self.controller.quit_event.set()
         super().closeEvent(event)
@@ -1619,6 +1708,37 @@ class ReceiverWindow(QMainWindow):
         if sweep is not None:
             sweep.cancel()
             sweep.wait()
+
+
+class _DeviceSwitch(QObject):
+    """Moves the radio to another sound device on a thread of its own."""
+
+    #: (the device's name or None, why it failed or "").
+    done = Signal(object, str)
+
+    def __init__(self, parent: QObject, controller, wanted: str) -> None:
+        super().__init__(parent)
+        self._controller = controller
+        self._wanted = wanted
+        self._thread = threading.Thread(
+            target=self._run, name="AudioDeviceSwitch", daemon=True)
+
+    def go(self) -> None:
+        self._thread.start()
+
+    def wait(self) -> None:
+        if self._thread.ident is not None:
+            self._thread.join()
+
+    def _run(self) -> None:
+        try:
+            key = self._controller.set_audio_device(self._wanted)
+        except Exception as e:
+            logger.warning("Could not switch the sound device to %s: %s",
+                           self._wanted, e)
+            self.done.emit(None, str(e) or type(e).__name__)
+        else:
+            self.done.emit(key, "")
 
 
 class ReceiverSwitch(QObject):

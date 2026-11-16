@@ -39,6 +39,9 @@ import numpy as np
 import pyaudio
 
 from fm_radio import recording_meta
+from fm_radio.audio_devices import (
+    OutputDevice, default_device, find_device, list_output_devices,
+)
 from fm_radio.rate_match import FractionalResampler, RateMatcher
 from fm_radio.interfaces import AudioOutputInterface
 from fm_radio.exceptions import AudioOutputError, RecordingError
@@ -51,6 +54,7 @@ from fm_radio.constants import (
     RECORD_QUEUE_MAXSIZE, AUDIO_RECORD_ROTATE_THRESHOLD_BYTES,
     VOLUME_MIN_PERCENT, VOLUME_MAX_PERCENT, VOLUME_DEFAULT_PERCENT,
     AUDIO_RATE_MATCH_MARGIN_SEC, AUDIO_TRIM_EXCESS_SEC,
+    AUDIO_KEPT_CARD_MARGIN_SEC,
 )
 
 
@@ -147,8 +151,23 @@ class AudioOutput(AudioOutputInterface):
         output_rate: int = AUDIO_OUTPUT_RATE,
         frames_per_buffer: int = AUDIO_FRAMES_PER_BUFFER,
         block_interval_sec: float = AUDIO_BLOCK_INTERVAL_DEFAULT_SEC,
+        device: "str | None" = None,
     ) -> None:
+        """
+        Args:
+            device: The sound device to play through, as
+                :func:`fm_radio.audio_devices.find_device` reads it;
+                None for the default, which is WASAPI's where there is
+                one.  One that is not there, or will not open, is
+                reported and the default used instead: a radio that
+                will not start for want of a pair of headphones that
+                were unplugged is worse than one in the speakers.
+        """
         self.logger: logging.Logger = logging.getLogger('fm_receiver.AudioOutput')
+        # One device switch at a time; see switch_device.
+        self._switch_lock: threading.Lock = threading.Lock()
+        self._devices: list[OutputDevice] = []
+        self._device: "OutputDevice | None" = None
         self.output_rate: int = output_rate
         self.frames_per_buffer: int = frames_per_buffer
         self.audio_buffer_queue: queue.Queue[tuple[np.ndarray, np.ndarray]] = queue.Queue(
@@ -376,22 +395,141 @@ class AudioOutput(AudioOutputInterface):
         # second of nothing.  See _play_from_now_on.
         try:
             self.pyaudio_instance = pyaudio.PyAudio()
-            self.stream = self.pyaudio_instance.open(
-                format=pyaudio.paFloat32,
-                channels=AUDIO_CHANNELS,
-                rate=int(self.output_rate),
-                output=True,
-                frames_per_buffer=self.frames_per_buffer,
-                stream_callback=self.callback,
-                start=False,
-            )
-            self._preroll_frames = (self._cushion_frames
-                                    + self._what_the_card_takes_at_once())
-            self._aim_the_matcher()
-            self.logger.info(f"Audio output initialized: rate={output_rate}Hz, buffer={frames_per_buffer}")
+            self._devices = list_output_devices(
+                self.pyaudio_instance, int(self.output_rate),
+                AUDIO_CHANNELS, pyaudio.paFloat32)
+            self.stream, self._device = self._open_what_will_open(
+                self._choose(device))
+            self._size_up_the_card()
+            self.logger.info(
+                "Audio output initialized: rate=%dHz, buffer=%d, device=%s, "
+                "card holds %.0f ms", output_rate, frames_per_buffer,
+                self.device or "PortAudio's default",
+                1000.0 * self._what_the_card_takes_at_once()
+                / self.output_rate)
         except OSError as e:
             self.logger.error(f"Failed to initialize audio output: {e}")
             raise AudioOutputError(f"Failed to initialize audio output: {e}") from e
+
+    def _choose(self, wanted: "str | None") -> "OutputDevice | None":
+        """The device *wanted* names, or the default; None for PortAudio's."""
+        if wanted:
+            device = find_device(self._devices, wanted)
+            if device is not None:
+                return device
+            self.logger.warning(
+                "No sound device is called %r, or more than one is; using "
+                "the default.  --list-audio-devices says what there is.",
+                wanted)
+        return default_device(self.pyaudio_instance, self._devices)
+
+    def _open_stream(self, device: "OutputDevice | None"):
+        """Open, not start, a stream on *device*; None is PortAudio's default."""
+        return self.pyaudio_instance.open(
+            format=pyaudio.paFloat32,
+            channels=AUDIO_CHANNELS,
+            rate=int(self.output_rate),
+            output=True,
+            output_device_index=None if device is None else device.index,
+            frames_per_buffer=self.frames_per_buffer,
+            stream_callback=self.callback,
+            start=False,
+        )
+
+    def _open_what_will_open(self, device: "OutputDevice | None"):
+        """(stream, device) on *device*, or on PortAudio's default if not.
+
+        A device that lists as able to play can still refuse to open -
+        another program holding it, a driver having a bad day - and the
+        default is a better start than none.  The default refusing too
+        is the receiver having no sound at all, and that is raised.
+        """
+        if device is not None:
+            try:
+                return self._open_stream(device), device
+            except Exception as e:
+                self.logger.warning(
+                    "Could not open %s (%s); using PortAudio's default "
+                    "device instead", device.key, e)
+        return self._open_stream(None), None
+
+    @property
+    def device(self) -> "str | None":
+        """The device playing, by its key; None for PortAudio's default."""
+        device = self._device
+        return None if device is None else device.key
+
+    @property
+    def output_devices(self) -> list[str]:
+        """The devices that could be switched to, by key.
+
+        As PortAudio saw them when this output was made: it does not
+        notice a device plugged in later without being started again.
+        """
+        return [d.key for d in self._devices]
+
+    def switch_device(self, wanted: str) -> str:
+        """Play through another device from now on; returns its key.
+
+        The card is stopped the way a band scan stops it - hold(), so
+        what is queued is dropped and the preroll re-armed - the new
+        stream is opened, and the hold let go: the next blocks start it
+        from behind a cushion, as at startup.  The silence is the
+        graceful stop plus the preroll, a quarter of a second or so.
+
+        The new stream is opened before the old one is closed, so a
+        device that will not open leaves the radio playing where it
+        was.  What the rate matcher has learned is kept: it is mostly
+        the SDR's shortfall, which a new card does not change, and
+        forgetting it would let the cushion sag for minutes.
+
+        Raises:
+            ValueError: if *wanted* names no device, or several.
+            AudioOutputError: if the device would not open, or the old
+                card would not stop; the output is as it was.
+        """
+        device = find_device(self._devices, wanted)
+        if device is None:
+            raise ValueError("no sound device is called %r, or more than "
+                             "one is" % (wanted,))
+        with self._switch_lock:
+            if self._closed.is_set():
+                raise AudioOutputError("the audio output has been closed")
+            if self._device is not None and device.key == self._device.key:
+                return device.key
+            self.hold()
+            try:
+                with self._play_lock:
+                    if self._playing:
+                        # hold() could not stop it, and a stream that is
+                        # still playing is not one to close.
+                        raise AudioOutputError(
+                            "the sound card would not stop, so it is "
+                            "still playing on %s" % (self.device,))
+                    if self._closed.is_set():
+                        raise AudioOutputError(
+                            "the audio output has been closed")
+                    try:
+                        stream = self._open_stream(device)
+                    except Exception as e:
+                        raise AudioOutputError(
+                            "could not open %s: %s" % (device.key, e)) from e
+                    old, self.stream = self.stream, stream
+                    self._device = device
+                    # The new card says how much it takes at once.
+                    self._size_up_the_card()
+                try:
+                    old.close()
+                except Exception as e:      # pragma: no cover - guard
+                    self.logger.warning("Could not close the old audio "
+                                        "stream: %s", e)
+            finally:
+                self.resume()
+        self.logger.info(
+            "Audio output switched to %s; the card holds %.0f ms",
+            device.key,
+            1000.0 * self._what_the_card_takes_at_once() / self.output_rate)
+        return device.key
 
     def callback(
         self, in_data: bytes | None, frame_count: int, time_info: dict, status: int,
@@ -514,6 +652,50 @@ class AudioOutput(AudioOutputInterface):
         """
         return self._card_mark
 
+    def _card_keeps_what_it_takes(self) -> bool:
+        """Whether what the card takes at the start stays taken.
+
+        WASAPI's does: it takes 5120 frames in the first 22 ms and then
+        asks at the clock's pace, so the queue is that much lower for
+        good - the card holds it, and plays it 85 ms late.  MME takes
+        its first buffers and then asks for nothing until it has played
+        them, so the queue comes back; on the hardware an MME stream
+        settled where its preroll left it.
+        """
+        device = self._device
+        return device is not None and device.api == "WASAPI"
+
+    def _size_up_the_card(self) -> None:
+        """Set the preroll and the matcher's target for the card now open.
+
+        The level the matcher holds must be where the stream is left
+        once the card has taken its start: a target above that is a
+        thin start the matcher takes a minute to fill - on the hardware
+        WASAPI left 1800 frames against a target of 5900 and ran dry in
+        the first second, with auto gain stepping - and a target below
+        it is a step it learns the wrong way.  So for a card that keeps
+        what it takes, the preroll is the target plus that; for one
+        that gives it back, the preroll is the cushion plus that, and
+        the stream settles at the preroll.
+        """
+        card = self._what_the_card_takes_at_once()
+        if self._card_keeps_what_it_takes():
+            self._preroll_frames = int(round(self._kept_card_target()
+                                             + card))
+        else:
+            self._preroll_frames = self._cushion_frames + card
+        self._aim_the_matcher()
+
+    def _kept_card_target(self) -> float:
+        """The target for a card that keeps its start; see the constant."""
+        return (self._least_target()
+                + AUDIO_KEPT_CARD_MARGIN_SEC * float(self.output_rate))
+
+    def _least_target(self) -> float:
+        """Two cushions plus a margin; see _aim_the_matcher."""
+        return (2 * self._cushion_frames
+                + AUDIO_RATE_MATCH_MARGIN_SEC * float(self.output_rate))
+
     def _aim_the_matcher(self) -> None:
         """Set the level the rate matcher holds, and the trim line above it.
 
@@ -523,11 +705,16 @@ class AudioOutput(AudioOutputInterface):
         takes little at once.  A target below where the stream settles
         is a step the matcher spends its first minutes removing; on
         the hardware that taught the integral 505 ppm the wrong way.
+        A card that keeps what it takes at the start leaves the stream
+        that much below its preroll, at the least target; see
+        _size_up_the_card.
         """
         rate = float(self.output_rate)
-        self._matcher.target = float(max(
-            2 * self._cushion_frames + AUDIO_RATE_MATCH_MARGIN_SEC * rate,
-            self._preroll_frames))
+        if self._card_keeps_what_it_takes():
+            self._matcher.target = float(self._kept_card_target())
+        else:
+            self._matcher.target = float(max(self._least_target(),
+                                             self._preroll_frames))
         self._trim_above = (self._matcher.target
                             + AUDIO_TRIM_EXCESS_SEC * rate)
 
@@ -709,6 +896,16 @@ class AudioOutput(AudioOutputInterface):
         rather than a fact: nothing, nonsense and silence about it
         all mean "assume none", and there is a ceiling for a device
         that claims more than a startup is worth waiting through.
+
+        WASAPI's claim is half of it.  On the same DAC, in shared mode
+        with 1024-frame buffers, it reports 42.7 ms and then calls back
+        three times at once and twice more 22 ms later: 5120 frames in
+        22 ms, against the 3840 a preroll of the cushion plus its claim
+        had waiting.  PortAudio keeps a buffer of its own in front of
+        the device's there, and fills both.  So for WASAPI it is
+        counted twice.  MME and DirectSound take no more than they say
+        (one and two buffers in the first 5 ms, measured), and doubling
+        theirs would hold the radio 100 ms further behind for nothing.
         """
         try:
             held = float(self.stream.get_output_latency())
@@ -723,6 +920,9 @@ class AudioOutput(AudioOutputInterface):
                 "The card claims to hold %.0f ms; waiting for %.0f ms of it",
                 held * 1000.0, AUDIO_CARD_BUFFER_MAX_SEC * 1000.0)
             held = AUDIO_CARD_BUFFER_MAX_SEC
+        device = self._device
+        if device is not None and device.api == "WASAPI":
+            held *= 2.0
         return int(round(held * self.output_rate))
 
     def hold(self) -> None:
@@ -1736,10 +1936,14 @@ class AudioOutput(AudioOutputInterface):
                     self._record_worker.join(timeout=1.0)
 
             # A stream that was never started has nothing to stop, and
-            # PortAudio is entitled to object to being asked.
-            if self._playing:
-                self.stream.stop_stream()
-            self.stream.close()
+            # PortAudio is entitled to object to being asked.  Under
+            # _play_lock, which a device switch swaps the stream under:
+            # the one closed here is the one that is current.
+            with self._play_lock:
+                if self._playing:
+                    self.stream.stop_stream()
+                    self._playing = False
+                self.stream.close()
             self.pyaudio_instance.terminate()
             self.logger.info("Audio output cleaned up successfully")
         except Exception as e:
