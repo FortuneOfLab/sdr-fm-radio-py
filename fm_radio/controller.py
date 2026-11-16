@@ -1813,6 +1813,11 @@ class FMReceiverController:
             # one a listener who has just given up and closed the
             # window would want to read about.
             profiler.say_anything_held_back(force=True)
+            # Stopped because the receiver is: nothing more will come,
+            # and the card running out of what is left is the end of
+            # the audio.  Not after a fatal error, whose gaps are real.
+            if self.quit_event.is_set():
+                self.audio_output.wind_down()
             self.logger.info("Processing thread stopped")
 
     def start_background(self) -> None:
@@ -1999,6 +2004,9 @@ class FMReceiverController:
             # stop - a window that failed to open, for one - and everything
             # below is something they are still using.
             self.quit_event.set()
+            # Before anything is stopped: from here on the audio runs
+            # out, and that is not an underrun.
+            self.audio_output.wind_down()
             # The gain worker writes to the SDR from its own thread, so it
             # goes before the device it writes to.  Each resource also
             # refuses use once closed, because a bounded join cannot promise

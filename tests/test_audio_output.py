@@ -248,6 +248,37 @@ def test_underruns_accumulate(audio_output):
     assert audio_output.underruns == 2
 
 
+def test_running_dry_while_winding_down_is_not_an_underrun(audio_output,
+                                                            caplog):
+    """The receiver is stopping: what is left plays, then silence, quietly.
+
+    The stream outlives the processing thread by however long the SDR
+    takes to close, and every hardware log ended in an underrun line
+    for that.
+    """
+    block = np.full(192, 0.25, dtype=np.float32)
+    audio_output.enqueue_audio(block, block)
+    audio_output.wind_down()
+    with caplog.at_level(logging.INFO, logger="fm_receiver.AudioOutput"):
+        out, _ = audio_output.callback(None, 384, {}, 0)
+        audio_output.callback(None, 384, {}, 0)
+
+    samples = np.frombuffer(out, dtype=np.float32)
+    # What was waiting still plays, then the rest is silence...
+    assert np.max(np.abs(samples[:192 * 2])) > 0.2
+    assert np.all(samples[192 * 2:] == 0.0)
+    # ...and neither the half-empty buffer nor the empty one is a gap.
+    assert audio_output.underruns == 0
+    assert not underrun_lines(caplog)
+
+
+def test_an_underrun_before_the_wind_down_still_counts(audio_output):
+    audio_output.callback(None, 384, {}, 0)
+    audio_output.wind_down()
+    audio_output.callback(None, 384, {}, 0)
+    assert audio_output.underruns == 1
+
+
 def underrun_lines(caplog):
     """The log lines that say the output ran dry."""
     return [r for r in caplog.records

@@ -180,6 +180,43 @@ def test_the_gain_worker_stops_before_the_device_does(receiver, monkeypatch):
 # The endings cleanup has to survive
 # ----------------------------------------------------------------------
 
+def test_cleanup_winds_the_audio_down_before_stopping_anything(receiver,
+                                                               monkeypatch):
+    """The SDR takes over a second to close; the card runs dry meanwhile."""
+    seen = []
+    original_stop = receiver.sdr_receiver.stop
+
+    def stop(*args, **kwargs):
+        seen.append(receiver.audio_output._winding_down)
+        return original_stop(*args, **kwargs)
+
+    monkeypatch.setattr(receiver.sdr_receiver, "stop", stop)
+    receiver.cleanup()
+    assert seen and seen[0] is True
+
+
+def test_the_processing_thread_winds_the_audio_down_when_told_to_stop(
+        receiver):
+    """It stops first when the window closes, before cleanup starts."""
+    receiver.quit_event.set()
+    receiver.processing_thread()
+    assert receiver.audio_output._winding_down
+
+
+def test_a_processing_thread_that_failed_does_not_wind_down(receiver,
+                                                            monkeypatch):
+    """A fatal error is not the end of listening: its gaps are real."""
+    def broken(*args, **kwargs):
+        raise RuntimeError("the loop itself broke")
+
+    # Past the per-block guards, so it ends the thread as a fatal error.
+    monkeypatch.setattr(receiver, "_block_is_still_wanted", broken)
+    receiver.sdr_receiver.data_queue.put((0, iq_block(receiver)))
+    receiver.processing_thread()
+    assert not receiver.quit_event.is_set()
+    assert not receiver.audio_output._winding_down
+
+
 def test_cleanup_is_idempotent(receiver):
     receiver.start_background()
     receiver.cleanup()
