@@ -217,6 +217,20 @@ def test_a_processing_thread_that_failed_does_not_wind_down(receiver,
     assert not receiver.audio_output._winding_down
 
 
+def test_a_lost_device_does_not_wind_the_audio_down(receiver):
+    """A pulled cable stops the receiver too, but nobody asked it to.
+
+    _device_is_gone sets quit_event as a requested stop does.  The card
+    running dry after that is the radio cutting out on the listener,
+    and it is still counted and logged.
+    """
+    receiver._device_is_gone("unplugged")
+    receiver.processing_thread()
+    assert not receiver.audio_output._winding_down
+    receiver.cleanup()
+    assert not receiver.audio_output._winding_down
+
+
 def test_cleanup_is_idempotent(receiver):
     receiver.start_background()
     receiver.cleanup()
