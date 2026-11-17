@@ -572,6 +572,12 @@ class AudioOutput(AudioOutputInterface):
                         self._why_not = []
                         self.stream, self._device = self._open_what_will_open(
                             *self._find_again(was))
+                        if (self._device is not None
+                                and self._is_wanted(self._device)):
+                            # Where it was asked to be: what went on the
+                            # way - the speakers it fell back to, gone -
+                            # is no reason it is not.
+                            self._why_not = []
                     except Exception as e:
                         self._device = None
                         self.logger.error("No sound device would open after "
@@ -596,6 +602,13 @@ class AudioOutput(AudioOutputInterface):
                          len(self._devices),
                          self.device or "PortAudio's default")
         return self.device
+
+    def _is_wanted(self, device: OutputDevice) -> bool:
+        """Whether *device* is the one the user wants."""
+        if self._wanted is None:
+            return False
+        name, exact = self._wanted
+        return find_device(self._devices, name, exact=exact) == device
 
     def _find_again(self, was: "OutputDevice | None"
                     ) -> "list[OutputDevice]":

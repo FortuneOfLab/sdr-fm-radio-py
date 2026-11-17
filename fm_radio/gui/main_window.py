@@ -970,10 +970,15 @@ class ReceiverWindow(QMainWindow):
         on the hardware - and the new one opened, which together are
         long enough to be a window that does not paint.  The list is
         out of reach until it is done, so two switches cannot cross.
+
+        The device already playing, picked again, is passed on too: it
+        opens nothing, but it is the user saying that is the device -
+        the speakers the radio fell back to, kept for next time and
+        through a refresh rather than given up for the headphones that
+        were remembered.
         """
         key = self._output.itemData(index)
-        if (key is None or self._device_switch is not None
-                or key == self.controller.get_audio_device()):
+        if key is None or self._device_switch is not None:
             self._load_outputs()
             return
         self._output.setEnabled(False)

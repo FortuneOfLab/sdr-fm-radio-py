@@ -1004,3 +1004,39 @@ def test_out_choosing_the_device_playing_is_kept_through_a_refresh(
     assert receiver.get_audio_device() == "WASAPI: Speakers (USB Audio HP-A8)"
     assert st.configured_audio_device(no_user_config) == (
         "WASAPI: Speakers (USB Audio HP-A8)")
+
+
+def test_back_on_the_wanted_device_says_nothing_of_what_went(
+        make_output, fake_sound_devices):
+    """The headphones are back and the speakers fallen back to are gone:
+    it is where it was asked to be, and that is all there is to say."""
+    fake_sound_devices.host_apis = [("MME", 0), ("Windows WASAPI", REALTEK),
+                                    ("Windows WDM-KS", 4)]
+    out = make_output(device="WASAPI: Headphones (FOSTEX)", exact_device=True)
+    assert out.device == "WASAPI: Realtek Digital Output"
+    fake_sound_devices.devices = [d for d in fake_sound_devices.devices
+                                  if d[1] != "Realtek Digital Output"]
+    fake_sound_devices.host_apis = [("MME", 0), ("Windows WASAPI", HP_WASAPI),
+                                    ("Windows WDM-KS", 3)]
+    plug_in(fake_sound_devices)
+
+    assert out.refresh_devices() == "WASAPI: Headphones (FOSTEX)"
+    assert out.fallback_reason is None
+
+
+def test_not_on_the_wanted_device_still_says_what_went(make_output,
+                                                       fake_sound_devices):
+    """The other side: the speakers gone and no headphones either."""
+    fake_sound_devices.host_apis = [("MME", 0), ("Windows WASAPI", REALTEK),
+                                    ("Windows WDM-KS", 4)]
+    out = make_output(device="WASAPI: Headphones (FOSTEX)", exact_device=True)
+    fake_sound_devices.devices = [d for d in fake_sound_devices.devices
+                                  if d[1] != "Realtek Digital Output"]
+    fake_sound_devices.host_apis = [("MME", 0), ("Windows WASAPI", HP_WASAPI),
+                                    ("Windows WDM-KS", 3)]
+
+    out.refresh_devices()
+    assert out.device == "WASAPI: Speakers (USB Audio HP-A8)"
+    assert "WASAPI: Realtek Digital Output has gone" in out.fallback_reason
+    assert "No sound device is called 'WASAPI: Headphones (FOSTEX)'" in (
+        out.fallback_reason)

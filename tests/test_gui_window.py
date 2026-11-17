@@ -3577,10 +3577,17 @@ def test_refresh_is_offered_even_with_nothing_listed(window):
     assert view._refresh_outputs_button.isEnabled()
 
 
-def test_choosing_the_device_already_playing_does_nothing(window, qt_app):
-    view, controller = window(with_devices())
+def test_choosing_the_device_already_playing_is_passed_on(window, qt_app):
+    """The speakers fallen back to, picked: the user's choice from now on."""
+    controller = with_devices()
+    controller.audio_notice = ("No sound device is called 'WASAPI: "
+                               "Headphones (FOSTEX)'; playing through "
+                               + DEVICES[1])
+    view, _ = window(controller)
     choose_output(view, qt_app, DEVICES[1])
-    assert not [c for c in controller.calls if c[0] == "set_audio_device"]
+    assert ("set_audio_device", DEVICES[1]) in controller.calls
+    assert view._output.currentData() == DEVICES[1]
+    assert view._output.isEnabled()
 
 
 def test_the_output_list_does_not_widen_the_window(window):
