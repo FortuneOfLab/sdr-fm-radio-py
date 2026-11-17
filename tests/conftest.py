@@ -66,6 +66,11 @@ class _FakePyAudio:
     the output then plays on PortAudio's default, as it always did.
     A test that is about devices sets the class attributes - the
     ``fake_sound_devices`` fixture does, and puts them back.
+
+    Like PortAudio, an instance counts the devices when it is made and
+    not again: a device a test plugs in afterwards - into the class
+    attributes - is seen only by a PortAudio started after it.  And one
+    that has been terminated opens nothing.
     """
 
     #: [(PortAudio's name for the API, index of its default device)]
@@ -76,8 +81,19 @@ class _FakePyAudio:
     refuse_to_open: set = set()
     #: The keyword arguments of every open, in order.
     opened: list = []
+    #: Every instance made, when a test wants them counted; else None.
+    made: "list | None" = None
+
+    def __init__(self) -> None:
+        self._apis = list(type(self).host_apis)
+        self._devices = list(type(self).devices)
+        self.terminated = False
+        if type(self).made is not None:
+            type(self).made.append(self)
 
     def open(self, **kwargs):
+        if self.terminated:
+            raise OSError(-10000, "PortAudio not initialized (fake)")
         index = kwargs.get("output_device_index")
         if index in type(self).refuse_to_open:
             raise OSError(-9996, "Invalid output device (fake)")
@@ -86,31 +102,32 @@ class _FakePyAudio:
         stream.device_index = index
         return stream
 
-    def terminate(self) -> None: ...
+    def terminate(self) -> None:
+        self.terminated = True
 
     def get_device_count(self) -> int:
-        return len(type(self).devices)
+        return len(self._devices)
 
     def get_device_info_by_index(self, index: int) -> dict:
-        api, name, channels, _ = type(self).devices[index]
+        api, name, channels, _ = self._devices[index]
         return {"index": index, "name": name, "hostApi": api,
                 "maxOutputChannels": channels}
 
     def get_host_api_count(self) -> int:
-        return len(type(self).host_apis)
+        return len(self._apis)
 
     def get_host_api_info_by_index(self, index: int) -> dict:
-        name, default = type(self).host_apis[index]
+        name, default = self._apis[index]
         return {"index": index, "name": name, "defaultOutputDevice": default}
 
     def get_default_output_device_info(self) -> dict:
-        if not type(self).host_apis:
+        if not self._apis:
             raise OSError(-9996, "No default output device (fake)")
-        return self.get_device_info_by_index(type(self).host_apis[0][1])
+        return self.get_device_info_by_index(self._apis[0][1])
 
     def is_format_supported(self, rate, output_device=None,
                             output_channels=None, output_format=None):
-        _, _, channels, rates = type(self).devices[output_device]
+        _, _, channels, rates = self._devices[output_device]
         if rate not in rates or (output_channels or 0) > channels:
             raise ValueError("Invalid sample rate (fake)")
         return True
@@ -348,6 +365,7 @@ def fake_sound_devices(monkeypatch):
     ])
     monkeypatch.setattr(fake, "refuse_to_open", set())
     monkeypatch.setattr(fake, "opened", [])
+    monkeypatch.setattr(fake, "made", [])
     return fake
 
 

@@ -96,6 +96,12 @@ of a second while it switches. The choice is saved as `audio_device` in your
 next time (for example, the headphones are unplugged), the default is used and
 a warning says so.
 
+The list is what PortAudio found when the radio started. For a device plugged
+in later, press **Refresh** next to the list, or type `out refresh`: PortAudio is
+restarted to look again, so the sound stops for a little longer than a switch
+(PortAudio takes about 150 ms to restart), and if the device you chose is
+there now, the radio goes back to it.
+
 ### Interactive Commands (while running)
 
 - `list` → Show the preset stations (tunable by number)
@@ -113,6 +119,7 @@ a warning says so.
   (`mute` alone toggles; setting a volume also unmutes)
 - `out` → List the sound devices, with the one playing marked `*`
 - `out <n>` / `out <name>` → Play through that device (remembered for next time)
+- `out refresh` → Look again for devices plugged in since the start
 - `<station_num>` or `<freq_MHz>` → Tune to a station
 - `q` → Quit the program
 

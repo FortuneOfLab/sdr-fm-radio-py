@@ -86,6 +86,9 @@ class FakeController:
         self.audio_device_trouble: Exception | None = None
         # Why the radio is not playing where it was asked to, or None.
         self.audio_notice: str | None = None
+        # What refresh_audio_devices finds: (devices, now playing,
+        # why not the one wanted); None finds nothing new.
+        self.found_on_refresh: "tuple | None" = None
         self.recording = False
         self.iq_recording = False
         # Stopped but still being written, as the real one is between
@@ -178,6 +181,15 @@ class FakeController:
             raise self.audio_device_trouble
         self.audio_device = wanted
         return wanted
+
+    def refresh_audio_devices(self):
+        self.calls.append(("refresh_audio_devices",))
+        if self.audio_device_trouble is not None:
+            raise self.audio_device_trouble
+        why = None
+        if self.found_on_refresh is not None:
+            self.audio_devices, self.audio_device, why = self.found_on_refresh
+        return self.audio_device, why
 
     def is_recording(self):
         return self.recording
@@ -3432,6 +3444,137 @@ def test_a_device_that_will_not_switch_leaves_the_list_where_it_was(
     assert view._output.currentData() == DEVICES[1]
     assert view._output.isEnabled()
     assert "could not switch the output: busy" in view._health.text()
+
+
+def refresh_outputs(view, qt_app):
+    """Press Refresh, and wait for it."""
+    view._refresh_outputs_button.click()
+    switch = view._device_switch
+    if switch is not None:
+        switch.wait()
+    qt_app.processEvents()
+
+
+def test_refresh_lists_a_device_plugged_in_since_off_the_gui_thread(
+        window, qt_app):
+    import threading
+
+    class Watched(FakeController):
+        def refresh_audio_devices(self):
+            self.on = threading.current_thread()
+            return super().refresh_audio_devices()
+
+    controller = Watched(snapshot())
+    controller.audio_devices = list(DEVICES)
+    controller.audio_device = DEVICES[1]
+    controller.found_on_refresh = (
+        DEVICES + ["WASAPI: Headphones (FOSTEX)"],
+        "WASAPI: Headphones (FOSTEX)", None)
+    view, _ = window(controller)
+
+    refresh_outputs(view, qt_app)
+
+    assert controller.on is not threading.main_thread()
+    items = [view._output.itemData(i) for i in range(view._output.count())]
+    assert "WASAPI: Headphones (FOSTEX)" in items
+    assert view._output.currentData() == "WASAPI: Headphones (FOSTEX)"
+    assert "playing through WASAPI: Headphones (FOSTEX)" in (
+        view._health.text())
+    assert view._output.isEnabled()
+    assert view._refresh_outputs_button.isEnabled()
+
+
+def test_refresh_says_why_it_is_not_on_the_device_wanted(window, qt_app):
+    controller = with_devices()
+    controller.found_on_refresh = (
+        list(DEVICES), DEVICES[1],
+        "No sound device is called 'WASAPI: Headphones (FOSTEX)'; "
+        "playing through " + DEVICES[1])
+    view, _ = window(controller)
+    refresh_outputs(view, qt_app)
+    assert "No sound device is called 'WASAPI: Headphones (FOSTEX)'" in (
+        view._health.text())
+
+
+def test_a_refresh_that_fails_says_so(window, qt_app):
+    from fm_radio.exceptions import AudioOutputError
+    controller = with_devices()
+    controller.audio_device_trouble = AudioOutputError(
+        "no sound device would open")
+    view, _ = window(controller)
+    refresh_outputs(view, qt_app)
+    assert ("could not refresh the sound devices: no sound device would "
+            "open") in view._health.text()
+    assert view._refresh_outputs_button.isEnabled()
+
+
+def test_refresh_and_the_list_are_out_of_reach_while_either_is_under_way(
+        window, qt_app):
+    import threading
+    release = threading.Event()
+
+    class Slow(FakeController):
+        def refresh_audio_devices(self):
+            release.wait(5.0)
+            return super().refresh_audio_devices()
+
+    controller = Slow(snapshot())
+    controller.audio_devices = list(DEVICES)
+    controller.audio_device = DEVICES[1]
+    view, _ = window(controller)
+    view._refresh_outputs_button.click()
+    switch = view._device_switch
+    try:
+        assert not view._output.isEnabled()
+        assert not view._refresh_outputs_button.isEnabled()
+        assert "looking for sound devices" in view._health.text()
+        # A second press while the first is running does nothing.
+        view._refresh_outputs()
+        assert view._device_switch is switch
+        # Nor does a choice from the list, which puts the list back
+        # without bringing either within reach.
+        view._output.activated.emit(2)
+        assert view._device_switch is switch
+        assert not view._output.isEnabled()
+        assert not view._refresh_outputs_button.isEnabled()
+    finally:
+        release.set()
+        switch.wait()
+    qt_app.processEvents()
+    assert [c for c in controller.calls
+            if c[0] == "refresh_audio_devices"] == [("refresh_audio_devices",)]
+    assert view._refresh_outputs_button.isEnabled()
+
+
+def test_refresh_is_out_of_reach_while_a_switch_is_under_way(window, qt_app):
+    import threading
+    release = threading.Event()
+
+    class Slow(FakeController):
+        def set_audio_device(self, wanted):
+            release.wait(5.0)
+            return super().set_audio_device(wanted)
+
+    controller = Slow(snapshot())
+    controller.audio_devices = list(DEVICES)
+    controller.audio_device = DEVICES[1]
+    view, _ = window(controller)
+    view._output.activated.emit(2)
+    switch = view._device_switch
+    try:
+        assert not view._refresh_outputs_button.isEnabled()
+    finally:
+        release.set()
+        switch.wait()
+    qt_app.processEvents()
+    assert view._refresh_outputs_button.isEnabled()
+
+
+def test_refresh_is_offered_even_with_nothing_listed(window):
+    """Nothing listed is exactly when a device may have been plugged in."""
+    view, _ = window()
+    assert not view._output.isEnabled()
+    assert view._refresh_outputs_button.isEnabled()
 
 
 def test_choosing_the_device_already_playing_does_nothing(window, qt_app):

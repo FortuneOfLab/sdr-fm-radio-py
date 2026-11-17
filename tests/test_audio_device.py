@@ -731,3 +731,225 @@ def test_out_with_a_shared_name_says_so(say):
     said = say("out hp-a8")
     assert "names 2 sound devices" in said
     assert "No sound device is called" not in said
+
+
+# ----------------------------------------------------------------------
+# Looking again for devices plugged in since the start
+# ----------------------------------------------------------------------
+
+HEADPHONES = (1, "Headphones (FOSTEX)", 2, {48000})
+
+
+def plug_in(fake, device=HEADPHONES, at=None):
+    """Plug *device* in; returns its index in PortAudio's new count."""
+    devices = list(fake.devices)
+    if at is None:
+        devices.append(device)
+        index = len(devices) - 1
+    else:
+        devices.insert(at, device)
+        index = at
+        # The default each API names moves with the count.
+        fake.host_apis = [(name, d + 1 if d >= at else d)
+                          for name, d in fake.host_apis]
+    fake.devices = devices
+    return index
+
+
+def test_a_device_plugged_in_later_is_listed_only_after_a_refresh(
+        make_output, fake_sound_devices):
+    out = make_output()
+    plug_in(fake_sound_devices)
+    assert "WASAPI: Headphones (FOSTEX)" not in out.output_devices
+
+    out.refresh_devices()
+
+    assert "WASAPI: Headphones (FOSTEX)" in out.output_devices
+    # PortAudio was stopped and started again: the old one counted the
+    # devices once and would never have seen it.
+    first, second = fake_sound_devices.made
+    assert first.terminated and not second.terminated
+    assert out.pyaudio_instance is second
+
+
+def test_a_refresh_keeps_playing_on_the_device_it_was(make_output,
+                                                      fake_sound_devices):
+    out = make_output(device="realtek")
+    playing(out)
+    old = out.stream
+    plug_in(fake_sound_devices)
+
+    assert out.refresh_devices() == "WASAPI: Realtek Digital Output"
+
+    assert getattr(old, "closed", False)
+    assert out.stream is not old and out.stream.device_index == REALTEK
+    assert out.fallback_reason is None
+    assert not out.held
+    # Plays again from behind a cushion, as after a switch.
+    assert np.max(playing(out, level=0.5)) > 0.4
+    assert out.stream.started
+
+
+def test_the_device_is_found_again_by_name_when_the_count_moves(
+        make_output, fake_sound_devices):
+    out = make_output(device="realtek")
+    plug_in(fake_sound_devices, at=0)
+
+    out.refresh_devices()
+
+    assert out.device == "WASAPI: Realtek Digital Output"
+    assert out.stream.device_index == REALTEK + 1
+
+
+def test_the_remembered_device_plugged_in_later_is_gone_back_to(
+        make_output, fake_sound_devices):
+    """The user's case: the headphones were not plugged in at the start."""
+    out = make_output(device="WASAPI: Headphones (FOSTEX)", exact_device=True)
+    assert out.device == "WASAPI: Speakers (USB Audio HP-A8)"
+    assert out.fallback_reason is not None
+    index = plug_in(fake_sound_devices)
+
+    assert out.refresh_devices() == "WASAPI: Headphones (FOSTEX)"
+
+    assert out.stream.device_index == index
+    assert out.fallback_reason is None
+
+
+def test_a_refresh_without_it_still_says_why(make_output):
+    out = make_output(device="WASAPI: Headphones (FOSTEX)", exact_device=True)
+    out.refresh_devices()
+    assert out.device == "WASAPI: Speakers (USB Audio HP-A8)"
+    assert "No sound device is called 'WASAPI: Headphones (FOSTEX)'" in (
+        out.fallback_reason)
+
+
+def test_a_device_chosen_since_is_the_one_gone_back_to(make_output,
+                                                       fake_sound_devices):
+    """A switch is the user saying what they want now."""
+    out = make_output(device="WASAPI: Headphones (FOSTEX)", exact_device=True)
+    out.switch_device("realtek")
+    plug_in(fake_sound_devices)
+    assert out.refresh_devices() == "WASAPI: Realtek Digital Output"
+
+
+def test_a_device_that_went_while_playing_is_said_on_a_refresh(
+        make_output, fake_sound_devices):
+    out = make_output()
+    fake_sound_devices.devices = [
+        d for d in fake_sound_devices.devices
+        if d[1] != "Speakers (USB Audio HP-A8)" or d[0] != 1]
+    fake_sound_devices.host_apis = [("MME", 0), ("Windows WASAPI", 1),
+                                    ("Windows WDM-KS", 3)]
+
+    out.refresh_devices()
+
+    assert out.device == "WASAPI: Realtek Digital Output"
+    assert "WASAPI: Speakers (USB Audio HP-A8) has gone" in (
+        out.fallback_reason)
+
+
+def test_nothing_opening_after_a_refresh_leaves_it_quiet_until_one_does(
+        make_output, fake_sound_devices):
+    out = make_output()
+    playing(out)
+    fake_sound_devices.refuse_to_open.update({HP_MME, HP_WASAPI, REALTEK,
+                                              None})
+
+    with pytest.raises(AudioOutputError, match="no sound device would open"):
+        out.refresh_devices()
+    assert out.stream is None and out.held
+    # Blocks keep coming and are dropped, not played into nothing.
+    block = np.full(768, 0.25, dtype=np.float32)
+    for _ in range(20):
+        out.enqueue_audio(block, block)
+    assert not out._playing
+
+    # Still nothing: still held, once.
+    with pytest.raises(AudioOutputError):
+        out.refresh_devices()
+    assert out._holds == 1
+
+    fake_sound_devices.refuse_to_open.clear()
+    assert out.refresh_devices() == "WASAPI: Speakers (USB Audio HP-A8)"
+    assert not out.held
+    assert np.max(playing(out, level=0.5)) > 0.4
+
+
+def test_a_switch_out_of_a_failed_refresh_plays_again(make_output,
+                                                      fake_sound_devices):
+    out = make_output()
+    fake_sound_devices.refuse_to_open.update({HP_MME, HP_WASAPI, REALTEK,
+                                              None})
+    with pytest.raises(AudioOutputError):
+        out.refresh_devices()
+    fake_sound_devices.refuse_to_open.clear()
+
+    assert out.switch_device("realtek") == "WASAPI: Realtek Digital Output"
+    assert not out.held
+    assert np.max(playing(out, level=0.5)) > 0.4
+
+
+def test_a_switch_to_the_same_name_after_a_failed_refresh_opens_it(
+        make_output, fake_sound_devices):
+    """The device is still named; there is just no stream on it."""
+    out = make_output(device="realtek")
+    fake_sound_devices.refuse_to_open.update({HP_MME, HP_WASAPI, REALTEK,
+                                              None})
+    with pytest.raises(AudioOutputError):
+        out.refresh_devices()
+    fake_sound_devices.refuse_to_open.clear()
+    out._device = out._devices[2]       # as if it had kept its name
+
+    out.switch_device("realtek")
+    assert out.stream is not None and not out.held
+
+
+def test_cleanup_after_a_failed_refresh_still_stops_portaudio(
+        make_output, fake_sound_devices):
+    out = make_output()
+    fake_sound_devices.refuse_to_open.update({HP_MME, HP_WASAPI, REALTEK,
+                                              None})
+    with pytest.raises(AudioOutputError):
+        out.refresh_devices()
+    out.cleanup()
+    assert out.pyaudio_instance.terminated
+
+
+def test_a_refresh_after_cleanup_is_refused(make_output):
+    out = make_output()
+    out.cleanup()
+    with pytest.raises(AudioOutputError):
+        out.refresh_devices()
+
+
+def test_a_refresh_is_not_remembered(receiver_on, no_user_config,
+                                     fake_sound_devices):
+    """Nothing was chosen: the file says what the user chose."""
+    st.remember_audio_device("WASAPI: Headphones (FOSTEX)", no_user_config)
+    receiver = receiver_on()
+    before = no_user_config.read_text(encoding="utf-8")
+
+    # Still not plugged in: playing on the default, which is not to
+    # take the headphones' place in the file.
+    key, why = receiver.refresh_audio_devices()
+    assert key == "WASAPI: Speakers (USB Audio HP-A8)"
+    assert "WASAPI: Headphones (FOSTEX)" in why
+    assert no_user_config.read_text(encoding="utf-8") == before
+
+    plug_in(fake_sound_devices)
+    assert receiver.refresh_audio_devices() == (
+        "WASAPI: Headphones (FOSTEX)", None)
+    assert no_user_config.read_text(encoding="utf-8") == before
+
+
+def test_out_refresh_lists_what_was_plugged_in(say, fake_sound_devices):
+    plug_in(fake_sound_devices)
+    said = say("out refresh")
+    assert "Playing through WASAPI: Speakers (USB Audio HP-A8)." in said
+    assert "4. WASAPI: Headphones (FOSTEX)" in said
+
+
+def test_out_refresh_says_when_nothing_would_open(say, fake_sound_devices):
+    fake_sound_devices.refuse_to_open.update({HP_MME, HP_WASAPI, REALTEK,
+                                              None})
+    assert "Could not refresh the sound devices" in say("out refresh")

@@ -183,6 +183,15 @@ class AudioOutput(AudioOutputInterface):
         #: off, and headphones that were unplugged mean the radio is
         #: coming out of the speakers.
         self.fallback_reason: "str | None" = None
+        # The device the user wants, as (name, whether only the whole
+        # name will do); None for the default.  What a refresh goes
+        # back to once it is plugged in: the remembered headphones are
+        # the point, not the speakers the radio fell back to.
+        self._wanted: "tuple[str, bool] | None" = (
+            (device, exact_device) if device else None)
+        # A refresh closed the stream and could not open another: the
+        # output stays held, with no stream, until one does.
+        self._stranded: bool = False
         self.output_rate: int = output_rate
         self.frames_per_buffer: int = frames_per_buffer
         self.audio_buffer_queue: queue.Queue[tuple[np.ndarray, np.ndarray]] = queue.Queue(
@@ -494,10 +503,121 @@ class AudioOutput(AudioOutputInterface):
     def output_devices(self) -> list[str]:
         """The devices that could be switched to, by key.
 
-        As PortAudio saw them when this output was made: it does not
-        notice a device plugged in later without being started again.
+        As PortAudio saw them when this output was made, or last
+        refreshed: it does not notice a device plugged in later until
+        it is started again; see refresh_devices.
         """
         return [d.key for d in self._devices]
+
+    def refresh_devices(self) -> "str | None":
+        """List the sound devices again; returns the device playing.
+
+        PortAudio counts the devices once, when it starts, so the only
+        way to see one plugged in since is to stop PortAudio and start
+        it again - which closes every stream it has.  So this stops the
+        card as a switch does (hold()), closes the stream, starts
+        PortAudio again - 140-150 ms, and 20 ms more to list sixteen
+        devices, measured on the machine this was written on - and opens
+        a stream as startup does: on the device the user wants if it is
+        there now - the remembered headphones, just plugged in - else
+        on the one that was playing, else on the default.  Indexes are
+        PortAudio's count and may have moved, so every device is found
+        again by name.
+
+        ``fallback_reason`` says, as at startup, why it is not playing
+        on the device wanted; None when it is.
+
+        Raises:
+            AudioOutputError: if the card would not stop - nothing has
+                changed - or no device would open afterwards, in which
+                case the radio is silent until a refresh finds one.
+        """
+        with self._switch_lock:
+            if self._closed.is_set():
+                raise AudioOutputError("the audio output has been closed")
+            stranded = self._stranded
+            if not stranded:
+                self.hold()
+            reopened = False
+            try:
+                with self._play_lock:
+                    if self._playing:
+                        raise AudioOutputError(
+                            "the sound card would not stop, so the list "
+                            "was not refreshed")
+                    if self._closed.is_set():
+                        raise AudioOutputError(
+                            "the audio output has been closed")
+                    was = self._device
+                    # From here on there is no stream until one opens:
+                    # a failure strands the output, held.
+                    self._stranded = True
+                    old, self.stream = self.stream, None
+                    if old is not None:
+                        try:
+                            old.close()
+                        except Exception as e:  # pragma: no cover - guard
+                            self.logger.warning("Could not close the audio "
+                                                "stream: %s", e)
+                    try:
+                        self.pyaudio_instance.terminate()
+                    except Exception as e:      # pragma: no cover - guard
+                        self.logger.warning("Could not stop PortAudio: %s", e)
+                    try:
+                        self.pyaudio_instance = pyaudio.PyAudio()
+                        self._devices = list_output_devices(
+                            self.pyaudio_instance, int(self.output_rate),
+                            AUDIO_CHANNELS, pyaudio.paFloat32)
+                        self._why_not = []
+                        self.stream, self._device = self._open_what_will_open(
+                            self._find_again(was))
+                    except Exception as e:
+                        self._device = None
+                        self.logger.error("No sound device would open after "
+                                          "refreshing the list: %s", e)
+                        raise AudioOutputError(
+                            "no sound device would open: %s" % (e,)) from e
+                    self._stranded = False
+                    reopened = True
+                    self.fallback_reason = (
+                        "%s; playing through %s" % (
+                            "; ".join(self._why_not),
+                            self.device or "the system's default device")
+                        if self._why_not else None)
+                    self._size_up_the_card()
+            finally:
+                # Held once by this refresh, or still by the one that
+                # stranded it: either way one resume, and only once
+                # there is a stream to resume.
+                if reopened or (not stranded and not self._stranded):
+                    self.resume()
+        self.logger.info("Sound devices listed again: %d; playing through %s",
+                         len(self._devices),
+                         self.device or "PortAudio's default")
+        return self.device
+
+    def _find_again(self, was: "OutputDevice | None"
+                    ) -> "OutputDevice | None":
+        """The device to open after a refresh: wanted, else as was, else
+        the default.
+
+        A wanted device still missing is said in ``_why_not``, as at
+        startup; one that was playing and has gone is said too.
+        """
+        if self._wanted is not None:
+            name, exact = self._wanted
+            device = find_device(self._devices, name, exact=exact)
+            if device is not None:
+                return device
+            self._why_not.append(why_not_found(self._devices, name,
+                                               exact=exact))
+        if was is not None:
+            device = find_device(self._devices, was.key, exact=True)
+            if device is not None:
+                return device
+            if self._wanted is None or self._wanted[0] != was.key:
+                self._why_not.append("%s has gone" % was.key)
+        return default_device(self.pyaudio_instance, self._devices)
 
     def switch_device(self, wanted: str) -> str:
         """Play through another device from now on; returns its key.
@@ -525,8 +645,12 @@ class AudioOutput(AudioOutputInterface):
         with self._switch_lock:
             if self._closed.is_set():
                 raise AudioOutputError("the audio output has been closed")
-            if self._device is not None and device.key == self._device.key:
+            if (self._device is not None and device.key == self._device.key
+                    and not self._stranded):
                 return device.key
+            # A refresh that found nothing to open left a hold of its
+            # own; a stream opened here is the end of it.
+            unstrand = False
             self.hold()
             try:
                 with self._play_lock:
@@ -546,15 +670,23 @@ class AudioOutput(AudioOutputInterface):
                             "could not open %s: %s" % (device.key, e)) from e
                     old, self.stream = self.stream, stream
                     self._device = device
+                    # What the user asked for, by its whole name: a
+                    # refresh comes back to it.
+                    self._wanted = (device.key, True)
+                    self.fallback_reason = None
+                    unstrand, self._stranded = self._stranded, False
                     # The new card says how much it takes at once.
                     self._size_up_the_card()
-                try:
-                    old.close()
-                except Exception as e:      # pragma: no cover - guard
-                    self.logger.warning("Could not close the old audio "
-                                        "stream: %s", e)
+                if old is not None:
+                    try:
+                        old.close()
+                    except Exception as e:  # pragma: no cover - guard
+                        self.logger.warning("Could not close the old audio "
+                                            "stream: %s", e)
             finally:
                 self.resume()
+                if unstrand:
+                    self.resume()
         self.logger.info(
             "Audio output switched to %s; the card holds %.0f ms",
             device.key,
@@ -1973,7 +2105,9 @@ class AudioOutput(AudioOutputInterface):
                 if self._playing:
                     self.stream.stop_stream()
                     self._playing = False
-                self.stream.close()
+                # None after a refresh that could not open a stream.
+                if self.stream is not None:
+                    self.stream.close()
             self.pyaudio_instance.terminate()
             self.logger.info("Audio output cleaned up successfully")
         except Exception as e:
