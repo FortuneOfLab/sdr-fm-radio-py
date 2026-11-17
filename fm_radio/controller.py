@@ -1469,6 +1469,24 @@ class FMReceiverController:
                              key, path)
         return key
 
+    def refresh_audio_devices(self) -> "tuple[str | None, str | None]":
+        """List the sound devices again; (the device playing, why not
+        the one wanted, or None).
+
+        For a device plugged in while the radio runs: PortAudio only
+        sees it after starting again, so the output goes quiet for
+        what a switch takes and another 150-odd ms.  The device the
+        user chose comes back if it is there now; nothing is written to
+        the user's file, since nothing was chosen.
+
+        Raises:
+            AudioOutputError: the card would not stop, or nothing would
+                open afterwards - the radio is then silent until a
+                refresh finds a device.
+        """
+        key = self.audio_output.refresh_devices()
+        return key, self.audio_output.fallback_reason
+
     # ------------------------------------------------------------------
     # Internal methods
     # ------------------------------------------------------------------

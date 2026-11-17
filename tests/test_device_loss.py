@@ -233,6 +233,9 @@ class _FakeController:
     def set_audio_device(self, wanted) -> str:
         return wanted
 
+    def refresh_audio_devices(self):
+        return None, None
+
     def is_recording(self) -> bool:
         return self.recording
 

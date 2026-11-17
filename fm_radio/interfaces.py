@@ -189,5 +189,13 @@ class AudioOutputInterface(ABC):
         """
 
     @abstractmethod
+    def refresh_devices(self) -> "str | None":
+        """List the sound devices again, for one plugged in since.
+
+        Returns:
+            The device now playing; None for the system's default.
+        """
+
+    @abstractmethod
     def cleanup(self) -> None:
         """Stop audio streams and release resources."""

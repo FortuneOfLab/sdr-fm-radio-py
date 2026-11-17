@@ -253,6 +253,8 @@ class CommandLineInterface(threading.Thread):
         print("  'mute' / 'unmute' -> silence the output and bring it back")
         print("  'out' -> list the sound devices; 'out <n>' or 'out <name>' "
               "-> play through that one (remembered for next time)")
+        print("  'out refresh' -> look again for devices plugged in since "
+              "the start")
         print("  <station_num> or <freq_MHz> -> tune")
         print("  'q' -> quit")
 
@@ -476,14 +478,31 @@ class CommandLineInterface(threading.Thread):
         self._say_the_volume()
         return True
 
+    def _refresh_outputs(self) -> bool:
+        """'out refresh': look for devices again, then list them."""
+        try:
+            key, why = self.controller.refresh_audio_devices()
+        except AudioOutputError as e:
+            print(printable(f"Could not refresh the sound devices: {e}"))
+            return True
+        if why:
+            print(printable(f"Sound: {why}"))
+        else:
+            print(printable(
+                f"Playing through {key or 'the system default device'}."))
+        return self._cmd_output("out")
+
     def _cmd_output(self, cmd: str) -> bool:
-        """Handle 'out' (list the sound devices) and 'out <n or name>'.
+        """Handle 'out' (list the sound devices), 'out refresh' and
+        'out <n or name>'.
 
         The name keeps its case: it is matched against device names,
         which do not care, but it is also shown back in messages.
         """
-        devices = self.controller.get_audio_devices()
         parts = cmd.split(maxsplit=1)
+        if len(parts) == 2 and parts[1].strip().lower() == "refresh":
+            return self._refresh_outputs()
+        devices = self.controller.get_audio_devices()
         if len(parts) == 1:
             current = self.controller.get_audio_device()
             if not devices:
