@@ -702,3 +702,32 @@ def test_nothing_is_said_when_it_plays_where_it_was_asked(receiver_on,
     receiver = receiver_on()
     assert "Sound:" not in capsys.readouterr().err
     assert receiver.get_audio_notice() is None
+
+
+def test_a_name_several_devices_share_is_given_as_that(make_output):
+    """Not "no device is called": the user would go looking for a cable."""
+    why = make_output(device="hp-a8").fallback_reason
+    assert "No sound device is called" not in why
+    assert "'hp-a8' names 2 sound devices, not one" in why
+    assert "MME: Speakers (USB Audio HP-A8)" in why
+    assert "playing through WASAPI: Speakers (USB Audio HP-A8)" in why
+
+
+def test_a_remembered_name_is_never_called_ambiguous(make_output):
+    """Taken whole, a name names one device or none."""
+    why = make_output(device="hp-a8", exact_device=True).fallback_reason
+    assert why.startswith("No sound device is called 'hp-a8'")
+
+
+def test_a_switch_to_a_shared_name_says_which_share_it(make_output):
+    out = make_output()
+    with pytest.raises(ValueError, match="names 2 sound devices"):
+        out.switch_device("hp-a8")
+    with pytest.raises(ValueError, match="No sound device is called"):
+        out.switch_device("no such card")
+
+
+def test_out_with_a_shared_name_says_so(say):
+    said = say("out hp-a8")
+    assert "names 2 sound devices" in said
+    assert "No sound device is called" not in said

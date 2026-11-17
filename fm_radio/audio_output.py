@@ -41,6 +41,7 @@ import pyaudio
 from fm_radio import recording_meta
 from fm_radio.audio_devices import (
     OutputDevice, default_device, find_device, list_output_devices,
+    why_not_found,
 )
 from fm_radio.rate_match import FractionalResampler, RateMatcher
 from fm_radio.interfaces import AudioOutputInterface
@@ -436,11 +437,11 @@ class AudioOutput(AudioOutputInterface):
             device = find_device(self._devices, wanted, exact=exact)
             if device is not None:
                 return device
-            self._why_not.append("No sound device is called '%s'" % wanted)
+            why = why_not_found(self._devices, wanted, exact=exact)
+            self._why_not.append(why)
             self.logger.warning(
-                "No sound device is called %r, or more than one is; using "
-                "the default.  --list-audio-devices says what there is.",
-                wanted)
+                "%s; using the default.  --list-audio-devices says what "
+                "there is.", why)
         return default_device(self.pyaudio_instance, self._devices)
 
     def _open_stream(self, device: "OutputDevice | None"):
@@ -520,8 +521,7 @@ class AudioOutput(AudioOutputInterface):
         """
         device = find_device(self._devices, wanted)
         if device is None:
-            raise ValueError("no sound device is called %r, or more than "
-                             "one is" % (wanted,))
+            raise ValueError(why_not_found(self._devices, wanted))
         with self._switch_lock:
             if self._closed.is_set():
                 raise AudioOutputError("the audio output has been closed")

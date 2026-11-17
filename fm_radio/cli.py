@@ -505,9 +505,8 @@ class CommandLineInterface(threading.Thread):
             wanted = devices[number - 1]
         try:
             key = self.controller.set_audio_device(wanted)
-        except ValueError:
-            print(printable(f"No one sound device is called '{wanted}'; "
-                            "'out' lists them."))
+        except ValueError as e:
+            print(printable(f"{e}; 'out' lists them."))
             return True
         except AudioOutputError as e:
             print(printable(f"Could not switch: {e}"))

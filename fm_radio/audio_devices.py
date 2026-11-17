@@ -187,5 +187,26 @@ def find_device(devices: list[OutputDevice], wanted: str,
     folded = wanted.casefold()
     if not folded:
         return None
-    matches = [d for d in devices if folded in d.key.casefold()]
+    matches = _partly_named(devices, folded)
     return matches[0] if len(matches) == 1 else None
+
+
+def _partly_named(devices: list[OutputDevice],
+                  folded: str) -> list[OutputDevice]:
+    return [d for d in devices if folded in d.key.casefold()]
+
+
+def why_not_found(devices: list[OutputDevice], wanted: str,
+                  exact: bool = False) -> str:
+    """Why :func:`find_device` found nothing for *wanted*, to tell the user.
+
+    Not there and there more than once are different troubles: the
+    one wants the device plugged in, the other a longer name.
+    """
+    wanted = " ".join(wanted.split())
+    if not exact and wanted:
+        several = _partly_named(devices, wanted.casefold())
+        if len(several) > 1:
+            return "'%s' names %d sound devices, not one: %s" % (
+                wanted, len(several), ", ".join(d.key for d in several))
+    return "No sound device is called '%s'" % wanted
