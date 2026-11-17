@@ -466,8 +466,9 @@ class AudioOutput(AudioOutputInterface):
             start=False,
         )
 
-    def _open_what_will_open(self, device: "OutputDevice | None"):
-        """(stream, device): *device*, else the default, else PortAudio's.
+    def _open_what_will_open(self, *devices: "OutputDevice | None"):
+        """(stream, device): the first of *devices* that opens, else the
+        default, else PortAudio's.
 
         A device that lists as able to play can still refuse to open -
         another program holding it, a driver having a bad day - and the
@@ -478,7 +479,7 @@ class AudioOutput(AudioOutputInterface):
         is raised.
         """
         tried: list[OutputDevice] = []
-        for choice in (device,
+        for choice in (*devices,
                        default_device(self.pyaudio_instance, self._devices)):
             if choice is None or choice in tried:
                 continue
@@ -570,7 +571,7 @@ class AudioOutput(AudioOutputInterface):
                             AUDIO_CHANNELS, pyaudio.paFloat32)
                         self._why_not = []
                         self.stream, self._device = self._open_what_will_open(
-                            self._find_again(was))
+                            *self._find_again(was))
                     except Exception as e:
                         self._device = None
                         self.logger.error("No sound device would open after "
@@ -597,27 +598,34 @@ class AudioOutput(AudioOutputInterface):
         return self.device
 
     def _find_again(self, was: "OutputDevice | None"
-                    ) -> "OutputDevice | None":
-        """The device to open after a refresh: wanted, else as was, else
-        the default.
+                    ) -> "list[OutputDevice]":
+        """The devices to try after a refresh, in turn: the one wanted,
+        then the one that was playing.  The default comes after them.
 
-        A wanted device still missing is said in ``_why_not``, as at
-        startup; one that was playing and has gone is said too.
+        Both, not the first found: the headphones wanted may list and
+        still refuse to open, and then the device the radio was playing
+        on is where it should stay - not the default, which may be
+        somewhere else entirely.  A wanted device still missing is said
+        in ``_why_not``, as at startup; one that was playing and has
+        gone is said too.
         """
+        found: list[OutputDevice] = []
         if self._wanted is not None:
             name, exact = self._wanted
             device = find_device(self._devices, name, exact=exact)
             if device is not None:
-                return device
-            self._why_not.append(why_not_found(self._devices, name,
-                                               exact=exact))
+                found.append(device)
+            else:
+                self._why_not.append(why_not_found(self._devices, name,
+                                                   exact=exact))
         if was is not None:
             device = find_device(self._devices, was.key, exact=True)
             if device is not None:
-                return device
-            if self._wanted is None or self._wanted[0] != was.key:
+                if device not in found:
+                    found.append(device)
+            elif self._wanted is None or self._wanted[0] != was.key:
                 self._why_not.append("%s has gone" % was.key)
-        return default_device(self.pyaudio_instance, self._devices)
+        return found
 
     def switch_device(self, wanted: str) -> str:
         """Play through another device from now on; returns its key.
@@ -647,6 +655,11 @@ class AudioOutput(AudioOutputInterface):
                 raise AudioOutputError("the audio output has been closed")
             if (self._device is not None and device.key == self._device.key
                     and not self._stranded):
+                # Nothing to open, but still a choice: the device the
+                # radio fell back to, chosen by name, is now the one
+                # wanted, and a refresh is not to move it away again.
+                self._wanted = (device.key, True)
+                self.fallback_reason = None
                 return device.key
             # A refresh that found nothing to open left a hold of its
             # own; a stream opened here is the end of it.

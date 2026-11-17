@@ -953,3 +953,54 @@ def test_out_refresh_says_when_nothing_would_open(say, fake_sound_devices):
     fake_sound_devices.refuse_to_open.update({HP_MME, HP_WASAPI, REALTEK,
                                               None})
     assert "Could not refresh the sound devices" in say("out refresh")
+
+
+def test_wanted_but_will_not_open_stays_where_it_was_not_the_default(
+        make_output, fake_sound_devices):
+    """Listing is not opening: the radio stays on what was playing."""
+    # WASAPI's default is the second card for the start, so the radio
+    # falls back there, and is the speakers again by the refresh.
+    fake_sound_devices.host_apis = [("MME", 0), ("Windows WASAPI", REALTEK),
+                                    ("Windows WDM-KS", 4)]
+    out = make_output(device="WASAPI: Headphones (FOSTEX)", exact_device=True)
+    assert out.device == "WASAPI: Realtek Digital Output"
+    fake_sound_devices.host_apis = [("MME", 0), ("Windows WASAPI", HP_WASAPI),
+                                    ("Windows WDM-KS", 4)]
+    fake_sound_devices.refuse_to_open.add(plug_in(fake_sound_devices))
+
+    assert out.refresh_devices() == "WASAPI: Realtek Digital Output"
+    assert "Could not open WASAPI: Headphones (FOSTEX)" in out.fallback_reason
+    assert "playing through WASAPI: Realtek Digital Output" in (
+        out.fallback_reason)
+
+
+def test_choosing_the_device_fallen_back_to_makes_it_the_one_wanted(
+        make_output, fake_sound_devices):
+    """Picked by name, it is not to be moved off by a refresh."""
+    out = make_output(device="WASAPI: Headphones (FOSTEX)", exact_device=True)
+    assert out.device == "WASAPI: Speakers (USB Audio HP-A8)"
+    stream = out.stream
+
+    assert out.switch_device("WASAPI: Speakers (USB Audio HP-A8)") == (
+        "WASAPI: Speakers (USB Audio HP-A8)")
+    assert out.stream is stream          # nothing to open
+    assert out.fallback_reason is None
+
+    plug_in(fake_sound_devices)
+    assert out.refresh_devices() == "WASAPI: Speakers (USB Audio HP-A8)"
+    assert out.fallback_reason is None
+
+
+def test_out_choosing_the_device_playing_is_kept_through_a_refresh(
+        receiver_on, no_user_config, fake_sound_devices, capsys):
+    """The case as the reviewer found it: 'out' then 'out refresh'."""
+    from fm_radio.cli import CommandLineInterface
+    st.remember_audio_device("WASAPI: Headphones (FOSTEX)", no_user_config)
+    receiver = receiver_on()
+    interface = CommandLineInterface(receiver)
+    interface._dispatch("out 2")
+    plug_in(fake_sound_devices)
+    interface._dispatch("out refresh")
+    assert receiver.get_audio_device() == "WASAPI: Speakers (USB Audio HP-A8)"
+    assert st.configured_audio_device(no_user_config) == (
+        "WASAPI: Speakers (USB Audio HP-A8)")
