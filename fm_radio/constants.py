@@ -380,6 +380,15 @@ AUDIO_RATE_MATCH_MARGIN_SEC = 0.03
 # would take ten minutes to bleed it off at the rate limit, a second
 # behind the station all the while.
 AUDIO_TRIM_EXCESS_SEC = 0.25
+# Added to the target for a card that keeps what it takes when it
+# starts (WASAPI).  An MME stream settles at its preroll, about 40 ms
+# above the least target, and that headroom is what has ridden out the
+# SDR's dips - blocks held up and then delivered at once, 4500 frames
+# at a time on the hardware.  A WASAPI stream settles at the target
+# itself; at 5024 frames one such dip left 838 and an underrun.  This
+# gives back half the headroom: 125 ms queued against MME's 144, about
+# 210 ms behind the station in all against MME's 250.
+AUDIO_KEPT_CARD_MARGIN_SEC = 0.02
 # Listening volume, in percent of full level.  Applied to what the card
 # plays and to nothing else: the recordings, the level meters and the
 # telemetry all see the receiver's own level.  100 is unity gain, which

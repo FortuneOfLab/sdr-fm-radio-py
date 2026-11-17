@@ -221,6 +221,18 @@ class _FakeController:
     def set_muted(self, muted) -> bool:
         return bool(muted)
 
+    def get_audio_devices(self) -> list:
+        return []
+
+    def get_audio_device(self):
+        return None
+
+    def get_audio_notice(self):
+        return None
+
+    def set_audio_device(self, wanted) -> str:
+        return wanted
+
     def is_recording(self) -> bool:
         return self.recording
 

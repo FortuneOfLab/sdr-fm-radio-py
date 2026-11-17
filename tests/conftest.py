@@ -55,14 +55,65 @@ class _FakeStream:
     def get_output_latency(self) -> float:
         return self.output_latency
 
-    def close(self) -> None: ...
+    def close(self) -> None:
+        self.closed = True
 
 
 class _FakePyAudio:
+    """PortAudio with whatever sound devices a test gives it.
+
+    None by default, which is a machine PortAudio lists nothing on:
+    the output then plays on PortAudio's default, as it always did.
+    A test that is about devices sets the class attributes - the
+    ``fake_sound_devices`` fixture does, and puts them back.
+    """
+
+    #: [(PortAudio's name for the API, index of its default device)]
+    host_apis: list = []
+    #: [(api index, device name, output channels, rates it plays)]
+    devices: list = []
+    #: Device indexes that list but will not open.
+    refuse_to_open: set = set()
+    #: The keyword arguments of every open, in order.
+    opened: list = []
+
     def open(self, **kwargs):
-        return _FakeStream(start=kwargs.get("start", True))
+        index = kwargs.get("output_device_index")
+        if index in type(self).refuse_to_open:
+            raise OSError(-9996, "Invalid output device (fake)")
+        type(self).opened.append(dict(kwargs))
+        stream = _FakeStream(start=kwargs.get("start", True))
+        stream.device_index = index
+        return stream
 
     def terminate(self) -> None: ...
+
+    def get_device_count(self) -> int:
+        return len(type(self).devices)
+
+    def get_device_info_by_index(self, index: int) -> dict:
+        api, name, channels, _ = type(self).devices[index]
+        return {"index": index, "name": name, "hostApi": api,
+                "maxOutputChannels": channels}
+
+    def get_host_api_count(self) -> int:
+        return len(type(self).host_apis)
+
+    def get_host_api_info_by_index(self, index: int) -> dict:
+        name, default = type(self).host_apis[index]
+        return {"index": index, "name": name, "defaultOutputDevice": default}
+
+    def get_default_output_device_info(self) -> dict:
+        if not type(self).host_apis:
+            raise OSError(-9996, "No default output device (fake)")
+        return self.get_device_info_by_index(type(self).host_apis[0][1])
+
+    def is_format_supported(self, rate, output_device=None,
+                            output_channels=None, output_format=None):
+        _, _, channels, rates = type(self).devices[output_device]
+        if rate not in rates or (output_channels or 0) > channels:
+            raise ValueError("Invalid sample rate (fake)")
+        return True
 
 
 def _install_fake_pyaudio() -> None:
@@ -271,6 +322,33 @@ def stalling_samples():
 @pytest.fixture
 def rng() -> np.random.Generator:
     return np.random.default_rng(0)
+
+
+@pytest.fixture
+def fake_sound_devices(monkeypatch):
+    """A Windows machine's sound devices, as this one listed them.
+
+    The same headphone amplifier under MME (the system default), WASAPI
+    and WDM-KS; a second card under WASAPI; and a headset that WASAPI
+    mixes at 32 kHz, which cannot play the receiver's 48.  Returns the
+    fake PyAudio class, whose ``opened`` records each open and whose
+    ``refuse_to_open`` a test can add device indexes to.
+    """
+    import fm_radio.audio_devices as audio_devices
+    fake = sys.modules["pyaudio"].PyAudio
+    monkeypatch.setattr(audio_devices, "_ON_WINDOWS", True)
+    monkeypatch.setattr(fake, "host_apis", [
+        ("MME", 0), ("Windows WASAPI", 1), ("Windows WDM-KS", 4)])
+    monkeypatch.setattr(fake, "devices", [
+        (0, "Speakers (USB Audio HP-A8)", 2, {44100, 48000}),     # 0
+        (1, "Speakers (USB Audio HP-A8)", 2, {48000}),            # 1
+        (1, "Realtek Digital Output", 2, {48000}),                # 2
+        (1, "Headset (Wireless Adaptor)", 2, {32000}),            # 3
+        (2, "Speakers (USB Audio Wave)", 2, {44100, 48000}),      # 4
+    ])
+    monkeypatch.setattr(fake, "refuse_to_open", set())
+    monkeypatch.setattr(fake, "opened", [])
+    return fake
 
 
 @pytest.fixture

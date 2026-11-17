@@ -75,6 +75,27 @@ python fm_receiver.py --volume 40
 volume only affects what you hear. Recordings are always made at full level.
 Add `--mute` to start muted.
 
+#### Sound device
+
+```bash
+python fm_receiver.py --list-audio-devices
+python fm_receiver.py --audio-device "WASAPI: Speakers"
+```
+
+The default is the system's default output under **WASAPI** where there is one.
+On Windows, MME, the API PortAudio picks by default, holds about 100 ms more
+audio, so the radio would play further behind the broadcast. The list shows
+each device under each API (MME, DirectSound, WASAPI) that can play 48 kHz
+stereo. `--audio-device` takes the full name, or any part of it that matches
+only one device, and applies to that run only.
+
+To change device while the radio is playing, use the **Output** list in the
+window, or `out` on the command line. The output goes quiet for about a quarter
+of a second while it switches. The choice is saved as `audio_device` in your
+`stations.toml`, next to `area`, and used from then on. If that device is gone
+next time (for example, the headphones are unplugged), the default is used and
+a warning says so.
+
 ### Interactive Commands (while running)
 
 - `list` → Show the preset stations (tunable by number)
@@ -90,6 +111,8 @@ Add `--mute` to start muted.
 - `vol <0-100>` / `vol +` / `vol -` → Listening volume (`vol` alone shows it)
 - `mute` / `unmute` → Silence the output and bring it back at the same volume
   (`mute` alone toggles; setting a volume also unmutes)
+- `out` → List the sound devices, with the one playing marked `*`
+- `out <n>` / `out <name>` → Play through that device (remembered for next time)
 - `<station_num>` or `<freq_MHz>` → Tune to a station
 - `q` → Quit the program
 

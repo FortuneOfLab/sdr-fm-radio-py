@@ -86,6 +86,7 @@ import logging
 import math
 import os
 import re
+import threading
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Iterable
@@ -96,6 +97,14 @@ except ImportError:                                     # pragma: no cover
     tomllib = None                                      # type: ignore[assignment]
 
 logger = logging.getLogger('fm_receiver.stations')
+
+#: Held from reading the user's file to putting the new one in place.
+#: The area and the sound device are written from different threads -
+#: the window's, and the one switching the device - and two writers
+#: each reading the old file and each putting back their own edit of
+#: it lose whichever went first.  They would also share the ``.new``
+#: file beside it.
+_USER_FILE_LOCK = threading.Lock()
 
 DATA_PATH: Path = Path(__file__).resolve().parent / "data" / "stations.json"
 
@@ -228,8 +237,16 @@ def user_config_path() -> Path:
 #: is the same setting - and a file that says it that way has to be
 #: found rather than written a second time, which would be two of
 #: the same key and a file tomllib refuses whole.
-_AREA_LINE = re.compile(r"""^\s*(?:area|"area"|'area')\s*=""")
 _TABLE_LINE = re.compile(r"^\s*\[")
+
+
+def _key_line(key: str) -> "re.Pattern[str]":
+    """A line that sets top-level *key*, quoted or not; see _AREA_LINE."""
+    k = re.escape(key)
+    return re.compile(r"""^\s*(?:%s|"%s"|'%s')\s*=""" % (k, k, k))
+
+
+_AREA_LINE = _key_line("area")
 
 #: The same line taken apart, so that the value can be changed and
 #: nothing else on it.  What the user wrote around the value is
@@ -238,10 +255,16 @@ _TABLE_LINE = re.compile(r"^\s*\[")
 #: because what is left still parses.  A value this cannot take
 #: apart, a multi-line string or one with escapes in it, is a line
 #: to leave alone.
-_AREA_VALUE = re.compile(
-    r"""^(?P<before>\s*(?:area|"area"|'area')\s*=\s*)"""
-    r"""(?P<value>"[^"\\\n]*"|'[^'\n]*')"""
-    r"""(?P<after>[^\S\r\n]*(?:\#[^\r\n]*)?\r?\n?)$""")
+def _key_value(key: str) -> "re.Pattern[str]":
+    """The line setting *key* taken apart; see _AREA_VALUE."""
+    k = re.escape(key)
+    return re.compile(
+        r"""^(?P<before>\s*(?:%s|"%s"|'%s')\s*=\s*)""" % (k, k, k)
+        + r"""(?P<value>"[^"\\\n]*"|'[^'\n]*')"""
+        r"""(?P<after>[^\S\r\n]*(?:\#[^\r\n]*)?\r?\n?)$""")
+
+
+_AREA_VALUE = _key_value("area")
 
 
 class WillNotEdit(Exception):
@@ -296,7 +319,60 @@ def remember_area(area: str, user_path: Path | str | None = None) -> Path:
     if area not in AREAS:
         raise ValueError("%r is not an area; the areas are %s"
                          % (area, ", ".join(AREAS)))
+    return _remember("area", area, user_path)
+
+
+def remember_audio_device(device: str,
+                          user_path: Path | str | None = None) -> Path:
+    """Write the sound device to play through into the user's file.
+
+    As :func:`remember_area` writes the area, and with the same care:
+    one top-level line, ``audio_device = "WASAPI: Speakers (...)"``,
+    replaced if it is there and put at the top if not.
+
+    Raises:
+        ValueError: for an empty name.
+        WillNotEdit, OSError: as :func:`remember_area`.  A name with
+            both kinds of quote in it is one this will not write.
+    """
+    if not device or not device.strip():
+        raise ValueError("a sound device needs a name")
+    return _remember("audio_device", device, user_path)
+
+
+def _toml_string(value: str) -> "str | None":
+    """*value* as a TOML string this file's line pattern can take apart.
+
+    A basic string when there is nothing in it to escape, a literal
+    one when there is no single quote, and None when it has both -
+    escaping would make a line _key_value cannot change next time.
+    """
+    if any(c in value for c in '"\\') or any(ord(c) < 32 for c in value):
+        if "'" in value or any(ord(c) < 32 for c in value):
+            return None
+        return "'%s'" % value
+    return '"%s"' % value
+
+
+def _remember(key: str, value: str, user_path: Path | str | None) -> Path:
+    """Set top-level *key* to *value* in the user's file; see remember_area.
+
+    One at a time; see _USER_FILE_LOCK.
+    """
+    with _USER_FILE_LOCK:
+        return _remember_locked(key, value, user_path)
+
+
+def _remember_locked(key: str, value: str,
+                     user_path: Path | str | None) -> Path:
+    """Body of :func:`_remember`; the caller holds _USER_FILE_LOCK."""
+    quoted = _toml_string(value)
     path = Path(user_path) if user_path is not None else user_config_path()
+    if quoted is None:
+        raise WillNotEdit(
+            "%r has both kinds of quote in it, so it is not written to %s"
+            % (value, path))
+    setting = "%s = %s" % (key, quoted)
     try:
         # newline="" so that the line endings come back as they are
         # written.  Reading in the usual way turns every CRLF into a
@@ -309,26 +385,27 @@ def remember_area(area: str, user_path: Path | str | None = None) -> Path:
     except UnicodeError as exc:
         raise WillNotEdit(
             "%s is not UTF-8 (%s); save it as UTF-8 and add at the top: "
-            'area = "%s"' % (path, exc, area)) from exc
+            "%s" % (path, exc, setting)) from exc
     # A byte order mark belongs at the start of the file and nowhere
     # else; inserting a line above it would leave it in the middle.
     mark = "\ufeff" if raw.startswith("\ufeff") else ""
     body = raw[len(mark):]
 
-    already = _has_a_top_level_area(body)
-    at = _where_the_area_line_is(body)
+    already = _has_a_top_level(body, key)
+    at = _where_the_line_is(body, key)
     if already is None and body.strip():
         raise WillNotEdit(
             "%s cannot be read as TOML, so it will not be written to; "
-            "add: area = \"%s\"" % (path, area))
+            "add: %s" % (path, setting))
     if already and at is None:
         raise WillNotEdit(
-            "%s sets an area somewhere this cannot find; change it by "
-            "hand to: area = \"%s\"" % (path, area))
+            "%s sets %s somewhere this cannot find; change it by "
+            "hand to: %s" % (path, "an area" if key == "area" else key,
+                             setting))
     if at is not None and not already:
         raise WillNotEdit(
             "a line in %s looks like the setting and is not it; add at "
-            "the top: area = \"%s\"" % (path, area))
+            "the top: %s" % (path, setting))
 
     lines = body.splitlines(keepends=True)
     if at is None:
@@ -336,27 +413,27 @@ def remember_area(area: str, user_path: Path | str | None = None) -> Path:
         # it if there is anything for it to run into.  In the line
         # ending the file already uses.
         ending = "\r\n" if "\r\n" in body else "\n"
-        say = 'area = "%s"%s' % (area, ending)
+        say = "%s%s" % (setting, ending)
         lines.insert(0, say if not lines else say + ending)
     else:
-        taken_apart = _AREA_VALUE.match(lines[at])
+        taken_apart = _key_value(key).match(lines[at])
         if taken_apart is None:
             raise WillNotEdit(
-                "the area in %s is written in a way this cannot change "
-                'without rewriting the line; change it by hand to: '
-                'area = "%s"' % (path, area))
+                "the %s in %s is written in a way this cannot change "
+                "without rewriting the line; change it by hand to: "
+                "%s" % (key, path, setting))
         # Only the value.  Whatever the user put around it - the
         # spacing they chose, a comment saying why - stays.
-        lines[at] = "%s\"%s\"%s" % (taken_apart.group("before"), area,
-                                     taken_apart.group("after"))
+        lines[at] = "%s%s%s" % (taken_apart.group("before"), quoted,
+                                taken_apart.group("after"))
     now = mark + "".join(lines)
 
-    if _reads_back_as(now, area) is False:
+    if _reads_back_as(now, key, value) is False:
         raise WillNotEdit(
             "editing %s would not have said what it was meant to - a byte "
             "order mark does this, and tomllib will not read one either "
-            "way.  It has been left alone; add at the top: area = \"%s\""
-            % (path, area))
+            "way.  It has been left alone; add at the top: %s"
+            % (path, setting))
 
     path.parent.mkdir(parents=True, exist_ok=True)
     # Written beside and moved into place: a half-written stations.toml
@@ -366,12 +443,12 @@ def remember_area(area: str, user_path: Path | str | None = None) -> Path:
     with spare.open("w", encoding="utf-8", newline="") as handle:
         handle.write(now)
     os.replace(spare, path)
-    logger.info("Wrote area %s to %s", area, path)
+    logger.info("Wrote %s %s to %s", key.replace("_", " "), value, path)
     return path
 
 
-def _reads_back_as(text: str, area: str) -> "bool | None":
-    """Whether *text* is TOML that sets exactly this area.
+def _reads_back_as(text: str, key: str, value: str) -> "bool | None":
+    """Whether *text* is TOML that sets top-level *key* to exactly *value*.
 
     The last check before anything is written, and the one that
     covers what the line search cannot see: a key the search
@@ -382,13 +459,13 @@ def _reads_back_as(text: str, area: str) -> "bool | None":
     if tomllib is None:
         return None
     try:
-        return tomllib.loads(text).get("area") == area
+        return tomllib.loads(text).get(key) == value
     except Exception:
         return False
 
 
-def _has_a_top_level_area(body: str) -> "bool | None":
-    """Whether the file sets a top-level ``area``, or None if unknown.
+def _has_a_top_level(body: str, key: str) -> "bool | None":
+    """Whether the file sets a top-level *key*, or None if unknown.
 
     None means the question could not be answered: the text does not
     parse, or this interpreter has no tomllib.  Either way it is not
@@ -400,15 +477,16 @@ def _has_a_top_level_area(body: str) -> "bool | None":
         parsed = tomllib.loads(body)
     except Exception:
         return None
-    return isinstance(parsed, dict) and "area" in parsed
+    return isinstance(parsed, dict) and key in parsed
 
 
-def _where_the_area_line_is(body: str) -> "int | None":
-    """The line that sets a top-level area, by the look of it."""
+def _where_the_line_is(body: str, key: str) -> "int | None":
+    """The line that sets top-level *key*, by the look of it."""
+    pattern = _AREA_LINE if key == "area" else _key_line(key)
     for index, line in enumerate(body.splitlines()):
         if _TABLE_LINE.match(line):
             return None                 # everything after here is a table's
-        if _AREA_LINE.match(line):
+        if pattern.match(line):
             return index
     return None
 
@@ -786,6 +864,34 @@ def in_area(stations: Iterable[Station], area: str) -> list[Station]:
     """
     folded = area.strip().casefold()
     return [s for s in stations if s.area.casefold() == folded]
+
+
+def configured_audio_device(user_path: Path | str | None = None,
+                            warn: Reporter | None = None) -> str | None:
+    """The sound device the user's file says to play through, or None.
+
+    Whatever name is there: whether it names a device on this machine
+    is the audio output's question, and one that names nothing - the
+    headphones are unplugged today - gets the default with a warning
+    there.  A value that is not a string is reported and ignored.
+    """
+    report = _make_reporter(warn)
+    path = Path(user_path) if user_path is not None else user_config_path()
+    try:
+        if not path.exists():
+            return None
+    except OSError as exc:
+        report(f"Could not check for {path}: {exc}")
+        return None
+    config = _read_user_toml(path, report)
+    wanted = config.get("audio_device") if config else None
+    if wanted is None:
+        return None
+    if not isinstance(wanted, str) or not wanted.strip():
+        report("stations.toml: audio_device must be the name of one, "
+               "found %r" % (wanted,))
+        return None
+    return wanted.strip()
 
 
 def home_area(user_path: Path | str | None = None,

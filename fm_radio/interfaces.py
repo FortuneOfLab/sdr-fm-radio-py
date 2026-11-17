@@ -178,5 +178,16 @@ class AudioOutputInterface(ABC):
         """
 
     @abstractmethod
+    def switch_device(self, wanted: str) -> str:
+        """Play through another sound device from now on.
+
+        Returns:
+            The device's full name.
+
+        Raises:
+            ValueError: if *wanted* names no device, or several.
+        """
+
+    @abstractmethod
     def cleanup(self) -> None:
         """Stop audio streams and release resources."""
